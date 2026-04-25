@@ -144,6 +144,53 @@ def health():
     return {"ok": True}
 
 
+@app.post("/unload")
+def unload():
+    """Release the cached ``LLM`` instance, freeing GPU memory.
+
+    No-op if nothing is loaded. Returns the path of whatever was
+    unloaded (or ``None``) so the caller can confirm.
+    """
+    global _llm, _llm_path
+    with _llm_lock:
+        path = _llm_path
+        if _llm is not None:
+            try:
+                _llm.close()
+            except Exception:
+                pass
+            _llm = None
+            _llm_path = None
+        return {"unloaded": path}
+
+
+@app.post("/tokenize")
+async def tokenize(req: Request):
+    """Return the true token count for ``text`` against the given model.
+
+    Body: ``{"model_path": "...", "text": "..."}``. Loads the model on
+    demand using the same single-slot cache as ``/chat`` so a tokenize
+    call doesn't evict an LLM the user is mid-conversation with.
+    """
+    body = await req.json()
+    model_path = body.get("model_path")
+    text = body.get("text", "")
+    if not model_path:
+        raise HTTPException(400, "model_path required")
+    if not isinstance(text, str):
+        raise HTTPException(400, "text must be a string")
+    if not text:
+        return {"count": 0}
+
+    llm = _get_llm(model_path)
+    # vocab.tokenize is the cyllama primitive used internally by
+    # _generate_stream. add_special=False / parse_special=False keeps
+    # the count comparable to "raw content tokens" rather than a
+    # template-formatted prompt.
+    tokens = llm.vocab.tokenize(text, add_special=False, parse_special=False)
+    return {"count": len(tokens)}
+
+
 _VALID_ROLES = {"system", "user", "assistant"}
 
 

@@ -10,4 +10,14 @@ contextBridge.exposeInMainWorld("cyllama", {
     save:   (chat) => ipcRenderer.invoke("chats:save", chat),
     delete: (id) => ipcRenderer.invoke("chats:delete", id),
   },
+  log: {
+    recent: () => ipcRenderer.invoke("log:recent"),
+    // Returns an unsubscribe function. The wrapper hides the IPC
+    // event object so the renderer only sees the entry payload.
+    subscribe: (handler) => {
+      const fn = (_e, entry) => handler(entry);
+      ipcRenderer.on("sidecar:log", fn);
+      return () => ipcRenderer.removeListener("sidecar:log", fn);
+    },
+  },
 });

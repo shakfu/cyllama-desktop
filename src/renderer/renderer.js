@@ -31,7 +31,7 @@ let messages = [];
 // turn. ``createdAt`` is set at save time. Tokens / messageCount are
 // derived from ``messages``; we cache the last-seen sidebar list to
 // avoid disk hits on every render.
-let activeChat = { id: null, title: "New Chat", createdAt: 0, modelPath: "" };
+let activeChat = { id: null, title: "New Chat", createdAt: 0, modelPath: "", systemPrompt: "" };
 let chatList = [];
 
 const ACTIVE_CHAT_KEY = "active_chat_id";
@@ -53,10 +53,37 @@ function deriveTitle(msgs) {
   return t || "New Chat";
 }
 
-function tokenCount(msgs) {
+// Fast client-side estimate (chars/4). Used only when no real count is
+// available yet -- e.g. during the live stream before the turn completes,
+// or as a fallback when no model is loaded.
+function tokenCountEstimate(msgs) {
   let total = 0;
   for (const m of msgs || []) total += Math.max(1, Math.round((m.content || "").length / 4));
   return total;
+}
+
+// True token count via the sidecar's tokenizer. Concatenates message
+// contents with a delimiter so we count something representative of the
+// joined history without paying for full-template formatting (which
+// would also include role tokens we don't expose to the user).
+async function tokenizeMessages(msgs) {
+  if (!sidecar || !modelPath || !msgs || msgs.length === 0) return 0;
+  const text = msgs.map((m) => m.content).join("\n\n");
+  try {
+    const res = await fetch(`http://127.0.0.1:${sidecar.port}/tokenize`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "authorization": `Bearer ${sidecar.token}`,
+      },
+      body: JSON.stringify({ model_path: modelPath, text }),
+    });
+    if (!res.ok) return tokenCountEstimate(msgs);
+    const j = await res.json();
+    return Number(j.count) || 0;
+  } catch {
+    return tokenCountEstimate(msgs);
+  }
 }
 
 /* ----------------------------------------------------------------
@@ -210,7 +237,16 @@ function newChat() {
   if (inFlight) return;            // ignore mid-stream
   messages = [];
   approxTokens = 0;
-  activeChat = { id: null, title: "New Chat", createdAt: 0, modelPath: "" };
+  // Seed a fresh working chat with the user's saved default system
+  // prompt. Editing the textarea on this unsaved chat updates the
+  // default; the value gets snapshotted into the chat's JSON on first
+  // save so future edits to the default don't retroactively change
+  // older chats.
+  activeChat = {
+    id: null, title: "New Chat", createdAt: 0,
+    modelPath: "", systemPrompt: getDefaultSystemPrompt(),
+  };
+  setSystemPromptUI(activeChat.systemPrompt);
   clearLog();
   showEmptyState();
   saveActiveChatId();
@@ -251,6 +287,9 @@ function makeExchange(prompt) {
   dismissEmpty();
   const wrap = document.createElement("article");
   wrap.className = "exchange";
+  // Stash the raw user prompt on the DOM so regenerate can re-send it
+  // without re-parsing the rendered markdown.
+  wrap.dataset.userPrompt = prompt;
 
   const userBlock = document.createElement("div");
   userBlock.className = "user-block";
@@ -274,12 +313,83 @@ function makeExchange(prompt) {
   asstBlock.appendChild(asstRole);
   asstBlock.appendChild(asstText);
 
+  // Hover actions on the assistant block (copy / regenerate). The
+  // raw streamed content is stashed on ``wrap.dataset.asstRaw`` by
+  // the send loop so copy yields the original markdown rather than
+  // the rendered HTML's textContent (which loses code fences).
+  attachMessageActions(asstBlock, () => wrap.dataset.asstRaw || "", wrap);
+
   wrap.appendChild(userBlock);
   wrap.appendChild(asstBlock);
   logEl.appendChild(wrap);
   if (stickyScroll) logEl.scrollTop = logEl.scrollHeight;
 
   return { wrap, asstText };
+}
+
+function attachMessageActions(host, getText, exchangeEl) {
+  const actions = document.createElement("div");
+  actions.className = "msg-actions";
+
+  const copyBtn = document.createElement("button");
+  copyBtn.type = "button";
+  copyBtn.className = "msg-action";
+  copyBtn.title = "Copy";
+  copyBtn.innerHTML = '<svg><use href="#i-copy"/></svg>';
+  copyBtn.addEventListener("click", async () => {
+    try {
+      await navigator.clipboard.writeText(getText());
+      copyBtn.classList.add("ok");
+      setTimeout(() => copyBtn.classList.remove("ok"), 900);
+    } catch (e) {
+      errorLine(`copy: ${e.message}`);
+    }
+  });
+  actions.appendChild(copyBtn);
+
+  const regenBtn = document.createElement("button");
+  regenBtn.type = "button";
+  regenBtn.className = "msg-action";
+  regenBtn.title = "Regenerate";
+  regenBtn.innerHTML = '<svg><use href="#i-refresh"/></svg>';
+  regenBtn.addEventListener("click", () => regenerateFromExchange(exchangeEl));
+  actions.appendChild(regenBtn);
+
+  host.appendChild(actions);
+}
+
+function regenerateFromExchange(exchangeEl) {
+  if (inFlight) return;
+  if (!exchangeEl || !exchangeEl.parentNode) return;
+  const userPrompt = exchangeEl.dataset.userPrompt || "";
+  if (!userPrompt) return;
+
+  // Trim history back to before this exchange's user turn. Each
+  // exchange owns one user + (optionally) one assistant message.
+  const exchanges = Array.from(logEl.querySelectorAll(".exchange"));
+  const idx = exchanges.indexOf(exchangeEl);
+  if (idx < 0) return;
+
+  // Find the message-list index of this exchange's user message. Walk
+  // messages, counting "user" entries, and stop at the idx-th user.
+  let userMsgIdx = -1;
+  let userCount = 0;
+  for (let i = 0; i < messages.length; i++) {
+    if (messages[i].role !== "user") continue;
+    if (userCount === idx) { userMsgIdx = i; break; }
+    userCount++;
+  }
+  if (userMsgIdx < 0) return;
+
+  // Drop everything from this user turn onward and remove all
+  // exchange DOM nodes from this one to the end.
+  messages = messages.slice(0, userMsgIdx);
+  for (let i = exchanges.length - 1; i >= idx; i--) exchanges[i].remove();
+  approxTokens = tokenCountEstimate(messages);
+
+  // Replay this exchange's user prompt through the normal send path.
+  promptEl.value = userPrompt;
+  send();
 }
 
 function transientLine(text, cls) {
@@ -304,6 +414,101 @@ logEl.addEventListener("scroll", () => {
 }, { passive: true });
 
 /* ----------------------------------------------------------------
+   Console (sidecar log) panel
+   ---------------------------------------------------------------- */
+const consoleEl    = document.getElementById("console");
+const consoleBody  = document.getElementById("consoleBody");
+const consoleClear = document.getElementById("consoleClear");
+const consoleClose = document.getElementById("consoleClose");
+const navConsole   = document.getElementById("navConsole");
+
+function consoleVisible() {
+  return consoleEl && !consoleEl.hidden;
+}
+
+function fmtTime(t) {
+  const d = new Date(t);
+  return d.toTimeString().slice(0, 8);
+}
+
+function appendLogLine(entry) {
+  if (!consoleBody) return;
+  const empty = consoleBody.querySelector(".log-empty");
+  if (empty) empty.remove();
+  const div = document.createElement("div");
+  div.className = "log-line" + (entry.s === "err" ? " err" : "");
+  const ts = document.createElement("span");
+  ts.className = "ts";
+  ts.textContent = fmtTime(entry.t);
+  div.appendChild(ts);
+  div.appendChild(document.createTextNode(entry.line));
+  consoleBody.appendChild(div);
+  // Cap visible nodes -- the in-process ring buffer is 2000 lines, so
+  // mirror that ceiling here to avoid DOM bloat on long sessions.
+  while (consoleBody.childElementCount > 2000) consoleBody.firstChild.remove();
+  // Auto-scroll only when the user is already near the bottom; lets
+  // them scroll up to read without fighting them.
+  const nearBottom = consoleBody.scrollHeight - consoleBody.scrollTop - consoleBody.clientHeight < 40;
+  if (nearBottom) consoleBody.scrollTop = consoleBody.scrollHeight;
+}
+
+async function openConsole() {
+  if (!consoleEl) return;
+  consoleEl.hidden = false;
+  consoleEl.setAttribute("aria-hidden", "false");
+  if (navConsole) navConsole.classList.add("active");
+  // Lazily populate on first open.
+  if (!consoleBody.dataset.loaded) {
+    consoleBody.dataset.loaded = "1";
+    try {
+      const recent = await window.cyllama.log.recent();
+      if (!recent || recent.length === 0) {
+        const e = document.createElement("div");
+        e.className = "log-empty";
+        e.textContent = "(no output yet)";
+        consoleBody.appendChild(e);
+      } else {
+        for (const entry of recent) appendLogLine(entry);
+      }
+    } catch (e) {
+      errorLine(`load log: ${e.message}`);
+    }
+    consoleBody.scrollTop = consoleBody.scrollHeight;
+  }
+}
+
+function closeConsole() {
+  if (!consoleEl) return;
+  consoleEl.hidden = true;
+  consoleEl.setAttribute("aria-hidden", "true");
+  if (navConsole) navConsole.classList.remove("active");
+}
+
+function toggleConsole() {
+  if (consoleVisible()) closeConsole();
+  else openConsole();
+}
+
+if (navConsole) navConsole.addEventListener("click", toggleConsole);
+if (consoleClose) consoleClose.addEventListener("click", closeConsole);
+if (consoleClear) consoleClear.addEventListener("click", () => {
+  if (consoleBody) consoleBody.innerHTML = "";
+});
+
+// Subscribe once at module load so live lines accumulate even when the
+// panel is closed (matches user expectation that the log "remembers"
+// what happened while you weren't looking).
+if (window.cyllama && window.cyllama.log && typeof window.cyllama.log.subscribe === "function") {
+  window.cyllama.log.subscribe((entry) => {
+    // Skip live updates until the user has opened the panel for the
+    // first time. The main-process ring buffer holds the recent
+    // history; first-open backfills from there to catch up.
+    if (!consoleBody || !consoleBody.dataset.loaded) return;
+    appendLogLine(entry);
+  });
+}
+
+/* ----------------------------------------------------------------
    Sampling parameters (persisted)
    ---------------------------------------------------------------- */
 const PARAM_DEFAULTS = {
@@ -320,9 +525,11 @@ const PARAM_KEYS = Object.keys(PARAM_DEFAULTS);
 const PARAM_INT_KEYS = new Set(["top_k", "max_tokens", "seed"]);
 const PARAM_CSV_KEYS = new Set(["stop_sequences"]);
 
-// System prompt is structurally a message, not a sampling knob. It rides
-// at the top level of the request body, persisted under its own
-// localStorage key so a single legacy "params" blob can't pollute it.
+// Default system prompt used when a brand-new chat starts. Per-chat
+// overrides live inside the chat's JSON file; this localStorage key
+// is the *seed* for new chats and the global fallback when no chat is
+// active. Editing the textarea on the unsaved working chat also
+// updates this key so the next "New chat" inherits the change.
 const SYSTEM_PROMPT_STORAGE_KEY = "system_prompt";
 
 function paramEl(key) { return document.getElementById(`p-${key}`); }
@@ -384,18 +591,34 @@ function getSystemPrompt() {
   return el.value.trim();
 }
 
-function loadSystemPrompt() {
+function setSystemPromptUI(value) {
   const el = document.getElementById("p-system_prompt");
   if (!el) return;
+  el.value = value || "";
+}
+
+function getDefaultSystemPrompt() {
+  try { return localStorage.getItem(SYSTEM_PROMPT_STORAGE_KEY) || ""; }
+  catch { return ""; }
+}
+
+function setDefaultSystemPrompt(value) {
   try {
-    const v = localStorage.getItem(SYSTEM_PROMPT_STORAGE_KEY);
-    if (v != null) el.value = v;
+    if (value) localStorage.setItem(SYSTEM_PROMPT_STORAGE_KEY, value);
+    else localStorage.removeItem(SYSTEM_PROMPT_STORAGE_KEY);
   } catch {}
 }
-function saveSystemPrompt() {
-  const el = document.getElementById("p-system_prompt");
-  if (!el) return;
-  try { localStorage.setItem(SYSTEM_PROMPT_STORAGE_KEY, el.value); } catch {}
+
+// Editing the textarea updates the active chat's prompt in memory so
+// the next request reflects the change immediately. If we're on the
+// unsaved working chat, also update the default seed in localStorage
+// so a future "New chat" inherits the edit. For a saved chat, the
+// new value persists on the next auto-save (after the next completed
+// turn).
+function onSystemPromptInput() {
+  const v = getSystemPrompt();
+  activeChat.systemPrompt = v;
+  if (!activeChat.id) setDefaultSystemPrompt(v);
 }
 
 function resetParams() {
@@ -420,7 +643,7 @@ function bindParams() {
     });
   }
   const sysEl = document.getElementById("p-system_prompt");
-  if (sysEl) sysEl.addEventListener("input", saveSystemPrompt);
+  if (sysEl) sysEl.addEventListener("input", onSystemPromptInput);
   const resetBtn = document.getElementById("resetParams");
   if (resetBtn) resetBtn.addEventListener("click", resetParams);
 }
@@ -453,7 +676,7 @@ function renderChatList() {
       id: null,
       title: activeChat.title || "New Chat",
       messageCount: messages.length,
-      tokens: tokenCount(messages),
+      tokens: tokenCountEstimate(messages),
     }, true));
   }
 
@@ -519,9 +742,13 @@ async function loadChat(id) {
     title: c.title || "Untitled",
     createdAt: c.createdAt || Date.now(),
     modelPath: c.modelPath || "",
+    systemPrompt: typeof c.systemPrompt === "string" ? c.systemPrompt : "",
   };
   messages = Array.isArray(c.messages) ? c.messages.slice() : [];
-  approxTokens = tokenCount(messages);
+  approxTokens = tokenCountEstimate(messages);
+  // Mirror the chat's system prompt into the textarea so the right
+  // panel stays in sync with the active chat.
+  setSystemPromptUI(activeChat.systemPrompt);
   // Optional: if the chat remembers a model and the user hasn't picked
   // anything yet, auto-restore. Don't override an explicit pick.
   if (activeChat.modelPath && !modelPath) setModel(activeChat.modelPath);
@@ -544,6 +771,7 @@ function replayMessages(msgs) {
 
     const wrap = document.createElement("article");
     wrap.className = "exchange";
+    wrap.dataset.userPrompt = u.content;
 
     // user
     const ub = document.createElement("div"); ub.className = "user-block";
@@ -559,6 +787,8 @@ function replayMessages(msgs) {
       const at = document.createElement("div"); at.className = "asst-text";
       renderStatic(at, a.content);
       ab.appendChild(ar); ab.appendChild(at);
+      wrap.dataset.asstRaw = a.content;
+      attachMessageActions(ab, () => wrap.dataset.asstRaw || "", wrap);
       wrap.appendChild(ab);
       i += 2;
     } else {
@@ -580,14 +810,19 @@ async function persistActiveChat() {
   activeChat.title = deriveTitle(messages);
   activeChat.modelPath = modelPath || activeChat.modelPath || "";
 
+  // True token count via the sidecar's tokenizer. Falls back to the
+  // chars/4 estimate if no model is loaded or the call fails.
+  const tokens = await tokenizeMessages(messages);
+
   try {
     await window.cyllama.chats.save({
       id: activeChat.id,
       title: activeChat.title,
       createdAt: activeChat.createdAt,
       messages,
-      tokens: tokenCount(messages),
+      tokens,
       modelPath: activeChat.modelPath,
+      systemPrompt: activeChat.systemPrompt || "",
     });
     saveActiveChatId();
   } catch (e) {
@@ -623,7 +858,11 @@ toggleRight.addEventListener("click", () => {
 async function init() {
   initCollapse();
   loadParams();
-  loadSystemPrompt();
+  // Seed the unsaved working chat with the default system prompt so the
+  // textarea is populated on first launch. loadChat() overrides this if
+  // a chat is restored.
+  activeChat.systemPrompt = getDefaultSystemPrompt();
+  setSystemPromptUI(activeChat.systemPrompt);
   bindParams();
   setStatus("idle", "connecting");
 
@@ -667,7 +906,23 @@ pickBtn.addEventListener("click", async () => {
   const p = await window.cyllama.pickModel();
   if (p) setModel(p);
 });
-ejectBtn.addEventListener("click", () => setModel(""));
+ejectBtn.addEventListener("click", async () => {
+  if (inFlight) return;
+  // Tell the sidecar to drop its cached LLM so GPU memory is actually
+  // released. We do this before clearing the path so an in-flight
+  // request couldn't squeeze in against a half-cleared state.
+  if (sidecar) {
+    try {
+      await fetch(`http://127.0.0.1:${sidecar.port}/unload`, {
+        method: "POST",
+        headers: { "authorization": `Bearer ${sidecar.token}` },
+      });
+    } catch (e) {
+      errorLine(`unload: ${e.message}`);
+    }
+  }
+  setModel("");
+});
 
 const newChatBtn = document.getElementById("newChatBtn");
 if (newChatBtn) newChatBtn.addEventListener("click", newChat);
@@ -715,7 +970,8 @@ async function send() {
   // payload reflects the new turn even if the request fails.
   messages.push({ role: "user", content: prompt });
 
-  const { asstText } = makeExchange(prompt);
+  const exchange = makeExchange(prompt);
+  const { asstText } = exchange;
   const render = createIncrementalRenderer(asstText);
 
   let raw = "";
@@ -806,6 +1062,9 @@ async function send() {
     render(raw + (aborted ? "\n\n_(stopped)_" : ""), false);
     if (raw) {
       messages.push({ role: "assistant", content: raw });
+      // Stash raw markdown on the exchange so the copy action yields
+      // the original content rather than the rendered HTML.
+      exchange.wrap.dataset.asstRaw = raw;
       // Persist the chat now that we have at least one complete turn.
       // First save assigns an id; subsequent saves bump updatedAt.
       persistActiveChat();

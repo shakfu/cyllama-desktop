@@ -40,7 +40,7 @@
       <!-- Left: nav rail -->
       <nav class="nav-rail" aria-label="Primary">
         <button class="nav-btn active" title="Chats"><svg><use href="#i-chat"/></svg></button>
-        <button class="nav-btn" title="Console"><svg><use href="#i-terminal"/></svg></button>
+        <button class="nav-btn" id="navConsole" title="Console"><svg><use href="#i-terminal"/></svg></button>
         <button class="nav-btn" title="Models"><svg><use href="#i-stack"/></svg></button>
         <div class="nav-spacer"></div>
         <button class="nav-btn" title="Settings"><svg><use href="#i-cog"/></svg></button>
@@ -86,6 +86,19 @@
             <div class="empty-sub">Pick a model above and start a conversation.</div>
           </div>
         </div>
+
+        <!-- Slide-up console panel; hidden by default, toggled via the
+             nav-rail Terminal button. -->
+        <section class="console" id="console" aria-hidden="true" hidden>
+          <header class="console-header">
+            <span class="console-title">Sidecar log</span>
+            <div class="console-actions">
+              <button class="icon-btn" id="consoleClear" title="Clear"><svg><use href="#i-trash"/></svg></button>
+              <button class="icon-btn" id="consoleClose" title="Close"><svg><use href="#i-chev-down"/></svg></button>
+            </div>
+          </header>
+          <div class="console-body" id="consoleBody"></div>
+        </section>
 
         <div class="composer-wrap">
           <div class="composer-card">

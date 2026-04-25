@@ -11,21 +11,21 @@ or move them to `CHANGELOG.md` under `[Unreleased]`.
       reveal delete with confirm, click-to-switch, auto-save after each
       completed turn, active-chat-id restored on launch via localStorage.
       Still TODO: rename UI, search, export/import, full-text search.
-- [x] **System prompt.** Right-panel textarea, persisted in `localStorage`.
-      When non-empty, sidecar dispatches to `llm.chat(messages, ...)` so
-      the model's GGUF chat template applies. Per-chat override still TODO
-      once persistent chat history exists.
+- [x] **System prompt.** Per-chat: stored in the chat's JSON, loaded
+      into the right-panel textarea on switch. New chats inherit a
+      default seed kept in `localStorage`.
 - [x] **Multi-turn context.** Renderer keeps an in-memory `messages` list,
       sends full history on each turn. Sidecar always uses `llm.chat()`.
       Persistence to disk is the next task (history resets on app reload).
-- [ ] **Real token counts.** Replace the `chars/4` estimate with actual
-      counts from cyllama's tokenizer (expose via a sidecar endpoint or
-      include in chat responses).
+- [x] **Real token counts.** Sidecar `/tokenize` returns true token
+      counts; renderer uses them on every save. Estimate kept as fallback.
 - [x] **Stop-generation that actually stops.** Done: cyllama exposes
       `LLM.cancel()` (Python event + nogil ggml_abort_callback), sidecar
       calls it on `asyncio.CancelledError`. Bump pin to `cyllama>=0.2.14`.
-- [ ] **Branch / regenerate / edit / copy** message actions. Hover affordance
-      already styled; needs wiring.
+- [x] **Copy / regenerate** message actions wired. Edit and Branch
+      still pending: edit needs an in-place editable user-text and a
+      regenerate-after-edit flow; branch clones history up to the
+      exchange and creates a new chat.
 
 ## Sampling and model parameters
 
@@ -65,8 +65,8 @@ or move them to `CHANGELOG.md` under `[Unreleased]`.
 - [ ] Replace the file-picker-only flow with a model browser modal.
 - [ ] Per-model metadata: arch, quantization, parameter count, context size.
       Read from GGUF header.
-- [ ] Eject should release `LLM` and free GPU memory; today it only clears
-      the model path on the renderer side.
+- [x] Eject releases the `LLM` and frees GPU memory via the new
+      `/unload` sidecar endpoint.
 
 ## Multimodal
 
@@ -77,10 +77,11 @@ or move them to `CHANGELOG.md` under `[Unreleased]`.
 
 ## App shell
 
-- [ ] Wire the nav rail buttons (Chats / Console / Models). Currently only
-      Chats is meaningful.
-- [ ] Console / log view: live tail of sidecar stdout/stderr. Already
-      forwarded with `[sidecar]` prefix in main process; just needs a UI.
+- [ ] Wire remaining nav-rail buttons (Models — Chats and Console done).
+- [x] Console / log view: live tail of sidecar stdout/stderr. Slide-up
+      panel toggled by the Terminal nav-rail button. 2000-line ring
+      buffer in main, lazy-populated on first open, color-coded stderr,
+      sticky-scroll-aware.
 - [ ] Settings panel: theme override, default sampling, model directory.
 - [ ] Update window title to active chat name.
 - [ ] Hidden-titlebar mode on macOS for a more polished feel

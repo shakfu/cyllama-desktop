@@ -15,6 +15,33 @@ let mainWindow = null;
 let sidecarProc = null;
 let sidecarInfo = null; // { port, token }
 
+// Sidecar stdio ring buffer. Each entry: { t: timestamp, s: "out" | "err", line: string }.
+// Bounded so a noisy sidecar can't blow up main-process memory.
+const LOG_BUFFER_MAX = 2000;
+const logBuffer = [];
+
+function pushLog(stream, raw) {
+  // Buffer incoming chunks per-stream and split on newlines so each
+  // log entry is exactly one line. Tail (no trailing newline) is held
+  // until the next chunk completes it.
+  const carry = stream === "out" ? pushLog._carryOut : pushLog._carryErr;
+  const combined = carry + String(raw);
+  const lines = combined.split("\n");
+  const tail = lines.pop();
+  if (stream === "out") pushLog._carryOut = tail; else pushLog._carryErr = tail;
+  for (const line of lines) {
+    if (!line) continue;
+    const entry = { t: Date.now(), s: stream, line };
+    logBuffer.push(entry);
+    if (logBuffer.length > LOG_BUFFER_MAX) logBuffer.shift();
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send("sidecar:log", entry);
+    }
+  }
+}
+pushLog._carryOut = "";
+pushLog._carryErr = "";
+
 function resolvePythonBin() {
   // In packaged app: extraResources copied to <Resources>/python
   // In dev: build/python-<arch>-<platform>/ next to package.json
@@ -81,8 +108,14 @@ async function startSidecar() {
     stdio: ["ignore", "pipe", "pipe"],
   });
 
-  sidecarProc.stdout.on("data", (b) => process.stdout.write(`[sidecar] ${b}`));
-  sidecarProc.stderr.on("data", (b) => process.stderr.write(`[sidecar:err] ${b}`));
+  sidecarProc.stdout.on("data", (b) => {
+    process.stdout.write(`[sidecar] ${b}`);
+    pushLog("out", b);
+  });
+  sidecarProc.stderr.on("data", (b) => {
+    process.stderr.write(`[sidecar:err] ${b}`);
+    pushLog("err", b);
+  });
   sidecarProc.on("exit", (code, sig) => {
     console.log(`[sidecar] exited code=${code} sig=${sig}`);
     sidecarProc = null;
@@ -187,6 +220,8 @@ function createWindow() {
 }
 
 ipcMain.handle("sidecar:info", () => sidecarInfo);
+
+ipcMain.handle("log:recent", () => logBuffer.slice());
 
 // ---------------------------------------------------------------------------
 // Chats: persisted under <userData>/chats/<id>.json. Atomic writes via

@@ -401,6 +401,30 @@ svg circle, svg rect, svg polygon { fill: none; }
 
 .asst-block { font-size: 14.5px; line-height: 1.65; color: var(--fg); }
 
+/* Hover actions row at the bottom of an assistant block. */
+.msg-actions {
+  display: flex;
+  gap: 2px;
+  margin-top: 10px;
+  opacity: 0;
+  transition: opacity 150ms;
+}
+.exchange:hover .msg-actions,
+.exchange:focus-within .msg-actions { opacity: 1; }
+.msg-action {
+  width: 26px; height: 26px;
+  display: inline-flex; align-items: center; justify-content: center;
+  border-radius: var(--radius-sm);
+  border: 0;
+  cursor: pointer;
+  color: var(--fg-muted);
+  background: transparent;
+  transition: background 120ms, color 120ms;
+}
+.msg-action svg { width: 13px; height: 13px; }
+.msg-action:hover { background: var(--bg-hover); color: var(--fg); }
+.msg-action.ok { color: var(--success); }
+
 /* Streaming caret appended at end of asst-text */
 .cursor {
   display: inline-block;
@@ -508,6 +532,63 @@ svg circle, svg rect, svg polygon { fill: none; }
 .fade-out { opacity: 0; }
 
 .user-text .katex-display { margin: 0; overflow-x: auto; }
+
+/* ============================================================
+   Console (sidecar log panel)
+   ============================================================ */
+.console {
+  display: flex;
+  flex-direction: column;
+  border-top: 1px solid var(--border);
+  background: var(--bg-sunken);
+  max-height: 38vh;
+  min-height: 160px;
+  flex-shrink: 0;
+}
+.console[hidden] { display: none; }
+.console-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 12px;
+  background: var(--bg-elev);
+  border-bottom: 1px solid var(--border);
+}
+.console-title {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--fg-muted);
+}
+.console-actions { display: flex; gap: 2px; }
+.console-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 8px 12px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+.console-body::-webkit-scrollbar { width: 10px; }
+.console-body::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border-radius: 5px;
+  border: 2px solid var(--bg-sunken);
+}
+.console-body .log-line { color: var(--fg); }
+.console-body .log-line.err { color: var(--error); }
+.console-body .log-line .ts {
+  color: var(--fg-faint);
+  margin-right: 8px;
+  user-select: none;
+}
+.console-body .log-empty {
+  color: var(--fg-faint);
+  font-style: italic;
+}
 
 /* ============================================================
    Composer
