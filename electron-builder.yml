@@ -1,0 +1,62 @@
+appId: com.shakfu.cyllama-desktop
+productName: Cyllama Desktop
+directories:
+  output: dist
+  buildResources: resources
+
+files:
+  - "src/**/*"
+  - "package.json"
+  - "!**/*.map"
+
+# python-build-standalone trees go here. Per-arch directories so the right
+# one can be selected at packaging time. Build them with scripts/build-python-env.sh
+# on a host matching the target triple.
+extraResources:
+  - from: "build/python-${os}-${arch}"
+    to: "python"
+    filter:
+      - "**/*"
+  - from: "python-sidecar"
+    to: "python-sidecar"
+    filter:
+      - "sidecar.py"
+
+asar: true
+# Native libs (libllama, libggml-*) and Python .so files cannot be loaded
+# from inside app.asar. They live under extraResources, which is already
+# unpacked, so no asarUnpack rule is needed.
+
+mac:
+  category: public.app-category.developer-tools
+  target:
+    - target: dmg
+      arch:
+        - arm64
+  hardenedRuntime: true
+  gatekeeperAssess: false
+  entitlements: resources/entitlements.mac.plist
+  entitlementsInherit: resources/entitlements.mac.plist
+  # Sign every binary under Resources/python recursively. electron-builder
+  # does this when you set the identity; provide it via CSC_LINK + CSC_KEY_PASSWORD
+  # env vars in CI.
+
+dmg:
+  writeUpdateInfo: false
+
+win:
+  target:
+    - target: nsis
+      arch:
+        - x64
+
+linux:
+  target:
+    - target: AppImage
+      arch:
+        - x64
+  category: Development
+
+# Notarization: set APPLE_ID, APPLE_APP_SPECIFIC_PASSWORD, APPLE_TEAM_ID
+# in the build environment and electron-builder will run notarytool.
+afterSign: scripts/notarize.js

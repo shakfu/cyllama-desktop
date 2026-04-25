@@ -1,0 +1,320 @@
+const { app, BrowserWindow, Menu, ipcMain, dialog } = require("electron");
+const { spawn } = require("child_process");
+const path = require("path");
+const fs = require("fs");
+const crypto = require("crypto");
+const net = require("net");
+
+// Override the menu-bar app name. In packaged builds electron-builder
+// already sets this via Info.plist (productName), but in dev mode
+// Electron derives the name from the executable, which is "Electron".
+// setName() must run before app.whenReady() to take effect on macOS.
+app.setName("Cyllama Desktop");
+
+let mainWindow = null;
+let sidecarProc = null;
+let sidecarInfo = null; // { port, token }
+
+function resolvePythonBin() {
+  // In packaged app: extraResources copied to <Resources>/python
+  // In dev: build/python-<arch>-<platform>/ next to package.json
+  const isPackaged = app.isPackaged;
+  if (isPackaged) {
+    const base = path.join(process.resourcesPath, "python");
+    if (process.platform === "win32") return path.join(base, "python.exe");
+    return path.join(base, "bin", "python3");
+  }
+  // Dev-mode dir naming matches electron-builder's ${os}-${arch} convention.
+  const arch = process.arch === "arm64" ? "arm64" : "x64";
+  const plat = process.platform === "darwin" ? "mac"
+             : process.platform === "win32" ? "win"
+             : "linux";
+  const dir = path.join(__dirname, "..", "..", "build", `python-${plat}-${arch}`);
+  if (process.platform === "win32") return path.join(dir, "python.exe");
+  return path.join(dir, "bin", "python3");
+}
+
+function resolveSidecarScript() {
+  // sidecar.py ships under extraResources too, via electron-builder files config?
+  // Simpler: bundle it inside src/ so it ends up in app.asar — but Python can't
+  // import from asar, so we keep it in python-sidecar/ and copy to resources.
+  if (app.isPackaged) {
+    return path.join(process.resourcesPath, "python-sidecar", "sidecar.py");
+  }
+  return path.join(__dirname, "..", "..", "python-sidecar", "sidecar.py");
+}
+
+async function getFreePort() {
+  return new Promise((resolve, reject) => {
+    const srv = net.createServer();
+    srv.unref();
+    srv.on("error", reject);
+    srv.listen(0, "127.0.0.1", () => {
+      const { port } = srv.address();
+      srv.close(() => resolve(port));
+    });
+  });
+}
+
+async function startSidecar() {
+  const pythonBin = resolvePythonBin();
+  const script = resolveSidecarScript();
+
+  if (!fs.existsSync(pythonBin)) {
+    throw new Error(`Bundled Python not found at ${pythonBin}. Run: npm run build:python`);
+  }
+  if (!fs.existsSync(script)) {
+    throw new Error(`Sidecar script not found at ${script}`);
+  }
+
+  const port = await getFreePort();
+  const token = crypto.randomBytes(32).toString("hex");
+
+  sidecarProc = spawn(pythonBin, [script], {
+    env: {
+      ...process.env,
+      CYLLAMA_SIDECAR_PORT: String(port),
+      CYLLAMA_SIDECAR_TOKEN: token,
+      CYLLAMA_SIDECAR_PARENT_PID: String(process.pid),
+      PYTHONUNBUFFERED: "1",
+    },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+
+  sidecarProc.stdout.on("data", (b) => process.stdout.write(`[sidecar] ${b}`));
+  sidecarProc.stderr.on("data", (b) => process.stderr.write(`[sidecar:err] ${b}`));
+  sidecarProc.on("exit", (code, sig) => {
+    console.log(`[sidecar] exited code=${code} sig=${sig}`);
+    sidecarProc = null;
+  });
+
+  // Wait for the sidecar to become reachable.
+  await waitForSidecar(port, token, 30_000);
+  sidecarInfo = { port, token };
+  return sidecarInfo;
+}
+
+async function waitForSidecar(port, token, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      const res = await fetch(`http://127.0.0.1:${port}/health`, {
+        headers: { authorization: `Bearer ${token}` },
+      });
+      if (res.ok) return;
+    } catch (_) { /* not ready yet */ }
+    await new Promise((r) => setTimeout(r, 200));
+  }
+  throw new Error("Sidecar failed to start within timeout");
+}
+
+function stopSidecar() {
+  if (!sidecarProc) return;
+  try {
+    sidecarProc.kill("SIGTERM");
+  } catch (_) {}
+  // Hard-kill fallback after 3s
+  setTimeout(() => {
+    if (sidecarProc) {
+      try { sidecarProc.kill("SIGKILL"); } catch (_) {}
+    }
+  }, 3000);
+}
+
+function buildApplicationMenu() {
+  // Defining the menu explicitly (using ``app.name`` for the leading
+  // submenu label) forces macOS to display "Cyllama Desktop" instead
+  // of the Electron binary's bundle name in dev. The submenu roles
+  // give us the standard Cmd-Q / Cmd-H / Cmd-W bindings for free.
+  const isMac = process.platform === "darwin";
+  const template = [
+    ...(isMac ? [{
+      label: app.name,
+      submenu: [
+        { role: "about" },
+        { type: "separator" },
+        { role: "services" },
+        { type: "separator" },
+        { role: "hide" },
+        { role: "hideOthers" },
+        { role: "unhide" },
+        { type: "separator" },
+        { role: "quit" },
+      ],
+    }] : []),
+    {
+      label: "Edit",
+      submenu: [
+        { role: "undo" }, { role: "redo" },
+        { type: "separator" },
+        { role: "cut" }, { role: "copy" }, { role: "paste" },
+        { role: "selectAll" },
+      ],
+    },
+    {
+      label: "View",
+      submenu: [
+        { role: "reload" }, { role: "forceReload" },
+        { type: "separator" },
+        { role: "togglefullscreen" },
+        { role: "toggleDevTools" },
+      ],
+    },
+    {
+      role: "window",
+      submenu: [
+        { role: "minimize" }, { role: "close" },
+      ],
+    },
+  ];
+  Menu.setApplicationMenu(Menu.buildFromTemplate(template));
+}
+
+function createWindow() {
+  mainWindow = new BrowserWindow({
+    width: 1400,
+    height: 900,
+    minWidth: 1000,
+    minHeight: 600,
+    webPreferences: {
+      preload: path.join(__dirname, "..", "preload", "index.js"),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+    },
+  });
+  mainWindow.loadFile(path.join(__dirname, "..", "renderer", "index.html"));
+}
+
+ipcMain.handle("sidecar:info", () => sidecarInfo);
+
+// ---------------------------------------------------------------------------
+// Chats: persisted under <userData>/chats/<id>.json. Atomic writes via
+// tmp+rename so a crash mid-write doesn't leave a torn file. Chat IDs are
+// validated against an allow-pattern to prevent path traversal.
+// ---------------------------------------------------------------------------
+const CHAT_ID_RE = /^[A-Za-z0-9_-]{6,128}$/;
+
+function chatsDir() {
+  return path.join(app.getPath("userData"), "chats");
+}
+function chatPath(id) {
+  if (typeof id !== "string" || !CHAT_ID_RE.test(id)) {
+    throw new Error("invalid chat id");
+  }
+  return path.join(chatsDir(), `${id}.json`);
+}
+function ensureChatsDir() {
+  fs.mkdirSync(chatsDir(), { recursive: true });
+}
+
+ipcMain.handle("chats:list", async () => {
+  ensureChatsDir();
+  let files = [];
+  try { files = await fs.promises.readdir(chatsDir()); }
+  catch { return []; }
+  const out = [];
+  for (const f of files) {
+    if (!f.endsWith(".json") || f.endsWith(".tmp.json")) continue;
+    try {
+      const txt = await fs.promises.readFile(path.join(chatsDir(), f), "utf8");
+      const c = JSON.parse(txt);
+      if (!c || typeof c.id !== "string") continue;
+      out.push({
+        id: c.id,
+        title: typeof c.title === "string" ? c.title : "Untitled",
+        updatedAt: Number(c.updatedAt) || 0,
+        createdAt: Number(c.createdAt) || 0,
+        messageCount: Array.isArray(c.messages) ? c.messages.length : 0,
+        tokens: Number(c.tokens) || 0,
+        modelPath: typeof c.modelPath === "string" ? c.modelPath : "",
+      });
+    } catch { /* skip unreadable */ }
+  }
+  out.sort((a, b) => (b.updatedAt - a.updatedAt));
+  return out;
+});
+
+ipcMain.handle("chats:load", async (_e, id) => {
+  const p = chatPath(id);
+  const txt = await fs.promises.readFile(p, "utf8");
+  return JSON.parse(txt);
+});
+
+ipcMain.handle("chats:save", async (_e, chat) => {
+  ensureChatsDir();
+  if (!chat || typeof chat.id !== "string" || !CHAT_ID_RE.test(chat.id)) {
+    throw new Error("chat.id required (alphanumeric, 6-128 chars)");
+  }
+  const safe = {
+    id: chat.id,
+    title: typeof chat.title === "string" ? chat.title.slice(0, 200) : "Untitled",
+    createdAt: Number(chat.createdAt) || Date.now(),
+    updatedAt: Date.now(),
+    messages: Array.isArray(chat.messages) ? chat.messages : [],
+    tokens: Number(chat.tokens) || 0,
+    modelPath: typeof chat.modelPath === "string" ? chat.modelPath : "",
+  };
+  const p = chatPath(chat.id);
+  const tmp = `${p}.tmp`;
+  await fs.promises.writeFile(tmp, JSON.stringify(safe, null, 2), "utf8");
+  await fs.promises.rename(tmp, p);
+  return safe;
+});
+
+ipcMain.handle("chats:delete", async (_e, id) => {
+  const p = chatPath(id);
+  try { await fs.promises.unlink(p); } catch { /* already gone */ }
+  return { ok: true };
+});
+
+ipcMain.handle("fs:exists", async (_e, p) => {
+  // Cheap existence check used by the renderer to silently drop a
+  // stale persisted model path on launch. Path is treated as opaque
+  // -- this is read-only stat, no traversal risk.
+  if (typeof p !== "string" || !p) return false;
+  try {
+    const st = await fs.promises.stat(p);
+    return st.isFile();
+  } catch {
+    return false;
+  }
+});
+
+ipcMain.handle("dialog:pickModel", async () => {
+  const r = await dialog.showOpenDialog(mainWindow, {
+    title: "Select GGUF model",
+    filters: [{ name: "GGUF", extensions: ["gguf"] }],
+    properties: ["openFile"],
+  });
+  if (r.canceled || r.filePaths.length === 0) return null;
+  return r.filePaths[0];
+});
+
+app.whenReady().then(async () => {
+  buildApplicationMenu();
+  try {
+    await startSidecar();
+  } catch (err) {
+    dialog.showErrorBox("Sidecar startup failed", String(err.message || err));
+    app.quit();
+    return;
+  }
+  createWindow();
+  app.on("activate", () => {
+    if (BrowserWindow.getAllWindows().length === 0) createWindow();
+  });
+});
+
+app.on("window-all-closed", () => {
+  // Quit on every platform when the last window closes -- including macOS.
+  // The macOS convention is to keep the app process alive when its
+  // window closes, but for a single-window inference app that holds
+  // open a Python sidecar (and via it, GPU resources), keeping it
+  // around in the background is wasteful and surprising.
+  stopSidecar();
+  app.quit();
+});
+
+app.on("before-quit", stopSidecar);
+process.on("exit", stopSidecar);

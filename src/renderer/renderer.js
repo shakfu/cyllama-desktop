@@ -1,0 +1,824 @@
+/* global marked, katex, renderMathInElement */
+
+const appEl       = document.getElementById("app");
+const logEl       = document.getElementById("log");
+const promptEl    = document.getElementById("prompt");
+const sendBtn     = document.getElementById("send");
+const pickBtn     = document.getElementById("pick");
+const ejectBtn    = document.getElementById("ejectBtn");
+const modelNameEl = document.getElementById("modelName");
+const emptyEl     = document.getElementById("emptyState");
+const statusDot   = document.querySelector(".status-dot");
+const statusText  = document.querySelector(".status-text");
+const toggleLeft  = document.getElementById("toggleLeft");
+const toggleRight = document.getElementById("toggleRight");
+
+let sidecar = null;
+let modelPath = "";
+let inFlight = false;
+let stickyScroll = true;
+let abortCtl = null;
+let approxTokens = 0;
+
+// Conversation history for the active chat. Each entry is
+// { role: "user" | "assistant", content: string }. The system prompt is
+// NOT stored here -- it's read from the right-panel textarea each send,
+// so editing it mid-chat updates immediately.
+let messages = [];
+
+// Persisted chat metadata for the current working chat. ``id == null``
+// means an unsaved new chat that gets persisted on the first completed
+// turn. ``createdAt`` is set at save time. Tokens / messageCount are
+// derived from ``messages``; we cache the last-seen sidebar list to
+// avoid disk hits on every render.
+let activeChat = { id: null, title: "New Chat", createdAt: 0, modelPath: "" };
+let chatList = [];
+
+const ACTIVE_CHAT_KEY = "active_chat_id";
+
+// Last loaded model path. Persisted on every ``setModel()`` call so
+// eject also clears it -- otherwise we'd "remember" a model the user
+// just unloaded. Cleared by setModel("").
+const LAST_MODEL_KEY = "last_model_path";
+
+function newChatId() {
+  // crypto.randomUUID is available in Electron's renderer (Chromium >= 92).
+  return crypto.randomUUID();
+}
+
+function deriveTitle(msgs) {
+  const first = (msgs || []).find((m) => m.role === "user");
+  if (!first) return "New Chat";
+  const t = first.content.replace(/\s+/g, " ").trim().slice(0, 60);
+  return t || "New Chat";
+}
+
+function tokenCount(msgs) {
+  let total = 0;
+  for (const m of msgs || []) total += Math.max(1, Math.round((m.content || "").length / 4));
+  return total;
+}
+
+/* ----------------------------------------------------------------
+   Markdown + KaTeX
+   ---------------------------------------------------------------- */
+if (window.marked) {
+  marked.setOptions({ gfm: true, breaks: false });
+}
+
+const KATEX_OPTS = {
+  delimiters: [
+    { left: "$$", right: "$$", display: true },
+    { left: "\\[", right: "\\]", display: true },
+    { left: "\\(", right: "\\)", display: false },
+    { left: "$",  right: "$",   display: false },
+  ],
+  throwOnError: false,
+  ignoredTags: ["script", "noscript", "style", "textarea", "pre", "code"],
+  ignoredClasses: ["cursor"],
+};
+
+function mdToHtml(md) {
+  return window.marked ? marked.parse(md) : escapeHtml(md);
+}
+function applyKatex(node) {
+  if (!window.renderMathInElement) return;
+  try { renderMathInElement(node, KATEX_OPTS); } catch (_) { /* mid-stream */ }
+}
+function escapeHtml(s) {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+/* Render a complete (non-streaming) markdown blob into a target node, in place. */
+function renderStatic(target, md) {
+  target.innerHTML = mdToHtml(md);
+  applyKatex(target);
+}
+
+/* ----------------------------------------------------------------
+   Incremental renderer
+   ----------------------------------------------------------------
+   Splits the buffer into a "committed" prefix and a "tail":
+     committed: parsed once, frozen, never touched again
+     tail:      re-parsed on every animation frame
+   Boundary moves forward when we find a "\n\n" that lies outside any
+   open fenced-code block (```) or display-math block ($$). This keeps
+   incomplete code/math intact in the tail until they're fully closed.
+   ---------------------------------------------------------------- */
+function findStableSplit(raw) {
+  let inFence = false;
+  let inMath = false;
+  let lastSafe = 0;
+  const n = raw.length;
+  let atLineStart = true;
+
+  for (let i = 0; i < n; i++) {
+    const ch = raw[i];
+
+    if (atLineStart && !inMath && raw.startsWith("```", i)) {
+      inFence = !inFence;
+      // skip rest of line
+      while (i < n && raw[i] !== "\n") i++;
+      atLineStart = true;
+      continue;
+    }
+
+    if (!inFence && raw[i] === "$" && raw[i + 1] === "$") {
+      inMath = !inMath;
+      i += 1;            // consume the second $
+      atLineStart = false;
+      continue;
+    }
+
+    if (!inFence && !inMath && ch === "\n" && raw[i + 1] === "\n") {
+      lastSafe = i + 2;  // commit through the blank line
+      i += 1;
+      atLineStart = true;
+      continue;
+    }
+
+    atLineStart = (ch === "\n");
+  }
+  return lastSafe;
+}
+
+function createIncrementalRenderer(asstText) {
+  const committedEl = document.createElement("div");
+  committedEl.className = "committed";
+  const tailEl = document.createElement("div");
+  tailEl.className = "tail";
+  asstText.appendChild(committedEl);
+  asstText.appendChild(tailEl);
+
+  let committedEnd = 0;
+
+  function render(raw, streaming) {
+    const split = findStableSplit(raw);
+
+    if (split > committedEnd) {
+      const slice = raw.slice(committedEnd, split);
+      const buf = document.createElement("div");
+      buf.innerHTML = mdToHtml(slice);
+      applyKatex(buf);
+      while (buf.firstChild) committedEl.appendChild(buf.firstChild);
+      committedEnd = split;
+    }
+
+    const tailRaw = raw.slice(committedEnd);
+    tailEl.innerHTML = mdToHtml(tailRaw);
+    applyKatex(tailEl);
+    if (streaming) {
+      const cursor = document.createElement("span");
+      cursor.className = "cursor";
+      tailEl.appendChild(cursor);
+    }
+  }
+
+  return render;
+}
+
+/* ----------------------------------------------------------------
+   UI helpers
+   ---------------------------------------------------------------- */
+function setStatus(state, text) {
+  if (statusDot) statusDot.dataset.state = state;
+  if (statusText) statusText.textContent = text;
+}
+function dismissEmpty() {
+  const e = logEl.querySelector(".empty-state");
+  if (e) e.remove();
+}
+function showEmptyState() {
+  if (logEl.querySelector(".empty-state")) return;
+  const wrap = document.createElement("div");
+  wrap.className = "empty-state";
+  const t = document.createElement("div");
+  t.className = "empty-title";
+  t.textContent = "Local inference, in a window.";
+  const s = document.createElement("div");
+  s.className = "empty-sub";
+  s.textContent = "Pick a model above and start a conversation.";
+  wrap.appendChild(t); wrap.appendChild(s);
+  logEl.appendChild(wrap);
+}
+
+function clearLog() {
+  while (logEl.firstChild) logEl.removeChild(logEl.firstChild);
+}
+
+function newChat() {
+  if (inFlight) return;            // ignore mid-stream
+  messages = [];
+  approxTokens = 0;
+  activeChat = { id: null, title: "New Chat", createdAt: 0, modelPath: "" };
+  clearLog();
+  showEmptyState();
+  saveActiveChatId();
+  renderChatList();
+  promptEl.focus();
+}
+function basename(p) { return p ? p.split(/[\\/]/).pop() : ""; }
+function setModel(path) {
+  modelPath = path || "";
+  modelNameEl.textContent = path ? basename(path) : "Select a model";
+  modelNameEl.title = path || "";
+  try {
+    if (modelPath) localStorage.setItem(LAST_MODEL_KEY, modelPath);
+    else localStorage.removeItem(LAST_MODEL_KEY);
+  } catch {}
+  updateSendEnabled();
+}
+function bumpTokens(text) {
+  // Maintained for streaming-time updates; the persisted total is
+  // re-derived from messages at save time so we don't have to be exact.
+  approxTokens += Math.max(1, Math.round(text.length / 4));
+}
+
+function updateSendEnabled() {
+  if (inFlight) {
+    sendBtn.disabled = false;
+    sendBtn.title = "Stop";
+    return;
+  }
+  const ok = !!modelPath && !!sidecar;
+  sendBtn.disabled = !ok;
+  sendBtn.title = !sidecar ? "Sidecar not connected"
+                : !modelPath ? "Pick a model first"
+                : "Send";
+}
+
+function makeExchange(prompt) {
+  dismissEmpty();
+  const wrap = document.createElement("article");
+  wrap.className = "exchange";
+
+  const userBlock = document.createElement("div");
+  userBlock.className = "user-block";
+  const userRole = document.createElement("div");
+  userRole.className = "role-label";
+  userRole.textContent = "You";
+  const userText = document.createElement("div");
+  userText.className = "user-text";
+  // Render the user prompt through markdown + KaTeX (one-shot).
+  renderStatic(userText, prompt);
+  userBlock.appendChild(userRole);
+  userBlock.appendChild(userText);
+
+  const asstBlock = document.createElement("div");
+  asstBlock.className = "asst-block";
+  const asstRole = document.createElement("div");
+  asstRole.className = "role-label";
+  asstRole.textContent = "Assistant";
+  const asstText = document.createElement("div");
+  asstText.className = "asst-text";
+  asstBlock.appendChild(asstRole);
+  asstBlock.appendChild(asstText);
+
+  wrap.appendChild(userBlock);
+  wrap.appendChild(asstBlock);
+  logEl.appendChild(wrap);
+  if (stickyScroll) logEl.scrollTop = logEl.scrollHeight;
+
+  return { wrap, asstText };
+}
+
+function transientLine(text, cls) {
+  dismissEmpty();
+  const el = document.createElement("div");
+  el.className = cls;
+  el.textContent = text;
+  logEl.appendChild(el);
+  if (stickyScroll) logEl.scrollTop = logEl.scrollHeight;
+  // Auto-dismiss after 4s.
+  setTimeout(() => {
+    el.classList.add("fade-out");
+    setTimeout(() => { if (el.parentNode) el.remove(); }, 300);
+  }, 4000);
+}
+function systemLine(text) { transientLine(text, "system-line"); }
+function errorLine(text)  { transientLine(text, "error-line"); }
+
+logEl.addEventListener("scroll", () => {
+  const nearBottom = logEl.scrollHeight - logEl.scrollTop - logEl.clientHeight < 40;
+  stickyScroll = nearBottom;
+}, { passive: true });
+
+/* ----------------------------------------------------------------
+   Sampling parameters (persisted)
+   ---------------------------------------------------------------- */
+const PARAM_DEFAULTS = {
+  temperature:    0.8,
+  top_p:          0.95,
+  top_k:          40,
+  min_p:          0.05,
+  repeat_penalty: 1.0,
+  max_tokens:     512,
+  seed:           "",   // empty string => omit from request
+  stop_sequences: "",   // comma-separated; parsed into list at send time
+};
+const PARAM_KEYS = Object.keys(PARAM_DEFAULTS);
+const PARAM_INT_KEYS = new Set(["top_k", "max_tokens", "seed"]);
+const PARAM_CSV_KEYS = new Set(["stop_sequences"]);
+
+// System prompt is structurally a message, not a sampling knob. It rides
+// at the top level of the request body, persisted under its own
+// localStorage key so a single legacy "params" blob can't pollute it.
+const SYSTEM_PROMPT_STORAGE_KEY = "system_prompt";
+
+function paramEl(key) { return document.getElementById(`p-${key}`); }
+function paramOut(key) { return document.getElementById(`p-${key}-out`); }
+
+function formatParamValue(key, value) {
+  if (PARAM_INT_KEYS.has(key)) return String(value);
+  if (PARAM_CSV_KEYS.has(key)) return String(value);
+  // Float: 2 decimals is enough for the UI display.
+  const n = Number(value);
+  return Number.isFinite(n) ? n.toFixed(2) : String(value);
+}
+
+function loadParams() {
+  let saved = {};
+  try { saved = JSON.parse(localStorage.getItem("params") || "{}"); } catch {}
+  for (const key of PARAM_KEYS) {
+    const el = paramEl(key);
+    if (!el) continue;
+    const v = saved[key] ?? PARAM_DEFAULTS[key];
+    el.value = String(v);
+    const out = paramOut(key);
+    if (out) out.textContent = formatParamValue(key, v);
+  }
+}
+
+function saveParams() {
+  const out = {};
+  for (const key of PARAM_KEYS) {
+    const el = paramEl(key);
+    if (!el) continue;
+    out[key] = el.value;
+  }
+  try { localStorage.setItem("params", JSON.stringify(out)); } catch {}
+}
+
+function getCurrentParams() {
+  const out = {};
+  for (const key of PARAM_KEYS) {
+    const el = paramEl(key);
+    if (!el) continue;
+    const raw = el.value;
+    if (raw === "" || raw == null) continue;     // omit blank seed etc.
+    if (PARAM_CSV_KEYS.has(key)) {
+      const list = raw.split(",").map((s) => s.trim()).filter(Boolean);
+      if (list.length) out[key] = list;
+      continue;
+    }
+    const n = Number(raw);
+    if (!Number.isFinite(n)) continue;
+    out[key] = PARAM_INT_KEYS.has(key) ? Math.round(n) : n;
+  }
+  return out;
+}
+
+function getSystemPrompt() {
+  const el = document.getElementById("p-system_prompt");
+  if (!el) return "";
+  return el.value.trim();
+}
+
+function loadSystemPrompt() {
+  const el = document.getElementById("p-system_prompt");
+  if (!el) return;
+  try {
+    const v = localStorage.getItem(SYSTEM_PROMPT_STORAGE_KEY);
+    if (v != null) el.value = v;
+  } catch {}
+}
+function saveSystemPrompt() {
+  const el = document.getElementById("p-system_prompt");
+  if (!el) return;
+  try { localStorage.setItem(SYSTEM_PROMPT_STORAGE_KEY, el.value); } catch {}
+}
+
+function resetParams() {
+  for (const key of PARAM_KEYS) {
+    const el = paramEl(key);
+    if (!el) continue;
+    el.value = String(PARAM_DEFAULTS[key]);
+    const out = paramOut(key);
+    if (out) out.textContent = formatParamValue(key, PARAM_DEFAULTS[key]);
+  }
+  saveParams();
+}
+
+function bindParams() {
+  for (const key of PARAM_KEYS) {
+    const el = paramEl(key);
+    if (!el) continue;
+    el.addEventListener("input", () => {
+      const out = paramOut(key);
+      if (out) out.textContent = formatParamValue(key, el.value);
+      saveParams();
+    });
+  }
+  const sysEl = document.getElementById("p-system_prompt");
+  if (sysEl) sysEl.addEventListener("input", saveSystemPrompt);
+  const resetBtn = document.getElementById("resetParams");
+  if (resetBtn) resetBtn.addEventListener("click", resetParams);
+}
+
+/* ----------------------------------------------------------------
+   Persistent chats: sidebar list, replay, save, switch
+   ---------------------------------------------------------------- */
+function saveActiveChatId() {
+  try {
+    if (activeChat.id) localStorage.setItem(ACTIVE_CHAT_KEY, activeChat.id);
+    else localStorage.removeItem(ACTIVE_CHAT_KEY);
+  } catch {}
+}
+
+async function refreshChatList() {
+  try { chatList = await window.cyllama.chats.list(); }
+  catch (e) { errorLine(`load chats: ${e.message}`); chatList = []; }
+  renderChatList();
+}
+
+function renderChatList() {
+  const listEl = document.getElementById("chatList");
+  if (!listEl) return;
+  while (listEl.firstChild) listEl.removeChild(listEl.firstChild);
+
+  // Unsaved working chat shows up at the top until it gets persisted on
+  // its first completed turn.
+  if (!activeChat.id) {
+    listEl.appendChild(makeChatRow({
+      id: null,
+      title: activeChat.title || "New Chat",
+      messageCount: messages.length,
+      tokens: tokenCount(messages),
+    }, true));
+  }
+
+  for (const c of chatList) {
+    listEl.appendChild(makeChatRow(c, c.id === activeChat.id));
+  }
+}
+
+function makeChatRow(c, isActive) {
+  const row = document.createElement("div");
+  row.className = "chat-row" + (isActive ? " active" : "");
+  row.setAttribute("role", "button");
+  row.tabIndex = 0;
+  row.dataset.id = c.id ?? "";
+
+  const title = document.createElement("span");
+  title.className = "row-title";
+  title.textContent = c.title || "Untitled";
+  const meta = document.createElement("span");
+  meta.className = "row-meta";
+  meta.textContent = `${c.tokens || 0} tokens`;
+  row.appendChild(title);
+  row.appendChild(meta);
+
+  if (c.id) {
+    const del = document.createElement("button");
+    del.className = "row-delete";
+    del.type = "button";
+    del.title = "Delete chat";
+    del.innerHTML = '<svg><use href="#i-trash"/></svg>';
+    del.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      if (!confirm(`Delete "${c.title}"?`)) return;
+      try { await window.cyllama.chats.delete(c.id); }
+      catch (err) { errorLine(`delete: ${err.message}`); return; }
+      if (c.id === activeChat.id) newChat();
+      await refreshChatList();
+    });
+    row.appendChild(del);
+  }
+
+  const activate = () => {
+    if (inFlight) return;
+    if (c.id == null) return;
+    if (c.id === activeChat.id) return;
+    loadChat(c.id);
+  };
+  row.addEventListener("click", activate);
+  row.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" || e.key === " ") { e.preventDefault(); activate(); }
+  });
+
+  return row;
+}
+
+async function loadChat(id) {
+  if (inFlight) return;
+  let c;
+  try { c = await window.cyllama.chats.load(id); }
+  catch (e) { errorLine(`load chat: ${e.message}`); return; }
+  activeChat = {
+    id: c.id,
+    title: c.title || "Untitled",
+    createdAt: c.createdAt || Date.now(),
+    modelPath: c.modelPath || "",
+  };
+  messages = Array.isArray(c.messages) ? c.messages.slice() : [];
+  approxTokens = tokenCount(messages);
+  // Optional: if the chat remembers a model and the user hasn't picked
+  // anything yet, auto-restore. Don't override an explicit pick.
+  if (activeChat.modelPath && !modelPath) setModel(activeChat.modelPath);
+
+  clearLog();
+  if (messages.length === 0) showEmptyState();
+  else replayMessages(messages);
+  saveActiveChatId();
+  renderChatList();
+  stickyScroll = true;
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+function replayMessages(msgs) {
+  let i = 0;
+  while (i < msgs.length) {
+    if (msgs[i].role !== "user") { i++; continue; }
+    const u = msgs[i];
+    const a = msgs[i + 1] && msgs[i + 1].role === "assistant" ? msgs[i + 1] : null;
+
+    const wrap = document.createElement("article");
+    wrap.className = "exchange";
+
+    // user
+    const ub = document.createElement("div"); ub.className = "user-block";
+    const ur = document.createElement("div"); ur.className = "role-label"; ur.textContent = "You";
+    const ut = document.createElement("div"); ut.className = "user-text";
+    renderStatic(ut, u.content);
+    ub.appendChild(ur); ub.appendChild(ut);
+    wrap.appendChild(ub);
+
+    if (a) {
+      const ab = document.createElement("div"); ab.className = "asst-block";
+      const ar = document.createElement("div"); ar.className = "role-label"; ar.textContent = "Assistant";
+      const at = document.createElement("div"); at.className = "asst-text";
+      renderStatic(at, a.content);
+      ab.appendChild(ar); ab.appendChild(at);
+      wrap.appendChild(ab);
+      i += 2;
+    } else {
+      i += 1;
+    }
+
+    logEl.appendChild(wrap);
+  }
+}
+
+async function persistActiveChat() {
+  // First persist: assign an id and createdAt.
+  if (!activeChat.id) {
+    activeChat.id = newChatId();
+    activeChat.createdAt = Date.now();
+  }
+  // Title rederives from the first user message each save -- handles the
+  // case where the user edits the very first prompt before it's saved.
+  activeChat.title = deriveTitle(messages);
+  activeChat.modelPath = modelPath || activeChat.modelPath || "";
+
+  try {
+    await window.cyllama.chats.save({
+      id: activeChat.id,
+      title: activeChat.title,
+      createdAt: activeChat.createdAt,
+      messages,
+      tokens: tokenCount(messages),
+      modelPath: activeChat.modelPath,
+    });
+    saveActiveChatId();
+  } catch (e) {
+    errorLine(`save chat: ${e.message}`);
+  }
+  await refreshChatList();
+}
+
+/* ----------------------------------------------------------------
+   Sidebar collapse (persisted)
+   ---------------------------------------------------------------- */
+function applyCollapse(side, collapsed) {
+  appEl.dataset[side] = collapsed ? "0" : "1";
+  try { localStorage.setItem(`collapse-${side}`, collapsed ? "1" : "0"); } catch {}
+}
+function initCollapse() {
+  for (const side of ["left", "right"]) {
+    let v = "0";
+    try { v = localStorage.getItem(`collapse-${side}`) || "0"; } catch {}
+    appEl.dataset[side] = v === "1" ? "0" : "1";
+  }
+}
+toggleLeft.addEventListener("click", () => {
+  applyCollapse("left", appEl.dataset.left !== "0");
+});
+toggleRight.addEventListener("click", () => {
+  applyCollapse("right", appEl.dataset.right !== "0");
+});
+
+/* ----------------------------------------------------------------
+   Init / wiring
+   ---------------------------------------------------------------- */
+async function init() {
+  initCollapse();
+  loadParams();
+  loadSystemPrompt();
+  bindParams();
+  setStatus("idle", "connecting");
+
+  // Restore the last loaded model so the user doesn't have to re-pick
+  // it every launch. Verify existence first -- a stale path (model
+  // moved or deleted between sessions) gets cleared silently rather
+  // than showing a phantom name in the pill that fails on send.
+  try {
+    const last = localStorage.getItem(LAST_MODEL_KEY);
+    if (last) {
+      const exists = await window.cyllama.fileExists(last);
+      if (exists) setModel(last);
+      else localStorage.removeItem(LAST_MODEL_KEY);
+    }
+  } catch {}
+
+  updateSendEnabled();
+
+  // Restore the last active chat if one exists; fall back to most-recent.
+  await refreshChatList();
+  let restoreId = null;
+  try { restoreId = localStorage.getItem(ACTIVE_CHAT_KEY); } catch {}
+  if (restoreId && chatList.find((c) => c.id === restoreId)) {
+    await loadChat(restoreId);
+  } else {
+    renderChatList();
+    showEmptyState();
+  }
+
+  try {
+    sidecar = await window.cyllama.getSidecarInfo();
+    setStatus("ready", `ready :${sidecar.port}`);
+  } catch (err) {
+    setStatus("error", "no sidecar");
+    errorLine(`init error: ${err.message}`);
+  }
+  updateSendEnabled();
+}
+
+pickBtn.addEventListener("click", async () => {
+  const p = await window.cyllama.pickModel();
+  if (p) setModel(p);
+});
+ejectBtn.addEventListener("click", () => setModel(""));
+
+const newChatBtn = document.getElementById("newChatBtn");
+if (newChatBtn) newChatBtn.addEventListener("click", newChat);
+
+sendBtn.addEventListener("click", () => {
+  if (inFlight) abortCtl?.abort();
+  else send();
+});
+promptEl.addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !e.shiftKey) {
+    e.preventDefault();
+    if (!inFlight && !sendBtn.disabled) send();
+  }
+});
+promptEl.addEventListener("input", autoGrow);
+function autoGrow() {
+  promptEl.style.height = "auto";
+  promptEl.style.height = Math.min(promptEl.scrollHeight, 200) + "px";
+}
+
+function setBusy(busy) {
+  inFlight = busy;
+  promptEl.disabled = busy;
+  sendBtn.classList.toggle("streaming", busy);
+  if (busy) setStatus("busy", "generating");
+  else setStatus("ready", sidecar ? `ready :${sidecar.port}` : "idle");
+  updateSendEnabled();
+}
+
+/* ----------------------------------------------------------------
+   Streaming
+   ---------------------------------------------------------------- */
+async function send() {
+  const prompt = promptEl.value.trim();
+  if (!prompt) return;
+  if (!modelPath) { errorLine("Pick a model first"); return; }
+  if (!sidecar)   { errorLine("Sidecar not connected"); return; }
+
+  promptEl.value = "";
+  autoGrow();
+  stickyScroll = true;
+  bumpTokens(prompt);
+
+  // Append the user turn to history before rendering so the outgoing
+  // payload reflects the new turn even if the request fails.
+  messages.push({ role: "user", content: prompt });
+
+  const { asstText } = makeExchange(prompt);
+  const render = createIncrementalRenderer(asstText);
+
+  let raw = "";
+  let aborted = false;
+  let pendingRaf = 0;
+  function scheduleRender() {
+    if (pendingRaf) return;
+    pendingRaf = requestAnimationFrame(() => {
+      pendingRaf = 0;
+      render(raw, true);
+      if (stickyScroll) logEl.scrollTop = logEl.scrollHeight;
+    });
+  }
+
+  // Build outgoing message list: optional system role + full history.
+  const sys = getSystemPrompt();
+  const outgoing = sys
+    ? [{ role: "system", content: sys }, ...messages]
+    : [...messages];
+
+  setBusy(true);
+  abortCtl = new AbortController();
+
+  try {
+    const res = await fetch(`http://127.0.0.1:${sidecar.port}/chat`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "authorization": `Bearer ${sidecar.token}`,
+      },
+      body: JSON.stringify({
+        model_path: modelPath,
+        messages: outgoing,
+        params: getCurrentParams(),
+      }),
+      signal: abortCtl.signal,
+    });
+    if (!res.ok || !res.body) {
+      throw new Error(`HTTP ${res.status}: ${await res.text()}`);
+    }
+
+    const reader = res.body.getReader();
+    const dec = new TextDecoder();
+    let buf = "";
+
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      let idx;
+      while ((idx = buf.indexOf("\n\n")) !== -1) {
+        const frame = buf.slice(0, idx);
+        buf = buf.slice(idx + 2);
+        for (const line of frame.split("\n")) {
+          if (!line.startsWith("data: ")) continue;
+          const payload = line.slice(6);
+          if (payload === "[DONE]") continue;
+          let parsed;
+          try { parsed = JSON.parse(payload); }
+          catch { continue; }
+          if (parsed.error) { errorLine(parsed.error); return; }
+          if (typeof parsed.text === "string") {
+            raw += parsed.text;
+            bumpTokens(parsed.text);
+            scheduleRender();
+          }
+        }
+      }
+    }
+  } catch (err) {
+    if (err.name === "AbortError") {
+      aborted = true;
+    } else {
+      errorLine(err.message || String(err));
+    }
+  } finally {
+    // Cancel any rAF queued mid-stream that hasn't fired yet -- if it
+    // ran after the final render below, it would re-add the streaming
+    // cursor to ``tailEl`` with nothing left to clean it up, leaving a
+    // stray blue caret under each completed assistant turn.
+    if (pendingRaf) {
+      cancelAnimationFrame(pendingRaf);
+      pendingRaf = 0;
+    }
+    // Final visual render: append "(stopped)" marker only if aborted,
+    // but keep the marker out of the persisted history so the model
+    // doesn't see its own UI marker on the next turn.
+    render(raw + (aborted ? "\n\n_(stopped)_" : ""), false);
+    if (raw) {
+      messages.push({ role: "assistant", content: raw });
+      // Persist the chat now that we have at least one complete turn.
+      // First save assigns an id; subsequent saves bump updatedAt.
+      persistActiveChat();
+    } else {
+      // Empty assistant turn (immediate abort or error before any
+      // tokens) -- drop the matching user turn to keep history balanced.
+      const last = messages[messages.length - 1];
+      if (last && last.role === "user") messages.pop();
+    }
+    setBusy(false);
+    abortCtl = null;
+    promptEl.focus();
+  }
+}
+
+init();

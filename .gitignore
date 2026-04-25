@@ -1,3 +1,13 @@
+node_modules/
+dist/
+build/
+src/renderer/vendor/
+*.log
+.DS_Store
+.env
+.env.*
+
+
 # Logs
 logs
 *.log
