@@ -32,7 +32,7 @@ endif
 PYENV_DIR := build/python-$(HOST_OS)-$(HOST_ARCH)
 PY_BIN    := $(PYENV_DIR)/bin/python3
 
-.PHONY: all dev dmg python npm clean reset help
+.PHONY: all dev dmg python npm test test-deps clean reset help
 
 all: dmg
 
@@ -43,6 +43,7 @@ help:
 	@echo "  make dmg       Build the installer for the host (mac=dmg, win=nsis, linux=AppImage)"
 	@echo "  make python    Build the bundled Python env only"
 	@echo "  make npm       npm install"
+	@echo "  make test      Run the sidecar pytest suite"
 	@echo "  make clean     Remove dist/ and build/"
 	@echo "  make reset     clean + remove node_modules/"
 
@@ -70,6 +71,26 @@ else ifeq ($(HOST_OS),win)
 else
 	npm run build:linux
 endif
+
+# --- tests ------------------------------------------------------------------
+#
+# Tests stub ``cyllama`` (see tests/conftest.py), so they only need pytest +
+# fastapi + httpx. We install these into the bundled Python env if it exists
+# (avoids polluting the user's system Python), otherwise fall back to whatever
+# ``python3`` is on PATH. Pytest is *not* shipped in the dmg -- it's reinstalled
+# into the bundled env on demand and pruned by build-python-env.sh on rebuild.
+
+PYTEST_PY := $(shell test -x "$(PY_BIN)" && echo "$(PY_BIN)" || command -v python3)
+
+test-deps:
+	@if [ -z "$(PYTEST_PY)" ]; then \
+	  echo "no python3 found"; exit 1; \
+	fi
+	@$(PYTEST_PY) -c "import pytest, fastapi, httpx" 2>/dev/null || \
+	  $(PYTEST_PY) -m pip install --quiet pytest "fastapi>=0.115" "httpx>=0.27"
+
+test: test-deps
+	$(PYTEST_PY) -m pytest tests/ -v
 
 clean:
 	rm -rf dist build

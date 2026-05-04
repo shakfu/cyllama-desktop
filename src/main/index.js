@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Menu, ipcMain, dialog } = require("electron");
+const { app, BrowserWindow, Menu, ipcMain, dialog, shell } = require("electron");
 const { spawn } = require("child_process");
 const path = require("path");
 const fs = require("fs");
@@ -97,12 +97,24 @@ async function startSidecar() {
   const port = await getFreePort();
   const token = crypto.randomBytes(32).toString("hex");
 
+  // Artifact root for long-running jobs (HF downloads, image gen, batch
+  // outputs). Created up front so the sidecar can rely on it existing.
+  // Kept under userData so a clean uninstall takes it with it.
+  const artifactsDir = path.join(app.getPath("userData"), "artifacts");
+  fs.mkdirSync(artifactsDir, { recursive: true });
+  // Desktop-managed models dir. Primary source for the Models workspace;
+  // HF cache is enumerated read-only as a secondary listing.
+  const modelsDir = path.join(app.getPath("userData"), "models");
+  fs.mkdirSync(modelsDir, { recursive: true });
+
   sidecarProc = spawn(pythonBin, [script], {
     env: {
       ...process.env,
       CYLLAMA_SIDECAR_PORT: String(port),
       CYLLAMA_SIDECAR_TOKEN: token,
       CYLLAMA_SIDECAR_PARENT_PID: String(process.pid),
+      CYLLAMA_SIDECAR_ARTIFACTS: artifactsDir,
+      CYLLAMA_SIDECAR_MODELS: modelsDir,
       PYTHONUNBUFFERED: "1",
     },
     stdio: ["ignore", "pipe", "pipe"],
@@ -311,6 +323,19 @@ ipcMain.handle("fs:exists", async (_e, p) => {
   try {
     const st = await fs.promises.stat(p);
     return st.isFile();
+  } catch {
+    return false;
+  }
+});
+
+ipcMain.handle("shell:revealItem", async (_e, p) => {
+  // Reveal-in-Finder/Explorer for a model file in the Models workspace.
+  // Path is treated as opaque and only passed to shell.showItemInFolder,
+  // which doesn't follow symlinks or read the target.
+  if (typeof p !== "string" || !p) return false;
+  try {
+    shell.showItemInFolder(p);
+    return true;
   } catch {
     return false;
   }

@@ -8,6 +8,10 @@ set -euo pipefail
 
 PY_VERSION="${PY_VERSION:-3.12.7}"
 PBS_RELEASE="${PBS_RELEASE:-20241016}"
+# Pin cyllama so a re-bundle is reproducible. Bump deliberately when a
+# new release exposes APIs we want; the renderer auto-adapts to whatever
+# fields cyllama.GenerationConfig accepts (see _build_config and /info).
+CYLLAMA_VERSION="${CYLLAMA_VERSION:-0.2.15}"
 
 # Detect target triple if not provided.
 detect_triple() {
@@ -75,8 +79,8 @@ if [[ -n "${CYLLAMA_SOURCE:-}" ]]; then
   echo "Installing cyllama from $CYLLAMA_SOURCE"
   "$PY" -m pip install "$CYLLAMA_SOURCE"
 else
-  echo "Installing cyllama from PyPI"
-  "$PY" -m pip install "cyllama"
+  echo "Installing cyllama==${CYLLAMA_VERSION} from PyPI"
+  "$PY" -m pip install "cyllama==${CYLLAMA_VERSION}"
 fi
 
 "$PY" -m pip install "fastapi>=0.115" "uvicorn[standard]>=0.32"

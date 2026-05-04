@@ -1,5 +1,30 @@
 /* global marked, katex, renderMathInElement */
 
+// Phase 0 split: the bulk of the renderer still lives here, but the
+// loopback HTTP client and the /jobs SSE client are extracted into
+// reusable modules so the workspaces added in later phases (Models,
+// Documents, Image, Agents, ...) can consume them without re-implementing
+// the bearer-auth handshake or SSE framing. The chat hot path keeps its
+// existing direct-fetch code for now.
+import * as cyllamaSidecar from "./lib/sidecar.js";
+import * as cyllamaJobs from "./lib/jobs.js";
+import * as cyllamaModels from "./lib/models.js";
+import * as rightTabs from "./features/right-tabs.js";
+import * as modelsTab from "./features/models-tab.js";
+import * as agentsTab from "./features/agents-tab.js";
+import * as generalTab from "./features/general-tab.js";
+import * as modelPicker from "./features/model-picker.js";
+import * as presets from "./features/presets.js";
+
+// Expose the libs on a single namespace so feature modules added later --
+// or ad-hoc devtools sessions -- can reach them without re-importing.
+window.cyllamaLib = {
+  sidecar: cyllamaSidecar,
+  jobs: cyllamaJobs,
+  models: cyllamaModels,
+  rightTabs,
+};
+
 const appEl       = document.getElementById("app");
 const logEl       = document.getElementById("log");
 const promptEl    = document.getElementById("prompt");
@@ -512,17 +537,22 @@ if (window.cyllama && window.cyllama.log && typeof window.cyllama.log.subscribe 
    Sampling parameters (persisted)
    ---------------------------------------------------------------- */
 const PARAM_DEFAULTS = {
-  temperature:    0.8,
-  top_p:          0.95,
-  top_k:          40,
-  min_p:          0.05,
-  repeat_penalty: 1.0,
-  max_tokens:     512,
-  seed:           "",   // empty string => omit from request
-  stop_sequences: "",   // comma-separated; parsed into list at send time
+  temperature:       0.8,
+  top_p:             0.95,
+  top_k:             40,
+  min_p:             0.05,
+  repeat_penalty:    1.0,
+  presence_penalty:  0.0,
+  frequency_penalty: 0.0,
+  mirostat:          0,
+  mirostat_tau:      5.0,
+  mirostat_eta:      0.1,
+  max_tokens:        512,
+  seed:              "",   // empty string => omit from request
+  stop_sequences:    "",   // comma-separated; parsed into list at send time
 };
 const PARAM_KEYS = Object.keys(PARAM_DEFAULTS);
-const PARAM_INT_KEYS = new Set(["top_k", "max_tokens", "seed"]);
+const PARAM_INT_KEYS = new Set(["top_k", "max_tokens", "seed", "mirostat"]);
 const PARAM_CSV_KEYS = new Set(["stop_sequences"]);
 
 // Default system prompt used when a brand-new chat starts. Per-chat
@@ -632,6 +662,42 @@ function resetParams() {
   saveParams();
 }
 
+function applyMirostatVisibility() {
+  const sel = paramEl("mirostat");
+  // If the mirostat row itself is hidden because cyllama doesn't accept
+  // it, pretend it's "off" so tau/eta also stay hidden -- they're
+  // meaningless without the mode.
+  const sectionEl = sel ? sel.closest(".param") : null;
+  const sectionHidden = !sel || (sectionEl && sectionEl.hidden);
+  const off = sectionHidden || sel.value === "0";
+  for (const e of document.querySelectorAll("[data-mirostat-only]")) {
+    e.hidden = off;
+  }
+}
+
+// Hide rows for sampling fields the installed cyllama doesn't accept.
+// Sourced from /info.supported_params (see sidecar). Forward-looking
+// presets that set values for unsupported fields are still safe -- the
+// sidecar's _build_config drops them before constructing GenerationConfig.
+async function applySupportedParams() {
+  let supported = null;
+  try {
+    const info = await cyllamaSidecar.getInfo();
+    supported = info && Array.isArray(info.supported_params)
+      ? new Set(info.supported_params)
+      : null;
+  } catch { /* /info unreachable -> leave UI as-is */ }
+  if (!supported) return;
+  for (const key of PARAM_KEYS) {
+    const el = paramEl(key);
+    if (!el) continue;
+    const row = el.closest(".param");
+    if (!row) continue;
+    row.hidden = !supported.has(key);
+  }
+  applyMirostatVisibility();
+}
+
 function bindParams() {
   for (const key of PARAM_KEYS) {
     const el = paramEl(key);
@@ -640,12 +706,17 @@ function bindParams() {
       const out = paramOut(key);
       if (out) out.textContent = formatParamValue(key, el.value);
       saveParams();
+      if (key === "mirostat") applyMirostatVisibility();
     });
   }
   const sysEl = document.getElementById("p-system_prompt");
   if (sysEl) sysEl.addEventListener("input", onSystemPromptInput);
   const resetBtn = document.getElementById("resetParams");
-  if (resetBtn) resetBtn.addEventListener("click", resetParams);
+  if (resetBtn) resetBtn.addEventListener("click", () => {
+    resetParams();
+    applyMirostatVisibility();
+  });
+  applyMirostatVisibility();
 }
 
 /* ----------------------------------------------------------------
@@ -858,6 +929,27 @@ toggleRight.addEventListener("click", () => {
 async function init() {
   initCollapse();
   loadParams();
+  // Right-sidebar tabs: Models | Agents | General. Cog nav-rail button
+  // jumps to General via the tab router's data-tab-jump wiring.
+  rightTabs.bind();
+  modelsTab.mount({
+    onPick: (p) => { if (p) setModel(p); },
+    reveal: (p) => window.cyllama.revealItem && window.cyllama.revealItem(p),
+  });
+  agentsTab.mount();
+  generalTab.mount();
+  // Presets bar lives at the top of the Sampling section. Bridge gives
+  // it access to the existing #p-* inputs and helpers without coupling.
+  presets.mount({
+    paramKeys: PARAM_KEYS,
+    paramEl, paramOut, formatParamValue,
+    getSystemPrompt,
+    setSystemPromptUI,
+  });
+  // Hide UI rows for sampler fields cyllama doesn't actually accept.
+  // Fire-and-forget; if /info fails we leave the UI as-is and the
+  // sidecar's whitelist filter still keeps chat from crashing.
+  applySupportedParams();
   // Seed the unsaved working chat with the default system prompt so the
   // textarea is populated on first launch. loadChat() overrides this if
   // a chat is restored.
@@ -902,9 +994,12 @@ async function init() {
   updateSendEnabled();
 }
 
-pickBtn.addEventListener("click", async () => {
-  const p = await window.cyllama.pickModel();
-  if (p) setModel(p);
+// ModelPicker dropdown takes over the pill click. The OS file dialog is
+// still reachable as the "Browse..." item at the bottom of the dropdown.
+modelPicker.bind({
+  pillSelector: "#pick",
+  onPickPath: (p) => { if (p) setModel(p); },
+  onBrowsePath: () => window.cyllama.pickModel(),
 });
 ejectBtn.addEventListener("click", async () => {
   if (inFlight) return;

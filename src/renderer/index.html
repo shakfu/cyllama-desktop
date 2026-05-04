@@ -41,10 +41,13 @@
       <nav class="nav-rail" aria-label="Primary">
         <button class="nav-btn active" title="Chats"><svg><use href="#i-chat"/></svg></button>
         <button class="nav-btn" id="navConsole" title="Console"><svg><use href="#i-terminal"/></svg></button>
-        <button class="nav-btn" title="Models"><svg><use href="#i-stack"/></svg></button>
         <div class="nav-spacer"></div>
-        <button class="nav-btn" title="Settings"><svg><use href="#i-cog"/></svg></button>
+        <button class="nav-btn" data-tab-jump="general" title="Settings"><svg><use href="#i-cog"/></svg></button>
       </nav>
+
+      <!-- Chat workspace: sidebar + main-col + params-panel each tagged
+           data-workspace="chat" so the router hides them together when a
+           different workspace is active. -->
 
       <!-- Left: chat list -->
       <aside class="sidebar">
@@ -115,89 +118,123 @@
         </div>
       </main>
 
-      <!-- Right: model parameters -->
+      <!-- Right: tabbed sidebar.
+           Tab strip across the top, scrollable body per tab. Each tab body
+           is a sibling section in #rightTabBody; the tab strip toggles
+           which is visible. -->
       <aside class="params-panel">
-        <div class="params-tabs">
-          <button class="params-tab active" title="Parameters"><svg><use href="#i-sliders"/></svg></button>
-          <button class="icon-btn" id="resetParams" title="Reset to defaults"><svg><use href="#i-refresh"/></svg></button>
-        </div>
-        <h3 class="params-title">System Prompt</h3>
-        <div class="params-section">
-          <div class="param">
-            <textarea id="p-system_prompt" rows="3" placeholder="Optional. e.g. You are a concise, technical assistant."></textarea>
-            <div class="param-hint">Prepended as a <code>system</code> message via the model's chat template.</div>
-          </div>
-        </div>
+        <nav class="rt-tabs" role="tablist" aria-label="Right sidebar">
+          <button class="rt-tab active" role="tab" data-tab="models" aria-selected="true">Models</button>
+          <button class="rt-tab" role="tab" data-tab="agents" aria-selected="false">Agents</button>
+          <button class="rt-tab" role="tab" data-tab="general" aria-selected="false">General</button>
+        </nav>
+        <div class="rt-body" id="rightTabBody">
 
-        <h3 class="params-title">Sampling</h3>
+          <!-- Models tab: model selection + system prompt + sampling.
+               Most of this is rendered by features/models-tab.js into the
+               #modelsTabHost slot; the system-prompt + sampling sliders
+               are static HTML so the existing param IDs the chat code
+               depends on (p-temperature, p-system_prompt, ...) keep
+               working without a JS migration. -->
+          <section class="rt-pane active" data-tab="models">
+            <div id="modelsTabHost"></div>
 
-        <div class="params-section" id="paramsForm">
-          <div class="param">
-            <label for="p-temperature">
-              <span>Temperature</span>
-              <output id="p-temperature-out">0.80</output>
-            </label>
-            <input id="p-temperature" type="range" min="0" max="2" step="0.05" value="0.8" />
-            <div class="param-hint">0 = greedy &middot; higher = more random</div>
-          </div>
+            <div class="rt-section">
+              <div class="rt-section-head">
+                <h3>System Prompt</h3>
+              </div>
+              <div class="param">
+                <textarea id="p-system_prompt" rows="3" placeholder="Optional. e.g. You are a concise, technical assistant."></textarea>
+                <div class="param-hint">Prepended as a <code>system</code> message via the model's chat template.</div>
+              </div>
+            </div>
 
-          <div class="param">
-            <label for="p-top_p">
-              <span>Top P</span>
-              <output id="p-top_p-out">0.95</output>
-            </label>
-            <input id="p-top_p" type="range" min="0" max="1" step="0.01" value="0.95" />
-            <div class="param-hint">Nucleus sampling cutoff</div>
-          </div>
+            <div class="rt-section">
+              <div class="rt-section-head">
+                <h3>Sampling</h3>
+                <button class="icon-btn" id="resetParams" title="Reset to defaults"><svg><use href="#i-refresh"/></svg></button>
+              </div>
+              <div id="paramsForm">
+                <div class="param">
+                  <label for="p-temperature"><span>Temperature</span><output id="p-temperature-out">0.80</output></label>
+                  <input id="p-temperature" type="range" min="0" max="2" step="0.05" value="0.8" />
+                  <div class="param-hint">0 = greedy &middot; higher = more random</div>
+                </div>
+                <div class="param">
+                  <label for="p-top_p"><span>Top P</span><output id="p-top_p-out">0.95</output></label>
+                  <input id="p-top_p" type="range" min="0" max="1" step="0.01" value="0.95" />
+                  <div class="param-hint">Nucleus sampling cutoff</div>
+                </div>
+                <div class="param">
+                  <label for="p-top_k"><span>Top K</span><output id="p-top_k-out">40</output></label>
+                  <input id="p-top_k" type="range" min="0" max="200" step="1" value="40" />
+                  <div class="param-hint">0 = disabled</div>
+                </div>
+                <div class="param">
+                  <label for="p-min_p"><span>Min P</span><output id="p-min_p-out">0.05</output></label>
+                  <input id="p-min_p" type="range" min="0" max="1" step="0.01" value="0.05" />
+                  <div class="param-hint">Minimum probability threshold</div>
+                </div>
+                <div class="param">
+                  <label for="p-repeat_penalty"><span>Repeat penalty</span><output id="p-repeat_penalty-out">1.00</output></label>
+                  <input id="p-repeat_penalty" type="range" min="1" max="2" step="0.01" value="1.0" />
+                  <div class="param-hint">1.0 = disabled</div>
+                </div>
+                <div class="param">
+                  <label for="p-presence_penalty"><span>Presence penalty</span><output id="p-presence_penalty-out">0.00</output></label>
+                  <input id="p-presence_penalty" type="range" min="-2" max="2" step="0.05" value="0" />
+                  <div class="param-hint">Discourage tokens already used. 0 = disabled</div>
+                </div>
+                <div class="param">
+                  <label for="p-frequency_penalty"><span>Frequency penalty</span><output id="p-frequency_penalty-out">0.00</output></label>
+                  <input id="p-frequency_penalty" type="range" min="-2" max="2" step="0.05" value="0" />
+                  <div class="param-hint">Penalty grows with token frequency. 0 = disabled</div>
+                </div>
+                <div class="param">
+                  <label for="p-mirostat"><span>Mirostat</span></label>
+                  <select id="p-mirostat">
+                    <option value="0">Off</option>
+                    <option value="1">v1</option>
+                    <option value="2">v2</option>
+                  </select>
+                  <div class="param-hint">Adaptive sampling targeting a perplexity. Overrides Top P / Top K.</div>
+                </div>
+                <div class="param" data-mirostat-only>
+                  <label for="p-mirostat_tau"><span>Mirostat tau</span><output id="p-mirostat_tau-out">5.00</output></label>
+                  <input id="p-mirostat_tau" type="range" min="0" max="20" step="0.1" value="5.0" />
+                  <div class="param-hint">Target perplexity. Lower = more focused.</div>
+                </div>
+                <div class="param" data-mirostat-only>
+                  <label for="p-mirostat_eta"><span>Mirostat eta</span><output id="p-mirostat_eta-out">0.10</output></label>
+                  <input id="p-mirostat_eta" type="range" min="0" max="1" step="0.01" value="0.1" />
+                  <div class="param-hint">Learning rate for tau adaptation.</div>
+                </div>
+                <div class="param">
+                  <label for="p-max_tokens"><span>Max tokens</span><output id="p-max_tokens-out">512</output></label>
+                  <input id="p-max_tokens" type="range" min="16" max="8192" step="16" value="512" />
+                </div>
+                <div class="param">
+                  <label for="p-seed"><span>Seed</span></label>
+                  <input id="p-seed" type="number" placeholder="random" min="0" step="1" />
+                  <div class="param-hint">Empty = non-deterministic</div>
+                </div>
+                <div class="param">
+                  <label for="p-stop_sequences"><span>Stop sequences</span></label>
+                  <input id="p-stop_sequences" type="text" placeholder="comma-separated, e.g. END,###" />
+                  <div class="param-hint">Generation halts when any sequence appears.</div>
+                </div>
+              </div>
+            </div>
+          </section>
 
-          <div class="param">
-            <label for="p-top_k">
-              <span>Top K</span>
-              <output id="p-top_k-out">40</output>
-            </label>
-            <input id="p-top_k" type="range" min="0" max="200" step="1" value="40" />
-            <div class="param-hint">0 = disabled</div>
-          </div>
+          <section class="rt-pane" data-tab="agents" hidden>
+            <div id="agentsTabHost"></div>
+          </section>
 
-          <div class="param">
-            <label for="p-min_p">
-              <span>Min P</span>
-              <output id="p-min_p-out">0.05</output>
-            </label>
-            <input id="p-min_p" type="range" min="0" max="1" step="0.01" value="0.05" />
-            <div class="param-hint">Minimum probability threshold</div>
-          </div>
+          <section class="rt-pane" data-tab="general" hidden>
+            <div id="generalTabHost"></div>
+          </section>
 
-          <div class="param">
-            <label for="p-repeat_penalty">
-              <span>Repeat penalty</span>
-              <output id="p-repeat_penalty-out">1.00</output>
-            </label>
-            <input id="p-repeat_penalty" type="range" min="1" max="2" step="0.01" value="1.0" />
-            <div class="param-hint">1.0 = disabled</div>
-          </div>
-
-          <div class="param">
-            <label for="p-max_tokens">
-              <span>Max tokens</span>
-              <output id="p-max_tokens-out">512</output>
-            </label>
-            <input id="p-max_tokens" type="range" min="16" max="8192" step="16" value="512" />
-          </div>
-
-          <div class="param">
-            <label for="p-seed">
-              <span>Seed</span>
-            </label>
-            <input id="p-seed" type="number" placeholder="random" min="0" step="1" />
-            <div class="param-hint">Empty = non-deterministic</div>
-          </div>
-
-          <div class="param">
-            <label for="p-stop_sequences"><span>Stop sequences</span></label>
-            <input id="p-stop_sequences" type="text" placeholder="comma-separated, e.g. END,###" />
-            <div class="param-hint">Generation halts when any sequence appears.</div>
-          </div>
         </div>
       </aside>
     </div>
@@ -206,6 +243,8 @@
     <script src="vendor/marked.min.js"></script>
     <script src="vendor/katex/katex.min.js"></script>
     <script src="vendor/katex/contrib/auto-render.min.js"></script>
-    <script src="renderer.js"></script>
+    <!-- esbuild output. Source under src/renderer/src/, bundled by
+         `npm run build:renderer`. -->
+    <script src="dist/renderer.js"></script>
   </body>
 </html>

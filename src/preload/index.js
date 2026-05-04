@@ -4,6 +4,7 @@ contextBridge.exposeInMainWorld("cyllama", {
   getSidecarInfo: () => ipcRenderer.invoke("sidecar:info"),
   pickModel: () => ipcRenderer.invoke("dialog:pickModel"),
   fileExists: (path) => ipcRenderer.invoke("fs:exists", path),
+  revealItem: (path) => ipcRenderer.invoke("shell:revealItem", path),
   chats: {
     list:   () => ipcRenderer.invoke("chats:list"),
     load:   (id) => ipcRenderer.invoke("chats:load", id),

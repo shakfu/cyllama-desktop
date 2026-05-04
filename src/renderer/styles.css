@@ -823,3 +823,280 @@ svg circle, svg rect, svg polygon { fill: none; }
   padding: 0 4px;
   border-radius: 3px;
 }
+
+/* ===========================================================================
+
+/* ===========================================================================
+   Phase 1 (revised): tabbed right sidebar (Models/Agents/General).
+   The old Models-as-workspace layout has been ripped; everything
+   model-related lives in the right sidebar Models tab now.
+   =========================================================================== */
+
+/* Tab strip + body wrapper. The .params-panel grid template has its own
+   sizing already; we override its internal layout here without touching
+   --col-panel. */
+.params-panel {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  /* The original rule sets overflow-y: auto on the panel itself, but with
+     the new tabbed layout the inner .rt-body owns scrolling so the tab
+     strip stays sticky at the top. */
+  overflow-y: hidden;
+}
+
+.rt-tabs {
+  display: flex;
+  align-items: stretch;
+  border-bottom: 1px solid var(--border);
+  padding: 6px 6px 0;
+  gap: 2px;
+  flex: 0 0 auto;
+}
+.rt-tab {
+  appearance: none;
+  background: transparent;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  color: var(--fg-faint);
+  padding: 8px 12px;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  border-radius: 4px 4px 0 0;
+}
+.rt-tab:hover { color: var(--fg); }
+.rt-tab.active {
+  color: var(--fg);
+  border-bottom-color: var(--border-strong);
+  background: var(--bg-elev);
+}
+
+.rt-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+}
+.rt-pane { padding: 14px 14px 24px; }
+.rt-pane[hidden] { display: none; }
+
+.rt-section { padding-bottom: 18px; }
+.rt-section + .rt-section { border-top: 1px solid var(--border); padding-top: 14px; }
+.rt-section-head {
+  display: flex; align-items: center; justify-content: space-between;
+  margin-bottom: 10px;
+}
+.rt-section-head h3 {
+  margin: 0;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--fg-faint);
+}
+
+.rt-placeholder {
+  font-size: 12px;
+  color: var(--fg-faint);
+  background: var(--bg-sunken);
+  border: 1px dashed var(--border);
+  border-radius: 6px;
+  padding: 10px 12px;
+}
+.rt-placeholder p { margin: 0 0 6px; }
+.rt-placeholder p:last-child { margin-bottom: 0; }
+.rt-placeholder-sub { font-size: 11px; }
+
+.rt-kv {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 4px 10px;
+  font-size: 12px;
+}
+.rt-kv .k { color: var(--fg-faint); }
+.rt-kv .v { word-break: break-all; }
+
+/* Models tab specifics. mt- prefix to scope. */
+.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+
+#modelsTabHost.dragging { outline: 2px dashed var(--border-strong); outline-offset: -6px; }
+
+.mt-rows { display: flex; flex-direction: column; gap: 2px; }
+.mt-empty { font-size: 12px; color: var(--fg-faint); padding: 8px 0; }
+.mt-row {
+  appearance: none;
+  width: 100%;
+  text-align: left;
+  display: flex; flex-direction: column; gap: 1px;
+  padding: 6px 8px;
+  border: 0;
+  background: transparent;
+  color: var(--fg);
+  border-radius: 6px;
+  cursor: pointer;
+  font: inherit;
+}
+.mt-row:hover { background: var(--bg-sunken); }
+.mt-row.active { background: var(--bg-active); }
+.mt-row-name {
+  font-size: 12px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.mt-row-meta { font-size: 10px; color: var(--fg-faint); }
+
+.mt-hf { display: flex; flex-direction: column; gap: 6px; }
+.mt-hf-row { display: flex; gap: 6px; }
+.mt-hf-input {
+  flex: 1; min-width: 0;
+  padding: 6px 8px;
+  font: inherit; font-size: 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-elev);
+  color: var(--fg);
+}
+.mt-hf-input:focus { outline: none; border-color: var(--border-strong); }
+.mt-hf-btn { padding: 6px 10px; font-size: 12px; }
+.mt-hf-status { font-size: 11px; color: var(--fg-faint); min-height: 14px; }
+.mt-hf-progress { display: flex; align-items: center; gap: 8px; }
+.mt-hf-bar { flex: 1; height: 4px; background: var(--bg-sunken); border-radius: 2px; overflow: hidden; }
+.mt-hf-bar-fill { height: 100%; width: 0%; background: var(--border-strong); transition: width 120ms; }
+.mt-hf-bar-text { font-size: 10px; color: var(--fg-faint); white-space: nowrap; }
+
+.mt-drop {
+  margin-top: 6px;
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+  padding: 12px;
+  text-align: center;
+  background: var(--bg-sunken);
+  font-size: 12px;
+}
+.mt-drop-title { color: var(--fg); }
+.mt-drop-sub { margin-top: 3px; font-size: 10px; color: var(--fg-faint); word-break: break-all; }
+
+.mt-selected {
+  margin-top: 12px;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-elev);
+  display: flex; flex-direction: column; gap: 6px;
+}
+.mt-selected-name { font-size: 12px; font-weight: 600; word-break: break-all; }
+.mt-selected-path { font-size: 10px; color: var(--fg-faint); word-break: break-all; }
+.mt-selected-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+.mt-meta-toggle { margin-left: auto; }
+.mt-meta-empty { font-size: 11px; color: var(--fg-faint); }
+.mt-meta-error { font-size: 11px; color: #c33; }
+.mt-meta-list {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 3px 8px;
+  font-size: 11px;
+  border-top: 1px solid var(--border);
+  padding-top: 6px;
+  max-height: 240px;
+  overflow: auto;
+}
+.mt-kv { display: contents; }
+.mt-kv .k { color: var(--fg-faint); }
+.mt-kv .v { color: var(--fg); word-break: break-all; }
+
+/* Buttons (right-pane scoped) */
+.params-panel .btn {
+  appearance: none;
+  border: 1px solid var(--border);
+  background: var(--bg-elev);
+  color: var(--fg);
+  padding: 4px 10px;
+  border-radius: 6px;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+.params-panel .btn:hover { background: var(--bg-sunken); }
+.params-panel .btn.primary { border-color: var(--border-strong); }
+
+/* ModelPicker dropdown -- same as before, kept under mp- prefix. */
+.mp-menu {
+  position: fixed;
+  z-index: 1000;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.18);
+  padding: 6px;
+  max-height: 60vh;
+  overflow: auto;
+  min-width: 280px;
+}
+.mp-loading, .mp-error, .mp-empty { padding: 10px 12px; font-size: 12px; color: var(--fg-faint); }
+.mp-error { color: #c33; }
+.mp-group { padding: 6px 10px 4px; font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--fg-faint); }
+.mp-item {
+  display: flex; justify-content: space-between; align-items: center;
+  width: 100%;
+  padding: 7px 10px;
+  border: 0;
+  background: transparent;
+  color: var(--fg);
+  font: inherit;
+  text-align: left;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.mp-item:hover { background: var(--bg-sunken); }
+.mp-item-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.mp-item-meta { font-size: 11px; color: var(--fg-faint); margin-left: 12px; flex: 0 0 auto; }
+.mp-sep { height: 1px; background: var(--border); margin: 6px 4px; }
+.mp-item-browse { color: var(--fg-faint); font-style: italic; }
+
+/* Phase 2.0: select dropdowns inside params (mirostat). */
+.param select {
+  appearance: none;
+  -webkit-appearance: none;
+  padding: 6px 10px;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font: inherit;
+  color: var(--fg);
+  cursor: pointer;
+}
+.param select:focus { outline: none; border-color: var(--border-strong); }
+.param[hidden] { display: none; }
+
+/* Presets bar inside the Sampling rt-section. */
+.presets-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+.presets-label {
+  font-size: 11px;
+  color: var(--fg-faint);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-right: 2px;
+}
+.presets-select {
+  flex: 1; min-width: 0;
+  appearance: none;
+  -webkit-appearance: none;
+  padding: 5px 8px;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--fg);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+.presets-select:focus { outline: none; border-color: var(--border-strong); }
+.presets-save, .presets-delete {
+  width: 24px; height: 24px;
+  font-size: 14px; line-height: 1;
+}
+.presets-delete:disabled { opacity: 0.35; cursor: default; }
