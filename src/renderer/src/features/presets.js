@@ -4,11 +4,23 @@
 // separate codepath. Built-ins are seeded read-only; user creations
 // persist in localStorage and can be deleted.
 //
-// Bundles intentionally cover every key in PARAM_DEFAULTS (passed in by
-// the host) plus an optional system_prompt. Unknown keys are ignored on
-// load so old bundles keep working when the schema grows.
+// Bundles cover sampling keys + system prompt only. Hardware fields
+// (n_gpu_layers, n_ctx, n_batch, main_gpu, split_mode, tensor_split)
+// are deliberately omitted so switching a preset doesn't clobber the
+// user's hardware setup -- those live with the machine, not the
+// conversation style. captureCurrent() honours this by walking only
+// SAMPLING_KEYS rather than all PARAM_KEYS.
 
 const STORAGE_KEY = "presets_v1";
+
+// Keys a preset is allowed to touch. Hardware fields are intentionally
+// excluded -- see header comment.
+const SAMPLING_KEYS = new Set([
+  "temperature", "top_p", "top_k", "min_p", "repeat_penalty",
+  "presence_penalty", "frequency_penalty",
+  "mirostat", "mirostat_tau", "mirostat_eta",
+  "max_tokens", "seed", "stop_sequences",
+]);
 
 const BUILTINS = {
   Default: {
@@ -91,6 +103,7 @@ function allPresets() {
 function captureCurrent() {
   const params = {};
   for (const key of bridge.paramKeys) {
+    if (!SAMPLING_KEYS.has(key)) continue;
     const el = bridge.paramEl(key);
     if (!el) continue;
     params[key] = el.value;
@@ -106,6 +119,10 @@ function applyPreset(name) {
   const preset = all[name];
   if (!preset) return;
   for (const [k, v] of Object.entries(preset.params || {})) {
+    // Preset bundles only touch sampling fields. Reject anything else
+    // (forwards-compat: an old bundle with hardware keys can't clobber
+    // the current hardware setup when applied).
+    if (!SAMPLING_KEYS.has(k)) continue;
     const el = bridge.paramEl(k);
     if (!el) continue;
     el.value = String(v ?? "");

@@ -48,7 +48,42 @@ _ALLOWED_PARAMS = {
     "mirostat_eta":      float,
     "max_tokens":        int,
     "seed":              int,
+    # Phase 3 hardware / load-time fields. Same _GC_ACCEPTED filter
+    # gates them; they only land in the config if the installed cyllama
+    # actually accepts the field. Per LLM(model_path, config=...), these
+    # take effect at *construction* time, so changing them must evict
+    # the cached LLM and reload (see _LOAD_KEYS / _hw_signature).
+    "n_gpu_layers":      int,
+    "main_gpu":          int,
+    "split_mode":        int,
+    "n_ctx":             int,
+    "n_batch":           int,
 }
+
+# Fields whose value affects model construction (and therefore VRAM
+# layout) rather than per-token sampling. tensor_split is special-cased
+# as a list[float] -- not in _ALLOWED_PARAMS because its caster differs.
+_LOAD_KEYS: tuple[str, ...] = (
+    "n_gpu_layers", "main_gpu", "split_mode",
+    "n_ctx", "n_batch", "tensor_split",
+)
+
+
+def _coerce_tensor_split(v) -> list[float] | None:
+    """Accept list[number] or comma-separated string. Empty / invalid -> None."""
+    if isinstance(v, str):
+        items = [s.strip() for s in v.split(",") if s.strip()]
+    elif isinstance(v, (list, tuple)):
+        items = list(v)
+    else:
+        return None
+    out: list[float] = []
+    for x in items:
+        try:
+            out.append(float(x))
+        except (TypeError, ValueError):
+            return None
+    return out or None
 
 
 def _supported_gc_params() -> set[str]:
@@ -125,7 +160,38 @@ def _build_config(params: dict | None) -> GenerationConfig | None:
     if stops is not None and "stop_sequences" in _GC_ACCEPTED:
         kwargs["stop_sequences"] = stops
 
+    ts = _coerce_tensor_split(params.get("tensor_split"))
+    if ts is not None and "tensor_split" in _GC_ACCEPTED:
+        kwargs["tensor_split"] = ts
+
     return GenerationConfig(**kwargs) if kwargs else None
+
+
+def _hw_signature(params: dict | None) -> tuple:
+    """Stable, hashable digest of the hardware/load fields in ``params``.
+
+    Used as part of the LLM cache key so a cached LLM is evicted only
+    when a load-time field changes -- temperature tweaks shouldn't
+    reload a multi-GB model. Unset fields are normalised to ``None`` so
+    "missing" and "explicitly default" hash the same.
+    """
+    if not params:
+        return tuple((k, None) for k in _LOAD_KEYS)
+    out = []
+    for k in _LOAD_KEYS:
+        v = params.get(k)
+        if v is None or v == "":
+            out.append((k, None))
+            continue
+        if k == "tensor_split":
+            ts = _coerce_tensor_split(v)
+            out.append((k, tuple(ts) if ts else None))
+            continue
+        try:
+            out.append((k, int(v)))
+        except (TypeError, ValueError):
+            out.append((k, None))
+    return tuple(out)
 
 
 PORT = int(os.environ["CYLLAMA_SIDECAR_PORT"])
@@ -188,17 +254,20 @@ async def auth_mw(request: Request, call_next):
     return await call_next(request)
 
 
-# Cache one LLM per model_path. cyllama.LLM holds GPU resources, so we
-# keep this single-slot to avoid VRAM blowup; switching models evicts.
+# Cache one LLM per (model_path, hardware signature). cyllama.LLM holds
+# GPU resources, so we keep this single-slot to avoid VRAM blowup;
+# switching models OR changing a load-time field evicts and reloads.
 _llm_lock = threading.Lock()
 _llm: Optional[LLM] = None
 _llm_path: Optional[str] = None
+_llm_hw_sig: tuple = ()
 
 
-def _get_llm(model_path: str) -> LLM:
-    global _llm, _llm_path
+def _get_llm(model_path: str, params: dict | None = None) -> LLM:
+    global _llm, _llm_path, _llm_hw_sig
+    hw_sig = _hw_signature(params)
     with _llm_lock:
-        if _llm is not None and _llm_path == model_path:
+        if _llm is not None and _llm_path == model_path and _llm_hw_sig == hw_sig:
             return _llm
         if _llm is not None:
             try:
@@ -208,8 +277,17 @@ def _get_llm(model_path: str) -> LLM:
             _llm = None
         if not os.path.isfile(model_path):
             raise HTTPException(status_code=400, detail=f"model not found: {model_path}")
-        _llm = LLM(model_path)
+        # Build a load-only config: only fields cyllama actually takes,
+        # filtered through the same _GC_ACCEPTED gate as /chat. Sampling
+        # fields are present in the config too but harmless at load time
+        # (cyllama uses them as defaults overridable per chat call).
+        load_cfg = _build_config(params) if params else None
+        if load_cfg is not None:
+            _llm = LLM(model_path, config=load_cfg)
+        else:
+            _llm = LLM(model_path)
         _llm_path = model_path
+        _llm_hw_sig = hw_sig
         return _llm
 
 
@@ -523,7 +601,7 @@ def unload():
     No-op if nothing is loaded. Returns the path of whatever was
     unloaded (or ``None``) so the caller can confirm.
     """
-    global _llm, _llm_path
+    global _llm, _llm_path, _llm_hw_sig
     with _llm_lock:
         path = _llm_path
         if _llm is not None:
@@ -533,6 +611,7 @@ def unload():
                 pass
             _llm = None
             _llm_path = None
+            _llm_hw_sig = ()
         return {"unloaded": path}
 
 
@@ -554,7 +633,9 @@ async def tokenize(req: Request):
     if not text:
         return {"count": 0}
 
-    llm = _get_llm(model_path)
+    # Tokenize doesn't care about hardware, but pass params so the cache
+    # match logic doesn't evict an LLM the user is mid-conversation with.
+    llm = _get_llm(model_path, body.get("params"))
     # vocab.tokenize is the cyllama primitive used internally by
     # _generate_stream. add_special=False / parse_special=False keeps
     # the count comparable to "raw content tokens" rather than a
@@ -614,9 +695,10 @@ async def chat(req: Request):
         raise HTTPException(status_code=400, detail="model_path required")
 
     messages = _normalize_messages(body)
-    config = _build_config(body.get("params"))
+    raw_params = body.get("params")
+    config = _build_config(raw_params)
 
-    llm = _get_llm(model_path)
+    llm = _get_llm(model_path, raw_params)
     loop = asyncio.get_running_loop()
 
     # Always go through llm.chat() now -- it handles single-turn and
@@ -667,6 +749,89 @@ async def chat(req: Request):
             raise
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
+# ---------------------------------------------------------------------------
+# Shared helpers used by /hardware/* and /models/*.
+# ---------------------------------------------------------------------------
+
+
+def _jsonify(v):
+    """Best-effort JSON coercion. Drops anything we can't represent."""
+    if v is None or isinstance(v, (str, int, float, bool)):
+        return v
+    if isinstance(v, dict):
+        return {str(k): _jsonify(x) for k, x in v.items()}
+    if isinstance(v, (list, tuple)):
+        return [_jsonify(x) for x in v]
+    # Numpy scalars expose .item(); fall back to str.
+    if hasattr(v, "item"):
+        try:
+            return _jsonify(v.item())
+        except Exception:  # noqa: BLE001
+            return str(v)
+    return str(v)
+
+
+# ---------------------------------------------------------------------------
+# Hardware: VRAM-aware GPU layer estimation.
+# ---------------------------------------------------------------------------
+
+
+@app.post("/hardware/estimate-layers")
+async def hardware_estimate_layers(req: Request):
+    """Wrap ``cyllama.estimate_gpu_layers`` so the renderer can suggest
+    a sensible ``n_gpu_layers`` for a given (model, VRAM) pair without
+    shelling out.
+
+    Body: ``{model_path, gpu_memory_mb, ctx_size?, batch_size?,
+              n_parallel?, kv_cache_type?, use_mmap?}``.
+    Returns the helper's MemoryEstimate as a JSON-friendly dict, plus a
+    flat ``n_gpu_layers`` for one-line consumption. Returns 501 with a
+    structured envelope if the helper is missing in the installed
+    cyllama (older releases).
+    """
+    body = await req.json()
+    model_path = body.get("model_path")
+    if not model_path or not os.path.isfile(model_path):
+        raise HTTPException(400, "model_path required and must exist")
+    gpu_memory_mb = body.get("gpu_memory_mb")
+    if gpu_memory_mb is None:
+        raise HTTPException(400, "gpu_memory_mb required")
+    helper = getattr(cyllama, "estimate_gpu_layers", None)
+    if helper is None:
+        raise HTTPException(501, "cyllama.estimate_gpu_layers not available in this build")
+    # Accept int or list[int]; helper handles both.
+    if isinstance(gpu_memory_mb, list):
+        gpu_memory_mb = [int(x) for x in gpu_memory_mb]
+    else:
+        gpu_memory_mb = int(gpu_memory_mb)
+
+    kwargs = {"gpu_memory_mb": gpu_memory_mb}
+    for key in ("ctx_size", "batch_size", "n_parallel", "kv_cache_type", "use_mmap"):
+        if key in body and body[key] not in (None, ""):
+            kwargs[key] = body[key]
+
+    try:
+        est = helper(model_path, **kwargs)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(500, f"estimate_gpu_layers failed: {exc}")
+
+    # cyllama.memory.MemoryEstimate is a dataclass-ish object; coerce
+    # known fields then fall back to vars() for anything custom.
+    out: dict[str, Any] = {}
+    for attr in (
+        "n_gpu_layers", "n_layers_total", "model_size_mb",
+        "kv_cache_mb", "compute_buffer_mb", "fits_fully", "notes",
+    ):
+        if hasattr(est, attr):
+            out[attr] = _jsonify(getattr(est, attr))
+    if not out:
+        try:
+            out = _jsonify(vars(est))
+        except TypeError:
+            out = {"raw": str(est)}
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -777,23 +942,6 @@ async def models_inspect(req: Request):
         return {"path": model_path, "metadata": _jsonify(meta)}
     except Exception as exc:  # noqa: BLE001
         return {"path": model_path, "metadata": None, "error": str(exc)}
-
-
-def _jsonify(v):
-    """Best-effort JSON coercion. Drops anything we can't represent."""
-    if v is None or isinstance(v, (str, int, float, bool)):
-        return v
-    if isinstance(v, dict):
-        return {str(k): _jsonify(x) for k, x in v.items()}
-    if isinstance(v, (list, tuple)):
-        return [_jsonify(x) for x in v]
-    # Numpy scalars expose .item(); fall back to str.
-    if hasattr(v, "item"):
-        try:
-            return _jsonify(v.item())
-        except Exception:  # noqa: BLE001
-            return str(v)
-    return str(v)
 
 
 @app.post("/models/import")

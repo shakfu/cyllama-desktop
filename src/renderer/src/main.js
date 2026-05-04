@@ -550,10 +550,21 @@ const PARAM_DEFAULTS = {
   max_tokens:        512,
   seed:              "",   // empty string => omit from request
   stop_sequences:    "",   // comma-separated; parsed into list at send time
+  // Phase 3 hardware fields. n_gpu_layers default -1 = "all on GPU".
+  // n_ctx / n_batch left blank so cyllama uses the model's defaults.
+  n_gpu_layers:      -1,
+  n_ctx:             "",
+  n_batch:           "",
+  main_gpu:          0,
+  split_mode:        1,
+  tensor_split:      "",   // CSV; parsed to list[float] server-side
 };
 const PARAM_KEYS = Object.keys(PARAM_DEFAULTS);
-const PARAM_INT_KEYS = new Set(["top_k", "max_tokens", "seed", "mirostat"]);
-const PARAM_CSV_KEYS = new Set(["stop_sequences"]);
+const PARAM_INT_KEYS = new Set([
+  "top_k", "max_tokens", "seed", "mirostat",
+  "n_gpu_layers", "n_ctx", "n_batch", "main_gpu", "split_mode",
+]);
+const PARAM_CSV_KEYS = new Set(["stop_sequences", "tensor_split"]);
 
 // Default system prompt used when a brand-new chat starts. Per-chat
 // overrides live inside the chat's JSON file; this localStorage key
@@ -675,6 +686,58 @@ function applyMirostatVisibility() {
   }
 }
 
+// Estimate Layers: prompts for VRAM, hits /hardware/estimate-layers,
+// drops the answer into the n_gpu_layers input. Surfaces 501 helpfully
+// when the installed cyllama lacks the helper.
+async function estimateGpuLayers() {
+  if (!modelPath) {
+    errorLine("Pick a model first to estimate layers.");
+    return;
+  }
+  const raw = window.prompt("Available GPU memory (MB)?", "8000");
+  if (raw == null) return;
+  const vram = Number(raw);
+  if (!Number.isFinite(vram) || vram <= 0) {
+    errorLine("Enter a positive number of MB.");
+    return;
+  }
+  const panel = document.getElementById("estimatePanel");
+  const out = document.getElementById("estimateOutput");
+  if (panel && out) {
+    panel.hidden = false;
+    out.textContent = "estimating...";
+  }
+  try {
+    const j = await cyllamaSidecar.sidecarJson("/hardware/estimate-layers", {
+      model_path: modelPath,
+      gpu_memory_mb: vram,
+    });
+    const n = j.n_gpu_layers;
+    if (typeof n === "number") {
+      const el = paramEl("n_gpu_layers");
+      if (el) {
+        el.value = String(n);
+        const o = paramOut("n_gpu_layers");
+        if (o) o.textContent = formatParamValue("n_gpu_layers", el.value);
+        saveParams();
+      }
+    }
+    if (out) {
+      const lines = [];
+      if (typeof j.n_gpu_layers === "number") {
+        lines.push(`n_gpu_layers: ${j.n_gpu_layers} / ${j.n_layers_total ?? "?"}`);
+      }
+      if (typeof j.model_size_mb === "number") lines.push(`model: ${j.model_size_mb} MB`);
+      if (typeof j.kv_cache_mb === "number") lines.push(`kv cache: ${j.kv_cache_mb} MB`);
+      if (typeof j.fits_fully === "boolean") lines.push(`fits fully: ${j.fits_fully ? "yes" : "no"}`);
+      if (j.notes) lines.push(j.notes);
+      out.textContent = lines.join(" · ") || JSON.stringify(j);
+    }
+  } catch (e) {
+    if (out) out.textContent = `failed: ${e.message}`;
+  }
+}
+
 // Hide rows for sampling fields the installed cyllama doesn't accept.
 // Sourced from /info.supported_params (see sidecar). Forward-looking
 // presets that set values for unsupported fields are still safe -- the
@@ -717,6 +780,8 @@ function bindParams() {
     applyMirostatVisibility();
   });
   applyMirostatVisibility();
+  const estBtn = document.getElementById("estimateLayersBtn");
+  if (estBtn) estBtn.addEventListener("click", estimateGpuLayers);
 }
 
 /* ----------------------------------------------------------------

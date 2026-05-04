@@ -35,8 +35,13 @@ class _FakeLLM:
 
     instances: list["_FakeLLM"] = []
 
-    def __init__(self, model_path: str) -> None:
+    def __init__(self, model_path: str, config=None, **kwargs) -> None:
+        # cyllama 0.2.15's LLM accepts (model_path, config, verbose,
+        # cache_size, cache_ttl, **kwargs). Mirror that loosely so the
+        # sidecar's new "LLM(path, config=...)" call path doesn't blow
+        # up the test stub.
         self.model_path = model_path
+        self.config = config
         self.vocab = _FakeVocab()
         self.closed = False
         self.cancelled = False

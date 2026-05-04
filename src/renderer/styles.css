@@ -1100,3 +1100,16 @@ svg circle, svg rect, svg polygon { fill: none; }
   font-size: 14px; line-height: 1;
 }
 .presets-delete:disabled { opacity: 0.35; cursor: default; }
+
+/* Phase 3: hardware estimate output. Compact dimmed line beneath the
+   GPU layers field once the user clicks "est". */
+.hw-estimate-out {
+  display: block;
+  font-size: 11px;
+  color: var(--fg-faint);
+  font-family: var(--font-mono);
+  padding: 6px 8px;
+  background: var(--bg-sunken);
+  border-radius: 6px;
+  word-break: break-word;
+}

@@ -6,7 +6,161 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-### Added
+### Added (Phase 3 - Hardware controls)
+- **Hardware section in the Models tab.** Six controls: `n_gpu_layers`
+  (-1 = all on GPU), `n_ctx` (blank = model default), `n_batch`,
+  `main_gpu`, `split_mode` (None / Layer / Row tensor-parallel),
+  `tensor_split` (CSV ratios). Persisted via the existing
+  `PARAM_DEFAULTS` machinery; treated as load-time fields, not
+  per-call sampling.
+- **`POST /hardware/estimate-layers`** wraps `cyllama.estimate_gpu_layers`.
+  Body: `{model_path, gpu_memory_mb, ctx_size?, batch_size?, ...}`.
+  Returns the `MemoryEstimate` shape (`n_gpu_layers, n_layers_total,
+  model_size_mb, kv_cache_mb, compute_buffer_mb, fits_fully, notes`)
+  flattened to JSON. Surfaces a typed **501** when the helper is missing
+  in the installed cyllama.
+- **Estimate Layers button** in the Hardware section header. Prompts
+  for available VRAM, calls the endpoint, drops the suggested
+  `n_gpu_layers` into the input, and shows a one-line breakdown
+  (model size / KV cache / fits-fully / notes) underneath.
+- **Hardware-aware LLM cache.** `_get_llm` is now keyed on
+  `(model_path, hw_signature)` rather than just `model_path`. Sampling
+  tweaks (temperature etc.) reuse the cached LLM; **changing any
+  load-time field evicts and reloads** because cyllama applies them at
+  construction time. `_LOAD_KEYS` enumerates the load-time fields;
+  `_hw_signature(params)` produces a stable hashable digest of just
+  those fields. `tensor_split` is normalised through
+  `_coerce_tensor_split` (accepts list[number] or CSV string).
+- LLM construction now passes the load-config:
+  `LLM(model_path, config=load_cfg)`. Same `_GC_ACCEPTED` filter
+  applies, so a hardware field cyllama doesn't accept is silently
+  dropped instead of raising `TypeError`.
+
+### Added (Phase 2 - Presets + signature introspection)
+- **Presets**: built-in seeds (Default / Creative / Precise / Code /
+  Long-context) plus user-saved bundles in `localStorage` under
+  `presets_v1`. Active preset persisted in `presets_v1_active`.
+  Dropdown lives at the top of the Models tab Sampling section, with
+  Save (`+`) and Delete (`×`) actions; delete is disabled for built-ins.
+  Bundles cover sampling fields + system prompt only -- a
+  `SAMPLING_KEYS` allowlist excludes hardware so switching presets
+  doesn't clobber the user's hardware setup. Old bundles with
+  hardware keys are forward-compatible (those keys are skipped on
+  apply).
+- **`GenerationConfig` signature introspection.** Sidecar reads
+  `inspect.signature(GenerationConfig.__init__)` once at module load
+  into `_GC_ACCEPTED`. `_build_config` filters whitelisted kwargs
+  through this set: a renderer slider for a forward-looking field
+  (e.g. `presence_penalty`, `mirostat`) is silently dropped instead
+  of raising `TypeError` mid-chat. Auto-adapts to future cyllama
+  upgrades without sidecar changes.
+- **`/info.supported_params`** advertises the names the installed
+  cyllama actually accepts. Renderer's `applySupportedParams()` calls
+  this on init and hides any `.param` row whose key isn't supported,
+  so the UI surfaces what the runtime can actually do.
+- Sampler whitelist gained `presence_penalty`, `frequency_penalty`,
+  `mirostat`, `mirostat_tau`, `mirostat_eta`, but cyllama 0.2.15
+  doesn't accept these in `GenerationConfig` -- the rows render in
+  the HTML and stay hidden until cyllama exposes the fields. See
+  TODO.md "Forward-looking sampler fields" for the verification
+  command on next bump.
+- **Mirostat visibility toggle**: tau/eta rows (`data-mirostat-only`)
+  hide when Mirostat is Off or when the parent row is itself hidden
+  by `applySupportedParams()`.
+
+### Added (Phase 1 - Models tab)
+- Right sidebar tabbed: **Models / Agents / General**. Tab strip is
+  sticky at the top; body scrolls. Active tab persisted in
+  `localStorage` under `right_tab_active`. Cog button on the nav rail
+  jumps to the General tab (`data-tab-jump="general"`).
+- **Models tab** packs everything model-related: cached models list
+  (compact rows, double-click to use), HuggingFace download box with
+  debounced peek-on-input + live progress bar, drag-drop dropzone,
+  selected-model card with `Use in Chat` / `Reveal` / collapsible
+  metadata. Below it: System Prompt (preserved verbatim from the old
+  panel) and Sampling sliders.
+- **`GET /models/cached`**: lists local + HF-cache GGUF files, deduped,
+  local-first. Items: `{path, name, size, source: 'local'|'hf', dir}`.
+- **`POST /models/inspect`**: returns GGUF metadata via
+  `cyllama.GGUFContext` with defensive ctor / getter probing across
+  versions; reports `{error: ...}` rather than crashing when the
+  helper is missing.
+- **`POST /models/import`**: server-side copy of a dropped path into
+  `MODELS_DIR`. No-op when the path is already inside; rejects
+  non-`.gguf`; 409 on collision.
+- **`POST /models/hf/peek`**: HEAD against the HF resolve URL for size
+  + existence + already-local check. Returns
+  `{repo, revision, file, size, exists, target_path, already_local}`.
+- **`POST /jobs/models.hf-download`**: streaming download with
+  per-percent progress events through the Phase 0 `/jobs` machinery.
+  Writes to `MODELS_DIR/_hf/<repo_slug>/<file>`. `_parse_hf_target`
+  accepts a full `https://huggingface.co/<repo>/resolve/<rev>/<path>`
+  URL, `{repo, file, revision}`, or `user/repo:path/file.gguf`
+  shorthand.
+- **General tab**: About info from `/info` (cyllama version, backends,
+  models/artifacts dirs) plus a Preferences placeholder. Replaces the
+  earlier Settings modal overlay.
+- **`GET /info`** result is computed once at module load (`_INFO_CACHE`)
+  rather than re-probing `_backend` per request -- the data is static
+  for the lifetime of the process.
+- **Agents tab** placeholder describing the later-phase agent / persona
+  / tool surfaces.
+- **`ModelPicker` dropdown** attached to the chat top-bar pill. Lists
+  Local + HuggingFace cache groups with sizes. Ends in a
+  "Browse..." item that falls back to the OS file dialog. Replaces
+  the previous direct file-dialog click handler.
+- New IPC `shell:revealItem` (preload `window.cyllama.revealItem`)
+  for Reveal-in-Finder/Explorer on selected models.
+- Main creates `<userData>/models/`, passes via
+  `CYLLAMA_SIDECAR_MODELS`. `/info` reports `sidecar.models_dir`.
+
+### Added (Phase 0 - Foundations)
+- **`GET /info`**: `cyllama.__version__`, GPU backend flags via defensive
+  `_backend` introspection, sidecar artifact + models paths.
+- **`/jobs/*` infrastructure** for any long-running work the renderer
+  needs progress / cancel / result for. Stable shape:
+  - `Job` class (id, kind, state, queue, subscribers).
+  - `register_job_kind(name)` gate; unknown kinds 400.
+  - `run_job(kind, coro_factory)` spawns + manages an `asyncio.Task`.
+  - `_emit(job, event)` pushes events with `{type: "progress" |
+    "log" | "result" | "error" | "done"}` semantics. `done` is
+    appended automatically.
+  - `GET /jobs` lists; `GET /jobs/{id}`, `GET /jobs/{id}/events`
+    (single-subscriber SSE), `POST /jobs/{id}/cancel`,
+    `GET /jobs/{id}/result`, `GET /jobs/{id}/artifact/{name}` (regex-
+    validated names + traversal guard against `MODELS_DIR/<id>`).
+  - GC drops terminal jobs older than 1 hour.
+  - Demo job kind (`POST /jobs/demo`) for renderer SSE smoke tests.
+- **Artifact dir env wiring.** Main creates `<userData>/artifacts/`,
+  passes via `CYLLAMA_SIDECAR_ARTIFACTS`. Sidecar falls back to
+  `~/.cache/cyllama-desktop/artifacts/` for non-Electron smoke tests.
+- **esbuild + renderer module split.** `src/renderer/src/{main.js,
+  lib/sidecar.js, lib/jobs.js}` -> bundles to
+  `src/renderer/dist/renderer.js` via
+  `esbuild ... --bundle --format=iife --target=chrome120`.
+  `index.html` loads the bundle. New scripts: `npm run build:renderer`,
+  `npm run watch:renderer`. `start` / `dev` / `build:*` gate on
+  `build:renderer`.
+- **`lib/sidecar.js`**: loopback bearer-auth HTTP client.
+  `getSidecarInfo()` lazy-resolves the preload bridge; `sidecarFetch`,
+  `sidecarJson`, `getInfo` are the consumer-facing helpers.
+  `window.cyllamaLib.sidecar` exposes them on a global namespace for
+  feature modules added in later phases.
+- **`lib/jobs.js`**: `JobHandle` class + `startJob(kind, body)` that
+  POSTs `/jobs/<kind>`, opens an SSE stream, dispatches events to
+  listeners, and exposes `done` Promise + `cancel()`. Used by the
+  Models tab HF download wiring.
+- **Pytest suite** (`tests/`, 50 cases). Stubs `cyllama` so tests run
+  without the real install. Coverage: bearer auth, `/health`, `/info`,
+  `/tokenize`, `/chat` validation + SSE framing, `/jobs` lifecycle
+  (success / failure / cancel / artifact), `/models/*` endpoints,
+  HF parsing, HF peek/download (httpx mocked), hardware fields,
+  `_get_llm` cache reuse vs reload semantics, `/hardware/estimate-
+  layers` happy/error/501 paths.
+- `make test` target: installs `pytest + fastapi + httpx` into the
+  bundled env on demand.
+
+### Added (general)
 - Per-chat system prompt: prompt is now stored on the chat's JSON file and loaded into the right-panel textarea when switching chats. Editing the textarea on the unsaved working chat also updates the default seed in `localStorage`, so a future "New chat" inherits the change. Saved chats snapshot their prompt on first save and don't retroactively change when the default is edited.
 - Real token counts via a new `/tokenize` sidecar endpoint (`{model_path, text}` -> `{count}`). The renderer calls it in `persistActiveChat()` so the count stored on disk and shown in the sidebar row is the true tokenizer count, not the `chars/4` estimate. Estimate retained as a fallback for the unsaved chat row and for cases where no model is loaded.
 - Eject actually unloads the model. New `/unload` endpoint releases the cached `LLM` instance (frees GPU memory). The renderer's eject button calls it before clearing the model path.
@@ -69,6 +223,38 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Status indicator (idle / ready / busy / error) with port suffix.
 
 ### Changed
+- **Auth middleware bug fix.** The middleware previously raised
+  `HTTPException(401)` from inside Starlette's `BaseHTTPMiddleware`,
+  which doesn't propagate cleanly: TestClient surfaced it as an
+  unhandled 500. Returns `JSONResponse({"detail": "unauthorized"},
+  status_code=401)` directly now. Caught by the new pytest suite.
+- **cyllama pinned to `0.2.15`.** `scripts/build-python-env.sh` reads
+  `CYLLAMA_VERSION="${CYLLAMA_VERSION:-0.2.15}"` and runs
+  `pip install cyllama==${CYLLAMA_VERSION}`. Bump in one place to
+  roll the bundler forward; existing envs upgrade in place via
+  `build/python-mac-arm64/bin/python3 -m pip install --upgrade
+  cyllama==0.2.15`.
+- **`/chat` routing.** `_get_llm` now takes the `params` dict so the
+  cache match logic can see the hardware signature. `/tokenize` and
+  `/chat` both forward it.
+- **Sidecar `/info` is cached.** Built once at module import into
+  `_INFO_CACHE`; the endpoint is now a constant-time read of that
+  dict instead of re-probing `_backend` per request.
+- **Renderer entry moved.** `src/renderer/renderer.js` -> bundled
+  output at `src/renderer/dist/renderer.js`. Source under
+  `src/renderer/src/`. Existing chat logic preserved verbatim in
+  `main.js` so the chat hot path is unchanged.
+- **Right sidebar reshaped from a single panel to tabbed layout.**
+  Old `.params-panel` was a flat scrolled list (System Prompt +
+  Sampling). New layout has a sticky tab strip (Models / Agents /
+  General) and per-tab scrolling body. Existing param IDs
+  (`#p-temperature`, `#p-system_prompt`, ...) preserved verbatim so
+  the chat code didn't need touching.
+- **Postinstall hook trimmed** from `electron-builder install-app-deps
+  && npm run vendor` down to just `npm run vendor`. The
+  `install-app-deps` step had no native modules to rebuild and was
+  hanging on fresh trees (the README's known-issue note). Removing
+  it makes `make` reliable.
 - Sidecar SSE wire format: each chunk is now `data: {"text": "..."}` JSON
   rather than ad-hoc backslash-escaped text. Errors emit `data: {"error": "..."}`.
 - cyllama installed from PyPI by default in the bundler script; local
@@ -77,12 +263,36 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   role labels, no avatars or chat-bubble styling.
 
 ### Removed
+- **Workspace router and full-pane Models workspace.** A short-lived
+  Phase 1 attempt put Models on its own nav-rail entry as a workspace
+  spanning the right three grid columns. Replaced by the tabbed-right-
+  sidebar layout, which keeps chat as the single middle-pane content
+  and packs all model-related UI into the Models tab.
+- **Settings modal overlay.** Replaced by the General tab in the right
+  sidebar, which absorbs the About info (cyllama version, backends,
+  paths) and reserves space for future preferences.
+- **Models nav-rail entry.** No longer needed; the Models tab is the
+  single surface for model browsing / inspection / download.
 - Non-functional placeholder UI: New Folder row, sidebar overflow menu,
   chat-bar split/more buttons, attach/tools composer buttons, hammer
   parameters tab, six fake collapsible parameter rows. Replaced the right
   panel content with an honest "No parameters wired yet" empty state.
 
 ### Infrastructure
+- **esbuild** added as a devDependency. `npm run build:renderer`
+  bundles `src/renderer/src/main.js` (IIFE, target `chrome120`,
+  inline sourcemap) into `src/renderer/dist/renderer.js`. Watcher
+  available via `npm run watch:renderer`.
+- **`make test`** target: introspects whether pytest/fastapi/httpx
+  are present in the bundled env (or a host `python3`) and pip-
+  installs them on demand before running the test suite.
+- **PLAN.md** added: phased rollout for exposing cyllama's full
+  feature surface (chat, embeddings, RAG, agents, server, multimodal,
+  GGUF tools, HF download). Workspace personas covered via
+  progressive disclosure rather than a global advanced mode. Section
+  12 records the resolved architectural calls (single sidecar
+  process, paste-URL HF download, esbuild in Phase 0, no
+  OpenAI/LangChain shims in-app, Windows backend strategy parked).
 - Vendored `marked` and `katex` into `src/renderer/vendor/` via a
   `postinstall` script so the strict `script-src 'self'` CSP can stay.
 - Makefile orchestrates the full build: `make` -> dmg, `make dev`, `make

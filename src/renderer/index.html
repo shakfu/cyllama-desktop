@@ -225,6 +225,52 @@
                 </div>
               </div>
             </div>
+
+            <div class="rt-section">
+              <div class="rt-section-head">
+                <h3>Hardware</h3>
+                <button class="icon-btn" id="estimateLayersBtn" title="Estimate n_gpu_layers for the loaded model">est</button>
+              </div>
+              <div id="hwForm">
+                <div class="param">
+                  <label for="p-n_gpu_layers"><span>GPU layers</span><output id="p-n_gpu_layers-out">-1</output></label>
+                  <input id="p-n_gpu_layers" type="number" min="-1" step="1" value="-1" />
+                  <div class="param-hint">-1 = all on GPU &middot; 0 = CPU only &middot; positive int = first N on GPU</div>
+                </div>
+                <div class="param">
+                  <label for="p-n_ctx"><span>Context</span></label>
+                  <input id="p-n_ctx" type="number" min="0" step="64" placeholder="model default" />
+                  <div class="param-hint">Token window. Empty = use the model's default <code>n_ctx</code>.</div>
+                </div>
+                <div class="param">
+                  <label for="p-n_batch"><span>Batch</span></label>
+                  <input id="p-n_batch" type="number" min="1" step="1" placeholder="2048" />
+                  <div class="param-hint">Prompt-prefill batch size.</div>
+                </div>
+                <div class="param">
+                  <label for="p-main_gpu"><span>Main GPU</span></label>
+                  <input id="p-main_gpu" type="number" min="0" step="1" value="0" />
+                  <div class="param-hint">Index of the primary GPU when more than one is present.</div>
+                </div>
+                <div class="param">
+                  <label for="p-split_mode"><span>Split mode</span></label>
+                  <select id="p-split_mode">
+                    <option value="0">None</option>
+                    <option value="1" selected>Layer</option>
+                    <option value="2">Row (tensor parallel)</option>
+                  </select>
+                  <div class="param-hint">How to distribute layers across GPUs.</div>
+                </div>
+                <div class="param">
+                  <label for="p-tensor_split"><span>Tensor split</span></label>
+                  <input id="p-tensor_split" type="text" placeholder="e.g. 0.6, 0.4" />
+                  <div class="param-hint">Per-GPU allocation ratios (sum to 1). Empty = equal.</div>
+                </div>
+                <div class="param" id="estimatePanel" hidden>
+                  <output id="estimateOutput" class="hw-estimate-out"></output>
+                </div>
+              </div>
+            </div>
           </section>
 
           <section class="rt-pane" data-tab="agents" hidden>

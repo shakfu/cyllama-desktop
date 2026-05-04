@@ -33,16 +33,29 @@ or move them to `CHANGELOG.md` under `[Unreleased]`.
       min_p, repeat_penalty, max_tokens, seed, stop sequences. Pass through
       `/chat` body via `params` object, sidecar whitelists into
       `GenerationConfig`.
-- [ ] **Presets**: save/load named parameter bundles (per-model defaults).
-      Pure UI/persistence concern — does not need cyllama-side support.
-      Implementation: store bundles in `localStorage` (or
-      `app.getPath('userData')/presets/*.json` once chat history lands)
-      keyed by name; a small dropdown above the Sampling header to load
-      and a Save button to capture the current state. Optionally
-      auto-suggest a default preset when a model is loaded for the first
-      time.
-- [ ] Speculative decoding configuration (cyllama supports it; UI does not).
-- [ ] Structured output / grammar UI (JSON schema, GBNF).
+- [x] **Presets**: built-in seeds (Default/Creative/Precise/Code/Long-context)
+      plus user-saved bundles in `localStorage` under `presets_v1`. Active
+      preset persisted in `presets_v1_active`. Lives at the top of the
+      Models tab Sampling section.
+- [ ] **Forward-looking sampler fields** (UI is wired but cyllama 0.2.15
+      doesn't accept them in `GenerationConfig`). Affected keys:
+      `presence_penalty`, `frequency_penalty`, `mirostat`, `mirostat_tau`,
+      `mirostat_eta`. Sidecar already filters via `_GC_ACCEPTED` (signature
+      introspection) so the rows are hidden in the UI today; they will
+      auto-reveal when the next cyllama exposes the fields.
+      Verification on bump: `build/python-mac-arm64/bin/python3 -c
+      "from cyllama import GenerationConfig; print(GenerationConfig(presence_penalty=0.3, mirostat=2))"`
+      should not raise. Confirm `/info`'s `supported_params` then includes
+      the fields and the rows surface automatically. No code change
+      expected if the names match; if cyllama uses different names the
+      UI/whitelist need to be remapped.
+- [ ] Speculative decoding configuration. Blocked: `cyllama.Speculative` /
+      `SpeculativeParams` are absent in 0.2.15. Re-probe on next bump.
+- [ ] Structured output / grammar UI. Partially possible:
+      `cyllama.utils.json_schema_to_grammar` exists in 0.2.15, but the
+      `LLM.chat` path doesn't accept a grammar in 0.2.15 so this is a
+      no-op end-to-end until cyllama wires the decoder side.
+- [ ] N-gram cache toggle. Blocked: `cyllama.NgramCache` absent in 0.2.15.
 - [ ] Stop sequences.
 
 ## Markdown / rendering
