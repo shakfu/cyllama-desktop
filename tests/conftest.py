@@ -179,12 +179,24 @@ class _FakeEmbedder:
 
 
 class _FakeSqliteVectorStore:
+    """Stub mimicking ``cyllama.rag.SqliteVectorStore``.
+
+    Real cyllama shares state through the sqlite file on disk; instances
+    opening the same ``db_path`` see the same rows. Mirror that with a
+    class-level ``_rows_by_path`` map so an ``add()`` from the ingest
+    job is visible to a later ``search()`` from /rag/retrieve.
+    """
+
     instances: list["_FakeSqliteVectorStore"] = []
+    _rows_by_path: dict = {}
 
     def __init__(self, dimension: int, db_path: str = ":memory:", **kwargs) -> None:
         self.dimension = dimension
         self.db_path = db_path
-        self.rows: list[tuple] = []  # (embedding, text, metadata)
+        # ``setdefault`` so a later opener attaches to the same list ingest
+        # populated. ``:memory:`` collapses everything to one shared list,
+        # which is fine for tests that don't drive multiple in-memory stores.
+        self.rows: list[tuple] = type(self)._rows_by_path.setdefault(db_path, [])
         type(self).instances.append(self)
 
     def add(self, embeddings, texts, metadata=None, source_hash=None, source_label=None):  # noqa: ARG002
@@ -194,6 +206,17 @@ class _FakeSqliteVectorStore:
             self.rows.append((e, t, md))
             ids.append(len(self.rows))
         return ids
+
+    def search(self, query_embedding, k: int = 5, threshold=None):  # noqa: ARG002
+        out = []
+        for i, (_emb, text, md) in enumerate(self.rows[:k]):
+            out.append(_FakeSearchResult(
+                id=str(i),
+                text=text,
+                score=1.0 / (1 + i),
+                metadata=md or {},
+            ))
+        return out
 
     def close(self) -> None:
         pass
@@ -366,6 +389,7 @@ def sidecar_app(tmp_path, monkeypatch):
     _FakeLLM.instances.clear()
     _FakeEmbedder.instances.clear()
     _FakeSqliteVectorStore.instances.clear()
+    _FakeSqliteVectorStore._rows_by_path.clear()
     _FakeRAG.instances.clear()
     _FakeRAG._chunks = ["hello", " ", "world"]
     _FakeRAG._sources = []

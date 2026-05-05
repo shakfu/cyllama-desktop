@@ -6,6 +6,166 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added (Phase 4 - RAG, slice 4d: chat integration)
+- **`POST /rag/retrieve`** — retrieve-only endpoint. Body
+  `{collection_id, query, top_k?, similarity_threshold?}`, returns
+  `{sources: [...]}`. Uses `cyllama.rag.Embedder` +
+  `SqliteVectorStore.search` directly so the chat-side context path
+  never has to load a generation model. Single-slot
+  `_RETRIEVE_INSTANCE` cache keyed on `collection_id`, distinct from
+  the `_RAG_INSTANCE` cache used by `/rag/query`, so context retrieval
+  doesn't evict the user's chat-side RAG (or vice versa).
+- **Retrieval section** in the Models tab (right sidebar): collection
+  dropdown ("— none —" default) + Top-K slider (1-10, default 3) +
+  refresh icon. Selection persists in `localStorage`
+  (`chat_rag_collection_id`, `chat_rag_top_k`).
+- **Chat send hook.** `buildOutgoingMessages()` replaces the inline
+  system-prompt builder. When a collection is set, the latest user
+  message is used as the retrieval query; the returned chunks are
+  prepended to the system prompt as a context block ("Use the
+  following retrieved context..." + numbered chunks). The visible user
+  message is unchanged. Retrieve failures soft-fail with a
+  `console.warn`; RAG never blocks the chat hot path.
+- **`rag:collections-changed` window event.** Documents view fires it
+  after create / delete; the chat-side picker listens and refreshes,
+  so a freshly-created collection is immediately available in chat
+  without reload.
+- New `cyllamaRag.retrieve()` wrapper in `src/renderer/src/lib/rag.js`.
+
+### Added (Phase 4 - RAG, slice 4c: Documents sidebar view)
+- **Documents sidebar view.** Replaces the prior modal/full-pane
+  attempts. Lives as a `<div class="sidebar-view" data-view="documents">`
+  inside the existing `.sidebar` column; the nav-rail's stack icon
+  carries `data-sidebar-view="documents"`. Adding more views later is
+  one nav-rail button + one `<section class="sidebar-view">`.
+- **`setSidebarView(name)` switcher** in main.js. Toggles
+  `[data-view]` panels by `hidden`, mirrors the active state on the
+  matching `.nav-btn[data-sidebar-view]`. Per-view lifecycle hooks
+  (`SIDEBAR_VIEW_HOOKS`) dispatch `onShow` / `onHide` so
+  `documents-pane.show()` refreshes the collection list when the view
+  becomes active and `hide()` aborts an in-flight streaming query when
+  it doesn't.
+- Sidebar-width CSS for `.sv-documents-body` (label-above-control rows,
+  wrapping header, tighter section padding) so the existing `.dp-*`
+  full-pane layout reflows cleanly into the ~268px column.
+
+### Added (Phase 4 - RAG, slice 4b: query)
+- **`POST /rag/query`** — streaming RAG query, SSE wire shape mirrors
+  `/chat`: one `{sources: [...]}` frame followed by `{text: "..."}`
+  token frames, terminated by `[DONE]`. Errors emit
+  `{error: "..."}`. Body:
+  `{collection_id, generation_model_path, question, top_k?,
+  similarity_threshold?, max_tokens?, temperature?, system_prompt?}`.
+- **Single-slot RAG cache** keyed on
+  `(collection_id, generation_model_path)`. Embedding model is fixed
+  per collection so it doesn't enter the key. Eviction calls
+  `RAG.close()` to release the prior generation model.
+- `_build_rag_config` whitelists query-time fields into a
+  `cyllama.rag.RAGConfig`; `_serialize_sources` converts
+  `SearchResult`s to JSON-safe dicts.
+- Cancellation: on client disconnect, best-effort
+  `rag.llm.cancel()` (or `rag._llm.cancel()`) if cyllama exposes it;
+  otherwise the producer thread runs to completion against an empty
+  queue.
+- 7 new pytest cases covering invalid id / unknown / missing question /
+  missing generation model / source+token framing / cache reuse /
+  eviction. `_FakeRAG`, `_FakeRAGConfig`, `_FakeSearchResult` added to
+  conftest.
+
+### Added (Phase 4 - RAG, slice 4a: collections + ingest)
+- **`<userData>/workspaces/default/rag/`** is the per-workspace RAG
+  state root. Main creates it and passes via `CYLLAMA_SIDECAR_RAG`;
+  sidecar falls back to `~/.cache/cyllama-desktop/rag/` for direct
+  smoke tests. `/info.sidecar.rag_dir` reports the active path.
+- **Manifest + collection lifecycle.** `RAG_DIR/collections.json`
+  (atomic tmp+rename writes) is the registry; each collection is one
+  `<id>.sqlite` file. `GET /rag/collections`, `POST /rag/collections`
+  ({name, embedding_model_path}), `DELETE /rag/collections/{id}`.
+  Collection IDs are slug+uuid; ID format gated by
+  `_RAG_ID_RE = /^[a-z0-9][a-z0-9_-]{0,63}$/`.
+- **Ingest job (`POST /jobs/rag.ingest`).** Body
+  `{collection_id, paths[], glob?, chunk_size?, chunk_overlap?}`.
+  Pipeline: `load_directory` / `load_document` -> per-document
+  fan-out -> `TextSplitter.split_documents` -> `Embedder.embed_batch`
+  (BATCH=32) -> `SqliteVectorStore.add`. Per-batch progress events
+  through the existing `/jobs` SSE; `doc_count` / `chunk_count` /
+  `updated_at` written back to the manifest on completion.
+- **Architecture decision:** ingest uses `Embedder` +
+  `SqliteVectorStore` directly (not the full `RAG` class), so a
+  generation model isn't loaded until query time. Inline rather than
+  `asyncio.to_thread` because FastAPI TestClient's portal model
+  cancels orphan thread-bound tasks at request boundary; per-batch
+  `await _emit(...)` keeps the loop responsive enough for SSE.
+- **`cyllama.GGUFContext` resolver.** 0.2.15 doesn't re-export it at
+  the top-level `cyllama` namespace; it lives at
+  `cyllama.llama.llama_cpp`. `_resolve_gguf_context()` probes a
+  candidate list and caches the result, fixing the "GGUFContext not
+  available" error in the Models tab metadata view.
+- **14 new pytest cases** in `tests/test_rag.py` (collection CRUD,
+  manifest persistence, ID validation, ingest happy path / missing
+  paths / no-docs / unknown collection / SSE event ordering, /info
+  shape). conftest stubs added: `_FakeDocument`, `_FakeChunk`,
+  `_FakeEmbedder`, `_FakeSqliteVectorStore` (with `_rows_by_path`
+  shared map so ingest writes are visible to retrieve), `_FakeRAG`,
+  `_FakeRAGConfig`, `_FakeSearchResult`, `_FakeTextSplitter`,
+  `_fake_load_directory`, `_fake_load_document`. The whole
+  `cyllama.rag` submodule is now stubbed.
+
+### Changed (Phase 4 - storage layout migration)
+- **`<userData>/workspaces/default/{chats,artifacts,rag,...}`** is now
+  the per-project state root, anticipating multi-workspace later (see
+  PLAN.md S.9). Per-workspace state lives under
+  `workspaces/<id>/`; the model cache stays global at
+  `<userData>/models/`.
+- **One-shot migration on launch.** `migrateLayoutIfNeeded()` in
+  main.js promotes pre-existing top-level `chats/` and `artifacts/`
+  into `workspaces/default/`. Idempotent (per-dir guard) + gated by a
+  version stamp at `<userData>/.layout_version` so it runs at most
+  once per install. Partial-failure safe: stamp written only after
+  every rename succeeds.
+- `chatsDir()` and the sidecar's artifact root now resolve under
+  `workspaceDir()`. Models dir unchanged. Chat / inspect / job
+  endpoints all see the new paths transparently.
+
+### Changed (UI iterations during Phase 4)
+- **Documents was a full pane, then a modal, now a sidebar view.** The
+  pane-router approach (Phase-4 first draft) collided with the chat
+  grid-template-columns rules (e.g. `data-left="0"][data-right="0"]`
+  beats `[data-pane="documents"]` on specificity), squashing the
+  Documents pane into a 0-width column. Switched to a centered modal
+  dialog as a sidestep; then to a sidebar view (current) which uses
+  the same `data-sidebar-view` swap pattern as the rest of the
+  sidebar. The sidebar approach swaps content inside one grid column
+  rather than rewriting the grid template, which is what kept failing.
+- **`data-sidebar-view` switcher pattern.** Each top-level surface in
+  the sidebar (chats, documents, future transcribe / batch / ...) is
+  one `<button class="nav-btn" data-sidebar-view="X">` + one
+  `<div class="sidebar-view" data-view="X">`. Adding a new view is
+  zero JS unless it needs an `onShow`/`onHide` hook, in which case it
+  registers in `SIDEBAR_VIEW_HOOKS`.
+- **Console panel reseated.** Lives inside `<main class="main-col">`
+  (in-flow flex item, `flex-shrink: 0`, `max-height: 38vh`,
+  `min-height: 160px`) so the sidecar log is bounded by the middle
+  column and sits below the composer, not stretching the full window.
+- **Models tab redesign.** "CACHED MODELS" header gone; the cached
+  list is now a single `<select>` dropdown with refresh icon next to
+  it. Drag-drop attaches to the entire `#modelsTabHost`; a CSS
+  `::after` overlay shows "Drop .gguf to import" on dragover with
+  `pointer-events: none` so the underlying drop target still receives
+  events. Models dir caption moved to a small mono footnote under the
+  HF download row.
+- **Metadata table reflow.** `.mt-meta-list` switched from a two-column
+  `max-content / 1fr` grid (which pushed values to a one-character
+  column in the narrow sidebar) to a stacked vertical list -- 10px
+  faint key on top, full-width value below, `overflow-wrap: anywhere`.
+
+### Removed
+- **Pane router (`src/renderer/src/features/pane-router.js`)** is no
+  longer imported. Kept in tree as a record of the prior approach;
+  delete at your discretion.
+- **Documents modal scaffold** (`#docsBackdrop`, `#docsDialog`,
+  `.modal-*` CSS) removed when Documents moved to a sidebar view.
+
 ### Added (Phase 3 - Hardware controls)
 - **Hardware section in the Models tab.** Six controls: `n_gpu_layers`
   (-1 = all on GPU), `n_ctx` (blank = model default), `n_batch`,

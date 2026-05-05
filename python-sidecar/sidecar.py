@@ -1487,6 +1487,74 @@ async def rag_query(req: Request):
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
+# Retrieve-only cache: Embedder + SqliteVectorStore for a collection.
+# Distinct from ``_RAG_INSTANCE`` because retrieve-only never loads a
+# generation model (cheap path used by the chat-side context injection).
+_RETRIEVE_INSTANCE: dict = {"key": None, "embedder": None, "store": None}
+
+
+def _close_retrieve_instance() -> None:
+    for k in ("embedder", "store"):
+        obj = _RETRIEVE_INSTANCE.get(k)
+        if obj is None:
+            continue
+        try:
+            obj.close()
+        except Exception:  # noqa: BLE001
+            pass
+        _RETRIEVE_INSTANCE[k] = None
+    _RETRIEVE_INSTANCE["key"] = None
+
+
+def _get_retrieve(collection: dict):
+    rag_mod = importlib.import_module("cyllama.rag")
+    Embedder = rag_mod.Embedder
+    SqliteVectorStore = rag_mod.SqliteVectorStore
+    coll_id = collection["id"]
+    if _RETRIEVE_INSTANCE.get("key") == coll_id and _RETRIEVE_INSTANCE.get("embedder") is not None:
+        return _RETRIEVE_INSTANCE["embedder"], _RETRIEVE_INSTANCE["store"]
+    _close_retrieve_instance()
+    embedder = Embedder(model_path=collection["embedding_model_path"])
+    store = SqliteVectorStore(dimension=embedder.dimension, db_path=collection["sqlite_path"])
+    _RETRIEVE_INSTANCE["key"] = coll_id
+    _RETRIEVE_INSTANCE["embedder"] = embedder
+    _RETRIEVE_INSTANCE["store"] = store
+    return embedder, store
+
+
+@app.post("/rag/retrieve")
+async def rag_retrieve(req: Request):
+    """Retrieve-only RAG endpoint. No LLM involved.
+
+    Body: ``{collection_id, query, top_k?, similarity_threshold?}``.
+    Returns ``{sources: [{id, text, score, metadata}, ...]}``.
+
+    The chat send path uses this to attach context to a user turn without
+    pulling a second generation model into memory.
+    """
+    body = await req.json()
+    coll_id = body.get("collection_id") or ""
+    q = (body.get("query") or "").strip()
+    top_k = max(1, int(body.get("top_k") or 3))
+    threshold = body.get("similarity_threshold")
+    threshold = float(threshold) if threshold is not None else None
+
+    if not _RAG_ID_RE.match(coll_id):
+        raise HTTPException(400, "invalid collection id")
+    coll = _rag_collection_get(coll_id)
+    if coll is None:
+        raise HTTPException(404, "collection not found")
+    if not q:
+        raise HTTPException(400, "query required")
+
+    embedder, store = _get_retrieve(coll)
+    vecs = embedder.embed_batch([q])
+    if not vecs:
+        return {"sources": []}
+    results = store.search(vecs[0], k=top_k, threshold=threshold)
+    return {"sources": _serialize_sources(results)}
+
+
 register_job_kind("rag.ingest")
 
 

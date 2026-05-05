@@ -62,6 +62,11 @@ async function refresh() {
   redraw();
 }
 
+function emitCollectionsChanged() {
+  try { window.dispatchEvent(new CustomEvent("rag:collections-changed")); }
+  catch (_) { /* no DOM in tests */ }
+}
+
 function modelDropdown({ value, placeholder }) {
   const sel = el("select", { class: "dp-select" });
   sel.appendChild(el("option", { value: "", disabled: true, selected: !value }, placeholder));
@@ -112,6 +117,7 @@ function renderHeader() {
       await deleteCollection(c.id);
       state.activeId = null;
       await refresh();
+      emitCollectionsChanged();
     } catch (e) {
       showStatus(`Delete failed: ${e.message}`, "err");
     }
@@ -145,6 +151,7 @@ function renderCreateForm() {
       state.activeId = rec.id;
       state.mode = "browse";
       await refresh();
+      emitCollectionsChanged();
     } catch (e) {
       showStatus(`Create failed: ${e.message}`, "err");
       createBtn.disabled = false;

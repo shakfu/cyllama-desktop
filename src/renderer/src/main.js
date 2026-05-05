@@ -792,6 +792,124 @@ async function applySupportedParams() {
   applyMirostatVisibility();
 }
 
+/* ----------------------------------------------------------------
+   Retrieval (slice 4d): pick a RAG collection for chat-side context
+   injection. The picker populates from /rag/collections; selection +
+   top-K persist in localStorage. On send, the chat path retrieves the
+   top-K chunks for the latest user message and prepends them to the
+   system prompt.
+   ---------------------------------------------------------------- */
+const RAG_COLL_KEY = "chat_rag_collection_id";
+const RAG_TOPK_KEY = "chat_rag_top_k";
+
+async function refreshRagCollections() {
+  const sel = document.getElementById("p-rag_collection");
+  if (!sel) return;
+  const saved = localStorage.getItem(RAG_COLL_KEY) || "";
+  const want = sel.value || saved;
+  let collections = [];
+  try {
+    const r = await cyllamaRag.listCollections();
+    collections = r.collections || [];
+  } catch (e) {
+    console.warn("listCollections failed:", e);
+  }
+  sel.replaceChildren();
+  const noneOpt = document.createElement("option");
+  noneOpt.value = "";
+  noneOpt.textContent = "— none —";
+  sel.appendChild(noneOpt);
+  for (const c of collections) {
+    const opt = document.createElement("option");
+    opt.value = c.id;
+    opt.textContent = `${c.name}  ·  ${c.chunk_count} chunks`;
+    sel.appendChild(opt);
+  }
+  if (want && collections.find((c) => c.id === want)) {
+    sel.value = want;
+  } else {
+    sel.value = "";
+    if (saved) localStorage.removeItem(RAG_COLL_KEY);
+  }
+}
+
+function bindRetrieval() {
+  const sel = document.getElementById("p-rag_collection");
+  const topK = document.getElementById("p-rag_top_k");
+  const topKOut = document.getElementById("p-rag_top_k-out");
+  const refreshBtn = document.getElementById("ragRefresh");
+
+  if (sel) {
+    sel.addEventListener("change", () => {
+      if (sel.value) localStorage.setItem(RAG_COLL_KEY, sel.value);
+      else localStorage.removeItem(RAG_COLL_KEY);
+    });
+  }
+  if (topK) {
+    const saved = parseInt(localStorage.getItem(RAG_TOPK_KEY) || "", 10);
+    if (saved >= 1 && saved <= 10) topK.value = String(saved);
+    if (topKOut) topKOut.textContent = topK.value;
+    topK.addEventListener("input", () => {
+      if (topKOut) topKOut.textContent = topK.value;
+      localStorage.setItem(RAG_TOPK_KEY, topK.value);
+    });
+  }
+  if (refreshBtn) refreshBtn.addEventListener("click", refreshRagCollections);
+  // The Documents view fires this after create / delete so the picker
+  // doesn't go stale.
+  window.addEventListener("rag:collections-changed", () => refreshRagCollections());
+
+  refreshRagCollections();
+}
+
+function formatSourcesBlock(sources, collectionLabel) {
+  const lines = sources.map((s, i) => `[${i + 1}] ${s.text}`);
+  return [
+    `Use the following retrieved context (from "${collectionLabel}") to answer the user's question.`,
+    `If the context is irrelevant, say so and answer from your own knowledge.`,
+    "",
+    lines.join("\n\n"),
+  ].join("\n");
+}
+
+async function buildOutgoingMessages() {
+  const sys = getSystemPrompt();
+  const sel = document.getElementById("p-rag_collection");
+  const topKEl = document.getElementById("p-rag_top_k");
+  const collId = sel?.value || "";
+  const topK = parseInt(topKEl?.value || "3", 10) || 3;
+
+  let augmentedSys = sys;
+  if (collId) {
+    // The latest user message is the retrieval query.
+    const lastUser = [...messages].reverse().find((m) => m.role === "user");
+    if (lastUser && lastUser.content) {
+      try {
+        const r = await cyllamaRag.retrieve({
+          collection_id: collId,
+          query: lastUser.content,
+          top_k: topK,
+        });
+        const srcs = (r && r.sources) || [];
+        if (srcs.length) {
+          const opt = sel?.querySelector(`option[value="${collId}"]`);
+          const label = (opt?.textContent?.split("·")[0] || collId).trim();
+          const block = formatSourcesBlock(srcs, label);
+          augmentedSys = sys ? `${sys}\n\n${block}` : block;
+        }
+      } catch (e) {
+        // Soft-fail: log and send without context. RAG should never block
+        // the chat hot path.
+        console.warn("RAG retrieve failed:", e);
+      }
+    }
+  }
+
+  return augmentedSys
+    ? [{ role: "system", content: augmentedSys }, ...messages]
+    : [...messages];
+}
+
 function bindParams() {
   for (const key of PARAM_KEYS) {
     const el = paramEl(key);
@@ -1052,6 +1170,7 @@ async function init() {
   activeChat.systemPrompt = getDefaultSystemPrompt();
   setSystemPromptUI(activeChat.systemPrompt);
   bindParams();
+  bindRetrieval();
   setStatus("idle", "connecting");
 
   // Restore the last loaded model so the user doesn't have to re-pick
@@ -1177,11 +1296,9 @@ async function send() {
     });
   }
 
-  // Build outgoing message list: optional system role + full history.
-  const sys = getSystemPrompt();
-  const outgoing = sys
-    ? [{ role: "system", content: sys }, ...messages]
-    : [...messages];
+  // Build outgoing message list: optional system role + full history,
+  // augmented with retrieved context if a RAG collection is selected.
+  const outgoing = await buildOutgoingMessages();
 
   setBusy(true);
   abortCtl = new AbortController();

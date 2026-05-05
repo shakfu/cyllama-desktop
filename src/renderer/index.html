@@ -161,6 +161,24 @@
 
             <div class="rt-section">
               <div class="rt-section-head">
+                <h3>Retrieval</h3>
+                <button class="icon-btn" id="ragRefresh" title="Refresh collections"><svg><use href="#i-refresh"/></svg></button>
+              </div>
+              <div class="param">
+                <label for="p-rag_collection"><span>Collection</span></label>
+                <select id="p-rag_collection" class="dp-select">
+                  <option value="">— none —</option>
+                </select>
+                <div class="param-hint">When set, each user turn is augmented with top-K chunks from this collection.</div>
+              </div>
+              <div class="param">
+                <label for="p-rag_top_k"><span>Top K</span><output id="p-rag_top_k-out">3</output></label>
+                <input id="p-rag_top_k" type="range" min="1" max="10" step="1" value="3" />
+              </div>
+            </div>
+
+            <div class="rt-section">
+              <div class="rt-section-head">
                 <h3>Sampling</h3>
                 <button class="icon-btn" id="resetParams" title="Reset to defaults"><svg><use href="#i-refresh"/></svg></button>
               </div>

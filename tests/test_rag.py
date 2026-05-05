@@ -354,6 +354,67 @@ def test_rag_query_evicts_on_generation_model_change(client, auth, fake_model, t
     assert _FakeRAG.instances[0].closed is True  # prior instance closed on eviction
 
 
+# --- /rag/retrieve ----------------------------------------------------------
+
+
+def test_rag_retrieve_400_on_invalid_collection_id(client, auth):
+    r = client.post("/rag/retrieve", json={
+        "collection_id": "Bad..ID", "query": "x",
+    }, headers=auth)
+    assert r.status_code == 400
+
+
+def test_rag_retrieve_404_on_unknown_collection(client, auth):
+    r = client.post("/rag/retrieve", json={
+        "collection_id": "ghost", "query": "x",
+    }, headers=auth)
+    assert r.status_code == 404
+
+
+def test_rag_retrieve_400_on_missing_query(client, auth, fake_model):
+    rec = _create_collection(client, auth, fake_model)
+    r = client.post("/rag/retrieve", json={
+        "collection_id": rec["id"], "query": "  ",
+    }, headers=auth)
+    assert r.status_code == 400
+
+
+def test_rag_retrieve_returns_sources_after_ingest(client, auth, fake_model, tmp_path):
+    rec = _create_collection(client, auth, fake_model)
+
+    # Ingest something so the store has rows.
+    docs = tmp_path / "docs"; docs.mkdir()
+    (docs / "a.txt").write_text("alpha beta gamma")
+    (docs / "b.txt").write_text("one two three")
+    job_resp = client.post("/jobs/rag.ingest", json={
+        "collection_id": rec["id"], "paths": [str(docs)], "chunk_size": 2,
+    }, headers=auth)
+    job_id = job_resp.json()["job_id"]
+    _read_events(client, auth, job_id)
+
+    r = client.post("/rag/retrieve", json={
+        "collection_id": rec["id"], "query": "alpha", "top_k": 5,
+    }, headers=auth)
+    assert r.status_code == 200
+    sources = r.json()["sources"]
+    assert len(sources) > 0
+    for s in sources:
+        assert {"id", "text", "score", "metadata"} <= set(s.keys())
+
+
+def test_rag_retrieve_caches_embedder_per_collection(client, auth, fake_model):
+    rec = _create_collection(client, auth, fake_model)
+    # Warm a tiny store with one row so search has something to return.
+    from conftest import _FakeEmbedder
+    _FakeEmbedder.instances.clear()
+
+    body = {"collection_id": rec["id"], "query": "anything"}
+    client.post("/rag/retrieve", json=body, headers=auth)
+    client.post("/rag/retrieve", json=body, headers=auth)
+    # Second call reuses the cached embedder.
+    assert len(_FakeEmbedder.instances) == 1
+
+
 # --- /info ------------------------------------------------------------------
 
 

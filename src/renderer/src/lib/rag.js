@@ -25,6 +25,11 @@ export async function ingest({ collection_id, paths, glob, chunk_size, chunk_ove
   return startJob("rag.ingest", { collection_id, paths, glob, chunk_size, chunk_overlap });
 }
 
+/** Retrieve-only RAG. Returns ``{sources: [...]}``. No LLM invoked. */
+export async function retrieve({ collection_id, query, top_k, similarity_threshold }) {
+  return sidecarJson("/rag/retrieve", { collection_id, query, top_k, similarity_threshold });
+}
+
 /**
  * Stream a RAG query as SSE. Returns an async iterator wrapper that calls
  * onSources({sources}) once and onToken(text) per chunk; resolves on
