@@ -90,19 +90,6 @@
           </div>
         </div>
 
-        <!-- Slide-up console panel; hidden by default, toggled via the
-             nav-rail Terminal button. -->
-        <section class="console" id="console" aria-hidden="true" hidden>
-          <header class="console-header">
-            <span class="console-title">Sidecar log</span>
-            <div class="console-actions">
-              <button class="icon-btn" id="consoleClear" title="Clear"><svg><use href="#i-trash"/></svg></button>
-              <button class="icon-btn" id="consoleClose" title="Close"><svg><use href="#i-chev-down"/></svg></button>
-            </div>
-          </header>
-          <div class="console-body" id="consoleBody"></div>
-        </section>
-
         <div class="composer-wrap">
           <div class="composer-card">
             <textarea id="prompt" rows="1" placeholder="Send a message to the model..." autofocus></textarea>
@@ -116,6 +103,20 @@
             </div>
           </div>
         </div>
+
+        <!-- Sidecar log; hidden by default, toggled via the nav-rail
+             Terminal button. Sits below the composer so it doesn't
+             displace the conversation when shown. -->
+        <section class="console" id="console" aria-hidden="true" hidden>
+          <header class="console-header">
+            <span class="console-title">Sidecar log</span>
+            <div class="console-actions">
+              <button class="icon-btn" id="consoleClear" title="Clear"><svg><use href="#i-trash"/></svg></button>
+              <button class="icon-btn" id="consoleClose" title="Close"><svg><use href="#i-chev-down"/></svg></button>
+            </div>
+          </header>
+          <div class="console-body" id="consoleBody"></div>
+        </section>
       </main>
 
       <!-- Right: tabbed sidebar.

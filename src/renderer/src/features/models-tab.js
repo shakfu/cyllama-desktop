@@ -46,18 +46,27 @@ function el(tag, attrs = {}, ...children) {
   return node;
 }
 
-function renderRow(m) {
-  const row = el("button", {
-    type: "button",
-    class: "mt-row" + (state.selected && state.selected.path === m.path ? " active" : ""),
-    title: m.path,
-    onclick: () => selectModel(m),
-    ondblclick: () => onPickModel(m.path),
-  },
-    el("span", { class: "mt-row-name" }, m.name),
-    el("span", { class: "mt-row-meta" }, `${fmtBytes(m.size)} · ${m.source}`),
-  );
-  return row;
+function renderDropdown() {
+  const select = el("select", { class: "mt-select" });
+  if (state.models.length === 0) {
+    select.appendChild(el("option", { value: "", disabled: true, selected: true }, "No models — drop a .gguf or paste an HF URL"));
+    select.disabled = true;
+  } else {
+    if (!state.selected) {
+      select.appendChild(el("option", { value: "", disabled: true, selected: true }, "Select a model..."));
+    }
+    for (const m of state.models) {
+      const opt = el("option", { value: m.path, title: m.path },
+        `${m.name}  ·  ${fmtBytes(m.size)}  ·  ${m.source}`);
+      if (state.selected && state.selected.path === m.path) opt.selected = true;
+      select.appendChild(opt);
+    }
+  }
+  select.addEventListener("change", () => {
+    const m = state.models.find((x) => x.path === select.value);
+    if (m) selectModel(m);
+  });
+  return select;
 }
 
 async function selectModel(m) {
@@ -181,13 +190,6 @@ function renderHfRow() {
   );
 }
 
-function renderDropZone() {
-  return el("div", { class: "mt-drop", "data-dropzone": "1" },
-    el("div", { class: "mt-drop-title" }, "Drag .gguf files here"),
-    el("div", { class: "mt-drop-sub mono" }, state.modelsDir || ""),
-  );
-}
-
 function renderSelected() {
   if (!state.selected) {
     return el("div", { class: "mt-meta-empty" }, "Select a model above to inspect");
@@ -213,7 +215,7 @@ function renderSelected() {
     onclick: async () => {
       state.metaOpen = !state.metaOpen;
       if (state.metaOpen) await ensureMetadata(m);
-      else redraw();
+      redraw();
     },
   }, state.metaOpen ? "Hide metadata" : "Show metadata");
 
@@ -254,24 +256,24 @@ function redraw() {
   if (!host) return;
   while (host.firstChild) host.removeChild(host.firstChild);
 
-  const head = el("div", { class: "rt-section-head" },
-    el("h3", {}, "Cached models"),
+  const picker = el("div", { class: "mt-picker" },
+    renderDropdown(),
     el("button", {
       type: "button",
-      class: "icon-btn",
+      class: "icon-btn mt-refresh",
       title: "Refresh",
       onclick: refresh,
     }, el("span", {}, "↻")),
   );
 
-  const list = state.models.length === 0
-    ? el("div", { class: "mt-empty" }, "No models yet. Drop a .gguf below or paste an HF URL.")
-    : el("div", { class: "mt-rows" }, ...state.models.map(renderRow));
-
   const addHead = el("div", { class: "rt-section-head" }, el("h3", {}, "Add a model"));
+  const dropHint = el("div", { class: "mt-drop-hint" },
+    "Drop ", el("span", { class: "mono" }, ".gguf"), " files anywhere on this tab",
+    state.modelsDir ? el("div", { class: "mt-drop-sub mono" }, state.modelsDir) : null,
+  );
 
-  host.appendChild(el("div", { class: "rt-section" }, head, list, renderSelected()));
-  host.appendChild(el("div", { class: "rt-section" }, addHead, renderHfRow(), renderDropZone()));
+  host.appendChild(el("div", { class: "rt-section" }, picker, renderSelected()));
+  host.appendChild(el("div", { class: "rt-section" }, addHead, renderHfRow(), dropHint));
 }
 
 async function handleDrop(ev) {

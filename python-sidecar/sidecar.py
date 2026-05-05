@@ -9,6 +9,7 @@ Started by the Electron main process with these env vars:
 from __future__ import annotations
 
 import asyncio
+import importlib
 import inspect
 import json
 import os
@@ -893,6 +894,39 @@ def models_cached():
     return {"models": items, "models_dir": str(MODELS_DIR)}
 
 
+_GGUF_CONTEXT = None
+_GGUF_CONTEXT_RESOLVED = False
+
+
+def _resolve_gguf_context():
+    """Find ``GGUFContext`` across cyllama versions.
+
+    0.2.15 doesn't re-export it at the top-level ``cyllama`` namespace; it
+    lives at ``cyllama.llama.llama_cpp``. Older / newer versions may
+    expose it elsewhere. Resolve once and cache (including the negative
+    case) so we don't repeatedly walk the import graph.
+    """
+    global _GGUF_CONTEXT, _GGUF_CONTEXT_RESOLVED
+    if _GGUF_CONTEXT_RESOLVED:
+        return _GGUF_CONTEXT
+    candidates = (
+        ("cyllama", "GGUFContext"),
+        ("cyllama.llama.llama_cpp", "GGUFContext"),
+        ("cyllama.llama", "GGUFContext"),
+    )
+    for mod_name, attr in candidates:
+        try:
+            mod = importlib.import_module(mod_name)
+        except Exception:
+            continue
+        cls = getattr(mod, attr, None)
+        if cls is not None:
+            _GGUF_CONTEXT = cls
+            break
+    _GGUF_CONTEXT_RESOLVED = True
+    return _GGUF_CONTEXT
+
+
 @app.post("/models/inspect")
 async def models_inspect(req: Request):
     """Read GGUF metadata via cyllama.GGUFContext.
@@ -907,7 +941,7 @@ async def models_inspect(req: Request):
     if not model_path or not os.path.isfile(model_path):
         raise HTTPException(400, "path required and must exist")
 
-    GGUFContext = getattr(cyllama, "GGUFContext", None)
+    GGUFContext = _resolve_gguf_context()
     if GGUFContext is None:
         return {"path": model_path, "metadata": None, "error": "GGUFContext not available"}
 
@@ -948,7 +982,7 @@ async def models_inspect(req: Request):
 async def models_import(req: Request):
     """Copy a GGUF file from an arbitrary local path into MODELS_DIR.
 
-    Used by drag-drop in the Models workspace. We do a server-side copy
+    Used by drag-drop in the Models tab. We do a server-side copy
     rather than upload because the renderer only has the path; reading
     multi-GB files into JS just to POST them back would be wasteful.
     Same-file (already inside MODELS_DIR) is a no-op.

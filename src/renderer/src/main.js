@@ -2,8 +2,8 @@
 
 // Phase 0 split: the bulk of the renderer still lives here, but the
 // loopback HTTP client and the /jobs SSE client are extracted into
-// reusable modules so the workspaces added in later phases (Models,
-// Documents, Image, Agents, ...) can consume them without re-implementing
+// reusable modules so the panes added in later phases (Documents,
+// Transcribe, Image, Agents, ...) can consume them without re-implementing
 // the bearer-auth handshake or SSE framing. The chat hot path keeps its
 // existing direct-fetch code for now.
 import * as cyllamaSidecar from "./lib/sidecar.js";

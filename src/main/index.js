@@ -15,6 +15,58 @@ let mainWindow = null;
 let sidecarProc = null;
 let sidecarInfo = null; // { port, token }
 
+// ---------------------------------------------------------------------------
+// Storage layout
+//
+// Per-project state (chats, artifacts, RAG, presets, sandbox, settings) lives
+// under <userData>/workspaces/<id>/. Only a single implicit `default`
+// workspace exists today; multi-workspace lands later (see PLAN.md S.9). The
+// model cache stays global at <userData>/models/ -- GGUFs are too large to
+// duplicate per project; a workspace just pins a default by path.
+//
+// On launch, migrateLayoutIfNeeded() promotes any pre-existing top-level
+// `chats/` and `artifacts/` dirs into workspaces/default/. The migration is
+// guarded by a version stamp so it runs at most once per install.
+// ---------------------------------------------------------------------------
+const LAYOUT_VERSION = 1;
+const DEFAULT_WORKSPACE_ID = "default";
+
+function userDataDir() {
+  return app.getPath("userData");
+}
+
+function workspaceDir(id = DEFAULT_WORKSPACE_ID) {
+  return path.join(userDataDir(), "workspaces", id);
+}
+
+function migrateLayoutIfNeeded() {
+  const stamp = path.join(userDataDir(), ".layout_version");
+  let v = 0;
+  try { v = parseInt(fs.readFileSync(stamp, "utf8").trim(), 10) || 0; } catch (_) {}
+  if (v >= LAYOUT_VERSION) return;
+
+  fs.mkdirSync(workspaceDir(), { recursive: true });
+
+  // Idempotent: each rename only fires if the source still exists at the old
+  // location and the destination hasn't been populated. A crash mid-migration
+  // leaves the stamp unwritten so the remaining moves run on the next launch.
+  for (const sub of ["chats", "artifacts"]) {
+    const src = path.join(userDataDir(), sub);
+    const dst = path.join(workspaceDir(), sub);
+    if (!fs.existsSync(src)) continue;
+    if (fs.existsSync(dst)) continue;
+    try {
+      fs.renameSync(src, dst);
+    } catch (err) {
+      console.error(`[layout] failed to migrate ${sub}: ${err.message}`);
+      // Don't write the stamp -- retry next launch.
+      return;
+    }
+  }
+
+  fs.writeFileSync(stamp, String(LAYOUT_VERSION), "utf8");
+}
+
 // Sidecar stdio ring buffer. Each entry: { t: timestamp, s: "out" | "err", line: string }.
 // Bounded so a noisy sidecar can't blow up main-process memory.
 const LOG_BUFFER_MAX = 2000;
@@ -98,13 +150,15 @@ async function startSidecar() {
   const token = crypto.randomBytes(32).toString("hex");
 
   // Artifact root for long-running jobs (HF downloads, image gen, batch
-  // outputs). Created up front so the sidecar can rely on it existing.
-  // Kept under userData so a clean uninstall takes it with it.
-  const artifactsDir = path.join(app.getPath("userData"), "artifacts");
+  // outputs). Lives under the active workspace so artifacts follow the
+  // project they belong to. Kept under userData so a clean uninstall
+  // takes it with it.
+  const artifactsDir = path.join(workspaceDir(), "artifacts");
   fs.mkdirSync(artifactsDir, { recursive: true });
-  // Desktop-managed models dir. Primary source for the Models workspace;
-  // HF cache is enumerated read-only as a secondary listing.
-  const modelsDir = path.join(app.getPath("userData"), "models");
+  // Desktop-managed models dir. Global (shared across workspaces) -- GGUFs
+  // are too large to duplicate per project. The Models tab is the primary
+  // surface; HF cache is enumerated read-only as a secondary listing.
+  const modelsDir = path.join(userDataDir(), "models");
   fs.mkdirSync(modelsDir, { recursive: true });
 
   sidecarProc = spawn(pythonBin, [script], {
@@ -236,14 +290,15 @@ ipcMain.handle("sidecar:info", () => sidecarInfo);
 ipcMain.handle("log:recent", () => logBuffer.slice());
 
 // ---------------------------------------------------------------------------
-// Chats: persisted under <userData>/chats/<id>.json. Atomic writes via
-// tmp+rename so a crash mid-write doesn't leave a torn file. Chat IDs are
-// validated against an allow-pattern to prevent path traversal.
+// Chats: persisted under <userData>/workspaces/<id>/chats/<chatId>.json.
+// Atomic writes via tmp+rename so a crash mid-write doesn't leave a torn
+// file. Chat IDs are validated against an allow-pattern to prevent path
+// traversal. Currently only the implicit `default` workspace is used.
 // ---------------------------------------------------------------------------
 const CHAT_ID_RE = /^[A-Za-z0-9_-]{6,128}$/;
 
 function chatsDir() {
-  return path.join(app.getPath("userData"), "chats");
+  return path.join(workspaceDir(), "chats");
 }
 function chatPath(id) {
   if (typeof id !== "string" || !CHAT_ID_RE.test(id)) {
@@ -329,7 +384,7 @@ ipcMain.handle("fs:exists", async (_e, p) => {
 });
 
 ipcMain.handle("shell:revealItem", async (_e, p) => {
-  // Reveal-in-Finder/Explorer for a model file in the Models workspace.
+  // Reveal-in-Finder/Explorer for a model file in the Models tab.
   // Path is treated as opaque and only passed to shell.showItemInFolder,
   // which doesn't follow symlinks or read the target.
   if (typeof p !== "string" || !p) return false;
@@ -354,6 +409,7 @@ ipcMain.handle("dialog:pickModel", async () => {
 app.whenReady().then(async () => {
   buildApplicationMenu();
   try {
+    migrateLayoutIfNeeded();
     await startSidecar();
   } catch (err) {
     dialog.showErrorBox("Sidecar startup failed", String(err.message || err));

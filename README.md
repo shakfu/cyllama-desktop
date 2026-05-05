@@ -2,6 +2,14 @@
 
 Electron desktop app that runs [cyllama](https://github.com/shakfu/cyllama) via a bundled Python sidecar.
 
+## Concepts
+
+- **Pane.** A UI surface in the app shell. Today: Chat (the main pane) plus three right-sidebar tabs (Models, Agents, General). Future panes (Documents/RAG, Transcribe, Image, Agents, Batch, Server) get their own nav-rail entries.
+- **Workspace.** A *project*: a scoped bundle of inputs, outputs, chosen models, presets, agent tool sandbox, and config. Today only an implicit `default` workspace exists. Multi-workspace support and a workspace switcher land later (see `PLAN.md` S.9).
+- **Sidecar.** The bundled Python process running cyllama via FastAPI on `127.0.0.1`, gated by a per-launch bearer token. The renderer is a thin client; the sidecar is the single source of truth for inference, models, and jobs.
+
+See `PLAN.md` for the phased rollout and `CHANGELOG.md` for what has shipped.
+
 ## Build
 
 Quick path: `make` builds an installer for the host platform (macOS arm64 -> `.dmg`). Other targets:
@@ -106,22 +114,47 @@ Should return `{"ok":true}`. Useful when isolating sidecar issues from Electron 
 
 ## Layout
 
+Source tree:
+
 ```
 cyllama-desktop/
   package.json                      Electron + electron-builder + @electron/notarize
   electron-builder.yml              bundle config (mac dmg arm64 by default)
   src/
-    main/index.js                   spawns sidecar, allocates port, generates auth token
+    main/index.js                   spawns sidecar, allocates port, generates auth token, runs layout migration
     preload/index.js                exposes safe IPC to renderer
     renderer/
-      index.html                    minimal chat UI with strict CSP
-      renderer.js                   SSE client, talks to 127.0.0.1:<port>
+      index.html                    chat UI with strict CSP
+      src/                          renderer source (esbuild input)
+        main.js                       chat hot path, KaTeX/marked rendering
+        lib/{sidecar,jobs,models}.js  bearer-auth HTTP, /jobs SSE client, model list
+        features/                     model-picker, models tab, presets, right-sidebar tabs, ...
+      dist/renderer.js              esbuild output bundle (loaded by index.html)
+      vendor/                       marked + katex vendored under CSP 'self'
   python-sidecar/
-    sidecar.py                      FastAPI: /health, /chat (SSE), bearer auth, parent-pid watchdog
+    sidecar.py                      FastAPI: /health, /info, /chat (SSE), /tokenize, /unload, /models/*, /jobs/*, /hardware/estimate-layers
     pyproject.toml                  declares cyllama + fastapi + uvicorn
+  tests/                            pytest suite for the sidecar (50 cases)
   scripts/
     build-python-env.sh             python-build-standalone bundler -> build/python-<os>-<arch>/
     notarize.js                     afterSign hook (no-op unless APPLE_ID set)
   resources/
     entitlements.mac.plist          hardened-runtime entitlements for dlopen + JIT
 ```
+
+Runtime data (under `app.getPath('userData')`):
+
+```
+<userData>/
+  models/                           global GGUF cache (workspaces pin a default by path; never duplicated)
+  .layout_version                   migration stamp (currently "1")
+  workspaces/
+    default/                        the implicit default workspace
+      chats/<chatId>.json             persisted chat history (atomic tmp+rename writes)
+      artifacts/<jobId>/...           outputs from /jobs (HF downloads now; image/video/batch later)
+      presets/                        reserved (presets currently live in localStorage)
+      sandbox/                        reserved (per-workspace agent file-tool sandbox root)
+      settings.json                   reserved (per-workspace model pin, preset, system prompt)
+```
+
+Pre-existing top-level `chats/` and `artifacts/` from earlier installs are migrated into `workspaces/default/` automatically on first launch after the layout-aware build; the migration is gated by `.layout_version` so it runs at most once per install.
