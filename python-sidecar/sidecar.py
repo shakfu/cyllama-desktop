@@ -214,6 +214,15 @@ MODELS_DIR = Path(
 ).resolve()
 MODELS_DIR.mkdir(parents=True, exist_ok=True)
 
+# Per-workspace RAG state. Each collection gets a sqlite vector store at
+# RAG_DIR/<id>.sqlite; the registry of collections (id, name, embedding
+# model, counts) lives in RAG_DIR/collections.json.
+RAG_DIR = Path(
+    os.environ.get("CYLLAMA_SIDECAR_RAG")
+    or (Path.home() / ".cache" / "cyllama-desktop" / "rag")
+).resolve()
+RAG_DIR.mkdir(parents=True, exist_ok=True)
+
 # HF cache locations to enumerate read-only as a secondary listing. Both
 # the llama.cpp-flavoured cache and the standard HuggingFace hub cache
 # are scanned; missing dirs are silently skipped.
@@ -332,6 +341,7 @@ _INFO_CACHE: dict = {
     "sidecar": {
         "artifacts_dir": str(ARTIFACTS_DIR),
         "models_dir": str(MODELS_DIR),
+        "rag_dir": str(RAG_DIR),
     },
     # Subset of _ALLOWED_PARAMS that ``GenerationConfig`` in the
     # installed cyllama actually accepts. Renderer hides UI rows whose
@@ -1217,6 +1227,386 @@ async def jobs_demo(req: Request):
         await _emit(job, {"type": "result", "result": {"steps": steps}})
 
     job = await run_job("demo", producer)
+    return {"job_id": job.id}
+
+
+# ---------------------------------------------------------------------------
+# RAG (Phase 4 slice 1): collections registry + ingest job. Query and the
+# Documents pane land in subsequent slices.
+#
+# Per-collection state lives at RAG_DIR/<id>.sqlite (cyllama
+# SqliteVectorStore). RAG_DIR/collections.json carries id, display name,
+# embedding model path, doc/chunk counts. Atomic writes via tmp+rename.
+#
+# The cyllama RAG class needs both an embedding model and a generation
+# model. Ingest only needs embeddings, so we use Embedder + SqliteVector-
+# Store directly (skipping RAG) to avoid loading an LLM during ingest.
+# Query (next slice) will reach for the full RAG class.
+# ---------------------------------------------------------------------------
+_RAG_MANIFEST = RAG_DIR / "collections.json"
+_RAG_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
+
+
+def _rag_manifest_load() -> dict:
+    if not _RAG_MANIFEST.exists():
+        return {"version": 1, "collections": []}
+    try:
+        return json.loads(_RAG_MANIFEST.read_text("utf-8"))
+    except (OSError, ValueError):
+        return {"version": 1, "collections": []}
+
+
+def _rag_manifest_save(m: dict) -> None:
+    tmp = _RAG_MANIFEST.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(m, indent=2), "utf-8")
+    tmp.replace(_RAG_MANIFEST)
+
+
+def _rag_collection_get(coll_id: str) -> Optional[dict]:
+    for c in _rag_manifest_load().get("collections", []):
+        if c.get("id") == coll_id:
+            return c
+    return None
+
+
+@app.get("/rag/collections")
+async def rag_collections_list():
+    m = _rag_manifest_load()
+    return {"collections": m.get("collections", []), "rag_dir": str(RAG_DIR)}
+
+
+@app.post("/rag/collections")
+async def rag_collections_create(req: Request):
+    body = await req.json()
+    name = (body.get("name") or "").strip()
+    if not name:
+        raise HTTPException(400, "name required")
+    embedding_model_path = body.get("embedding_model_path") or ""
+    if not embedding_model_path or not os.path.isfile(embedding_model_path):
+        raise HTTPException(400, "embedding_model_path required and must exist")
+
+    base = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")[:32] or "coll"
+    coll_id = f"{base}-{uuid.uuid4().hex[:8]}"
+    sqlite_path = RAG_DIR / f"{coll_id}.sqlite"
+
+    now = int(time.time())
+    record = {
+        "id": coll_id,
+        "name": name,
+        "embedding_model_path": embedding_model_path,
+        "sqlite_path": str(sqlite_path),
+        "created_at": now,
+        "updated_at": now,
+        "doc_count": 0,
+        "chunk_count": 0,
+    }
+    m = _rag_manifest_load()
+    m.setdefault("collections", []).append(record)
+    _rag_manifest_save(m)
+    return record
+
+
+@app.delete("/rag/collections/{coll_id}")
+async def rag_collections_delete(coll_id: str):
+    if not _RAG_ID_RE.match(coll_id):
+        raise HTTPException(400, "invalid collection id")
+    m = _rag_manifest_load()
+    before = len(m.get("collections", []))
+    m["collections"] = [c for c in m.get("collections", []) if c.get("id") != coll_id]
+    if len(m["collections"]) == before:
+        raise HTTPException(404, "collection not found")
+    _rag_manifest_save(m)
+    sqlite = RAG_DIR / f"{coll_id}.sqlite"
+    try:
+        sqlite.unlink()
+    except FileNotFoundError:
+        pass
+    return {"ok": True}
+
+
+# Single-slot cache for an opened RAG. Keyed by
+# ``(collection_id, generation_model_path)``; the embedding model is fixed
+# per collection so it doesn't enter the key. Different (collection, gen
+# model) combos evict the prior instance because cyllama RAG holds two
+# GGUF models in memory.
+_RAG_INSTANCE: dict = {"key": None, "rag": None}
+
+
+def _close_rag_instance() -> None:
+    rag = _RAG_INSTANCE.get("rag")
+    if rag is None:
+        return
+    for closer in ("close",):
+        try:
+            getattr(rag, closer)()
+        except Exception:  # noqa: BLE001
+            pass
+    _RAG_INSTANCE["rag"] = None
+    _RAG_INSTANCE["key"] = None
+
+
+def _get_rag(collection: dict, generation_model_path: str):
+    """Open (or reuse) a cyllama RAG bound to this collection's sqlite."""
+    rag_mod = importlib.import_module("cyllama.rag")
+    RAG = rag_mod.RAG
+    key = (collection["id"], generation_model_path)
+    if _RAG_INSTANCE.get("key") == key and _RAG_INSTANCE.get("rag") is not None:
+        return _RAG_INSTANCE["rag"]
+    _close_rag_instance()
+    rag = RAG(
+        embedding_model=collection["embedding_model_path"],
+        generation_model=generation_model_path,
+        db_path=collection["sqlite_path"],
+    )
+    _RAG_INSTANCE["key"] = key
+    _RAG_INSTANCE["rag"] = rag
+    return rag
+
+
+def _build_rag_config(body: dict):
+    """Translate query body fields into a ``cyllama.rag.RAGConfig``.
+
+    Only the subset we expose to the renderer; ``RAGConfig`` accepts more
+    but the rest are left at cyllama defaults.
+    """
+    rag_mod = importlib.import_module("cyllama.rag")
+    RAGConfig = rag_mod.RAGConfig
+    kwargs = {}
+    for src_key, dst_key, caster in (
+        ("top_k", "top_k", int),
+        ("similarity_threshold", "similarity_threshold", float),
+        ("max_tokens", "max_tokens", int),
+        ("temperature", "temperature", float),
+        ("system_prompt", "system_prompt", str),
+    ):
+        v = body.get(src_key)
+        if v is None:
+            continue
+        try:
+            kwargs[dst_key] = caster(v)
+        except (TypeError, ValueError):
+            continue
+    return RAGConfig(**kwargs) if kwargs else None
+
+
+def _serialize_sources(sources) -> list[dict]:
+    out = []
+    for s in sources or []:
+        out.append({
+            "id": getattr(s, "id", None),
+            "text": getattr(s, "text", ""),
+            "score": float(getattr(s, "score", 0.0) or 0.0),
+            "metadata": _jsonify(getattr(s, "metadata", {}) or {}),
+        })
+    return out
+
+
+@app.post("/rag/query")
+async def rag_query(req: Request):
+    """Stream a RAG answer over SSE.
+
+    Body: ``{collection_id, generation_model_path, question, top_k?,
+    similarity_threshold?, max_tokens?, temperature?, system_prompt?}``.
+
+    Wire shape mirrors ``/chat``: each token chunk is
+    ``data: {"text": "..."}\\n\\n``, prefixed by exactly one
+    ``data: {"sources": [...]}\\n\\n`` event. Errors emit
+    ``data: {"error": "..."}\\n\\n``. Stream ends with
+    ``data: [DONE]\\n\\n``.
+    """
+    body = await req.json()
+    coll_id = body.get("collection_id") or ""
+    gen_path = body.get("generation_model_path") or ""
+    question = (body.get("question") or "").strip()
+
+    if not _RAG_ID_RE.match(coll_id):
+        raise HTTPException(400, "invalid collection id")
+    coll = _rag_collection_get(coll_id)
+    if coll is None:
+        raise HTTPException(404, "collection not found")
+    if not gen_path or not os.path.isfile(gen_path):
+        raise HTTPException(400, "generation_model_path required and must exist")
+    if not question:
+        raise HTTPException(400, "question required")
+
+    rag = _get_rag(coll, gen_path)
+    config = _build_rag_config(body)
+    loop = asyncio.get_running_loop()
+
+    async def event_stream():
+        # Sources first (one round-trip's worth of retrieval). Note: cyllama
+        # ``RAG.stream`` does its own retrieval internally, so this is
+        # effectively a duplicate fetch -- kept for v1 simplicity, optimise
+        # later if cyllama exposes a "use these sources" path.
+        try:
+            sources = rag.retrieve(question, config) if config else rag.retrieve(question)
+            yield "data: " + json.dumps({"sources": _serialize_sources(sources)}) + "\n\n"
+        except Exception as exc:  # noqa: BLE001
+            yield "data: " + json.dumps({"error": f"retrieve failed: {exc}"}) + "\n\n"
+            yield "data: [DONE]\n\n"
+            return
+
+        # Then stream tokens via a producer thread, same shape as /chat.
+        q: asyncio.Queue = asyncio.Queue()
+        DONE = object()
+
+        def producer():
+            try:
+                gen = rag.stream(question, config) if config else rag.stream(question)
+                for chunk in gen:
+                    loop.call_soon_threadsafe(q.put_nowait, chunk)
+            except Exception as e:  # noqa: BLE001
+                loop.call_soon_threadsafe(q.put_nowait, {"__error__": str(e)})
+            finally:
+                loop.call_soon_threadsafe(q.put_nowait, DONE)
+
+        threading.Thread(target=producer, daemon=True).start()
+
+        try:
+            while True:
+                item = await q.get()
+                if item is DONE:
+                    yield "data: [DONE]\n\n"
+                    return
+                if isinstance(item, dict) and "__error__" in item:
+                    yield "data: " + json.dumps({"error": item["__error__"]}) + "\n\n"
+                    return
+                yield "data: " + json.dumps({"text": str(item)}) + "\n\n"
+        except asyncio.CancelledError:
+            # Client disconnected. Best-effort cancel of the underlying LLM
+            # if RAG exposes one; otherwise the producer thread runs to
+            # completion against a queue nobody's reading.
+            inner_llm = getattr(rag, "llm", None) or getattr(rag, "_llm", None)
+            if inner_llm is not None:
+                try:
+                    inner_llm.cancel()
+                except Exception:  # noqa: BLE001
+                    pass
+            raise
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
+register_job_kind("rag.ingest")
+
+
+@app.post("/jobs/rag.ingest")
+async def jobs_rag_ingest(req: Request):
+    """Ingest documents into a RAG collection.
+
+    Body: ``{collection_id, paths: [str], glob?: str, chunk_size?: int,
+    chunk_overlap?: int}``. Each path may be a file or a directory; dirs
+    are scanned with ``load_directory(glob=...)``.
+    """
+    body = await req.json()
+    coll_id = body.get("collection_id") or ""
+    paths = body.get("paths") or []
+    glob = body.get("glob") or "**/*"
+    chunk_size = int(body.get("chunk_size") or 512)
+    chunk_overlap = int(body.get("chunk_overlap") or 50)
+
+    if not _RAG_ID_RE.match(coll_id):
+        raise HTTPException(400, "invalid collection id")
+    coll = _rag_collection_get(coll_id)
+    if coll is None:
+        raise HTTPException(404, "collection not found")
+    if not isinstance(paths, list) or not paths:
+        raise HTTPException(400, "paths required (non-empty list)")
+    if not all(isinstance(p, str) and p for p in paths):
+        raise HTTPException(400, "paths must be non-empty strings")
+
+    embedding_model_path = coll["embedding_model_path"]
+    sqlite_path = coll["sqlite_path"]
+
+    async def producer(job: Job) -> None:
+        rag_mod = importlib.import_module("cyllama.rag")
+        Embedder = rag_mod.Embedder
+        SqliteVectorStore = rag_mod.SqliteVectorStore
+        TextSplitter = rag_mod.TextSplitter
+        load_directory = rag_mod.load_directory
+        load_document = rag_mod.load_document
+
+        # Note: cyllama ops below are synchronous and CPU/IO-bound. We keep
+        # them on the event loop because (a) ingest is a coarse-grained job
+        # already isolated by the /jobs machinery, (b) FastAPI TestClient's
+        # portal model interacts poorly with ``asyncio.to_thread`` for
+        # fire-and-forget background tasks, and (c) per-batch ``await``
+        # points below give the loop room to service SSE consumers.
+        await _emit(job, {"type": "log", "message": "loading documents..."})
+        docs = []
+        for p in paths:
+            pth = Path(p)
+            if not pth.exists():
+                await _emit(job, {"type": "log", "message": f"skip (missing): {p}"})
+                continue
+            if pth.is_dir():
+                docs.extend(load_directory(str(pth), glob=glob))
+            else:
+                docs.extend(load_document(str(pth)))
+        if not docs:
+            raise RuntimeError("no documents loaded")
+        await _emit(job, {"type": "log", "message": f"{len(docs)} documents loaded"})
+
+        splitter = TextSplitter(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
+        chunks = splitter.split_documents(docs)
+        if not chunks:
+            raise RuntimeError("no chunks produced")
+        await _emit(job, {"type": "log", "message": f"{len(chunks)} chunks"})
+
+        embedder = Embedder(model_path=embedding_model_path)
+        store = None
+        try:
+            store = SqliteVectorStore(dimension=embedder.dimension, db_path=sqlite_path)
+            BATCH = 32
+            n_added = 0
+            total = len(chunks)
+            for i in range(0, total, BATCH):
+                batch = chunks[i:i + BATCH]
+                texts = [c.text for c in batch]
+                metas = []
+                for c in batch:
+                    md = dict(getattr(c, "metadata", {}) or {})
+                    md["chunk_index"] = getattr(c, "chunk_index", 0)
+                    if getattr(c, "source_id", None) is not None:
+                        md["source_id"] = c.source_id
+                    metas.append(md)
+                vecs = embedder.embed_batch(texts)
+                store.add(vecs, texts, metas)
+                n_added += len(batch)
+                await _emit(job, {
+                    "type": "progress",
+                    "value": n_added / total,
+                    "added": n_added,
+                    "total": total,
+                })
+        finally:
+            for closeable in (embedder, store):
+                if closeable is None:
+                    continue
+                try:
+                    closeable.close()
+                except Exception:  # noqa: BLE001
+                    pass
+
+        m2 = _rag_manifest_load()
+        for c in m2.get("collections", []):
+            if c.get("id") == coll_id:
+                c["doc_count"] = int(c.get("doc_count", 0)) + len(docs)
+                c["chunk_count"] = int(c.get("chunk_count", 0)) + total
+                c["updated_at"] = int(time.time())
+                break
+        _rag_manifest_save(m2)
+
+        await _emit(job, {
+            "type": "result",
+            "result": {
+                "collection_id": coll_id,
+                "documents": len(docs),
+                "chunks": total,
+            },
+        })
+
+    job = await run_job("rag.ingest", producer)
     return {"job_id": job.id}
 
 

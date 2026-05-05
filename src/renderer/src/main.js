@@ -9,12 +9,14 @@
 import * as cyllamaSidecar from "./lib/sidecar.js";
 import * as cyllamaJobs from "./lib/jobs.js";
 import * as cyllamaModels from "./lib/models.js";
+import * as cyllamaRag from "./lib/rag.js";
 import * as rightTabs from "./features/right-tabs.js";
 import * as modelsTab from "./features/models-tab.js";
 import * as agentsTab from "./features/agents-tab.js";
 import * as generalTab from "./features/general-tab.js";
 import * as modelPicker from "./features/model-picker.js";
 import * as presets from "./features/presets.js";
+import * as documentsDialog from "./features/documents-pane.js";
 
 // Expose the libs on a single namespace so feature modules added later --
 // or ad-hoc devtools sessions -- can reach them without re-importing.
@@ -22,8 +24,37 @@ window.cyllamaLib = {
   sidecar: cyllamaSidecar,
   jobs: cyllamaJobs,
   models: cyllamaModels,
+  rag: cyllamaRag,
   rightTabs,
 };
+
+// Sidebar-view switcher: nav-rail buttons tagged ``data-sidebar-view``
+// pick which ``.sidebar-view`` is shown. Default = chats. Per-view
+// lifecycle hooks are dispatched as the view becomes active or inactive
+// so feature modules (e.g. Documents) can refresh / cleanup.
+const SIDEBAR_VIEW_HOOKS = {
+  documents: { onShow: () => documentsDialog.show(), onHide: () => documentsDialog.hide() },
+};
+let activeSidebarView = "chats";
+function setSidebarView(name) {
+  if (name === activeSidebarView) return;
+  const prevHooks = SIDEBAR_VIEW_HOOKS[activeSidebarView];
+  if (prevHooks?.onHide) try { prevHooks.onHide(); } catch (e) { console.error(e); }
+  activeSidebarView = name;
+  for (const v of document.querySelectorAll(".sidebar-view")) {
+    const match = v.dataset.view === name;
+    v.classList.toggle("active", match);
+    v.hidden = !match;
+  }
+  for (const b of document.querySelectorAll(".nav-btn[data-sidebar-view]")) {
+    b.classList.toggle("active", b.dataset.sidebarView === name);
+  }
+  const nextHooks = SIDEBAR_VIEW_HOOKS[name];
+  if (nextHooks?.onShow) try { nextHooks.onShow(); } catch (e) { console.error(e); }
+}
+for (const b of document.querySelectorAll(".nav-btn[data-sidebar-view]")) {
+  b.addEventListener("click", () => setSidebarView(b.dataset.sidebarView));
+}
 
 const appEl       = document.getElementById("app");
 const logEl       = document.getElementById("log");

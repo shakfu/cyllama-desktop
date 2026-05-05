@@ -134,6 +134,176 @@ class _FakeGGUFContext:
         return dict(type(self)._metadata)
 
 
+class _FakeDocument:
+    def __init__(self, text: str, metadata: dict | None = None, id: str | None = None) -> None:
+        self.text = text
+        self.metadata = metadata or {}
+        self.id = id
+
+
+class _FakeChunk:
+    def __init__(
+        self,
+        text: str,
+        metadata: dict | None = None,
+        source_id: str | None = None,
+        chunk_index: int = 0,
+    ) -> None:
+        self.text = text
+        self.metadata = metadata or {}
+        self.source_id = source_id
+        self.chunk_index = chunk_index
+
+
+class _FakeEmbedder:
+    """Stub for ``cyllama.rag.Embedder``.
+
+    ``embed_batch`` returns deterministic 8-dim vectors so RAG ingest
+    tests can assert "things got stored" without needing a real GGUF
+    embedding model.
+    """
+
+    instances: list["_FakeEmbedder"] = []
+
+    def __init__(self, model_path: str, **kwargs) -> None:
+        self.model_path = model_path
+        self.dimension = 8
+        self.closed = False
+        type(self).instances.append(self)
+
+    def embed_batch(self, texts: list[str]) -> list[list[float]]:
+        return [[float(len(t))] * self.dimension for t in texts]
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class _FakeSqliteVectorStore:
+    instances: list["_FakeSqliteVectorStore"] = []
+
+    def __init__(self, dimension: int, db_path: str = ":memory:", **kwargs) -> None:
+        self.dimension = dimension
+        self.db_path = db_path
+        self.rows: list[tuple] = []  # (embedding, text, metadata)
+        type(self).instances.append(self)
+
+    def add(self, embeddings, texts, metadata=None, source_hash=None, source_label=None):  # noqa: ARG002
+        ids = []
+        for i, (e, t) in enumerate(zip(embeddings, texts)):
+            md = metadata[i] if metadata else {}
+            self.rows.append((e, t, md))
+            ids.append(len(self.rows))
+        return ids
+
+    def close(self) -> None:
+        pass
+
+
+class _FakeTextSplitter:
+    def __init__(self, chunk_size: int = 512, chunk_overlap: int = 50, **kwargs) -> None:
+        self.chunk_size = max(1, chunk_size)
+        self.chunk_overlap = chunk_overlap
+
+    def split_documents(self, documents):
+        out = []
+        for d in documents:
+            words = (d.text or "").split()
+            if not words:
+                continue
+            for i in range(0, len(words), self.chunk_size):
+                out.append(_FakeChunk(
+                    text=" ".join(words[i:i + self.chunk_size]),
+                    metadata=dict(getattr(d, "metadata", {}) or {}),
+                    source_id=getattr(d, "id", None),
+                    chunk_index=i,
+                ))
+        return out
+
+
+class _FakeSearchResult:
+    def __init__(self, id: str, text: str, score: float, metadata: dict | None = None) -> None:
+        self.id = id
+        self.text = text
+        self.score = score
+        self.metadata = metadata or {}
+
+
+class _FakeRAGConfig:
+    """Mirrors a useful subset of ``cyllama.rag.RAGConfig``."""
+
+    def __init__(
+        self,
+        top_k: int = 5,
+        similarity_threshold=None,
+        max_tokens: int = 512,
+        temperature: float = 0.8,
+        system_prompt=None,
+        **kwargs,
+    ) -> None:
+        self.top_k = top_k
+        self.similarity_threshold = similarity_threshold
+        self.max_tokens = max_tokens
+        self.temperature = temperature
+        self.system_prompt = system_prompt
+        for k, v in kwargs.items():
+            setattr(self, k, v)
+
+
+class _FakeRAG:
+    """Stub for ``cyllama.rag.RAG``.
+
+    Tests drive ``stream`` and ``retrieve`` outputs by monkeypatching
+    class-level ``_chunks`` / ``_sources``. Construction tracks the
+    embedding/generation model paths so cache-eviction tests can
+    introspect them.
+    """
+
+    instances: list["_FakeRAG"] = []
+    _chunks: list[str] = ["hello", " ", "world"]
+    _sources: list = []
+    closed_count: int = 0
+
+    def __init__(self, embedding_model: str, generation_model: str, db_path: str = ":memory:", **kwargs) -> None:
+        self.embedding_model = embedding_model
+        self.generation_model = generation_model
+        self.db_path = db_path
+        self.closed = False
+        self.llm = type("_FakeRAGLLM", (), {"cancel": lambda self: None})()
+        type(self).instances.append(self)
+
+    def retrieve(self, question: str, config=None):  # noqa: ARG002
+        return list(type(self)._sources)
+
+    def stream(self, question: str, config=None):  # noqa: ARG002
+        for c in type(self)._chunks:
+            yield c
+
+    def query(self, question: str, config=None):  # noqa: ARG002
+        return type("_FakeRAGResp", (), {
+            "text": "".join(type(self)._chunks),
+            "sources": list(type(self)._sources),
+            "stats": None,
+            "query": question,
+        })()
+
+    def close(self) -> None:
+        self.closed = True
+        type(self).closed_count += 1
+
+
+def _fake_load_document(path, **kwargs):  # noqa: ARG001
+    p = Path(path)
+    return [_FakeDocument(text=p.read_text(errors="ignore"), metadata={"source": str(p)})]
+
+
+def _fake_load_directory(path, glob: str = "**/*", **kwargs):  # noqa: ARG001
+    out = []
+    for f in Path(path).glob(glob):
+        if f.is_file():
+            out.extend(_fake_load_document(str(f)))
+    return out
+
+
 def _install_cyllama_stub() -> None:
     if "cyllama" in sys.modules:
         return
@@ -144,6 +314,20 @@ def _install_cyllama_stub() -> None:
     mod._backend = _FakeBackend
     mod.GGUFContext = _FakeGGUFContext
     sys.modules["cyllama"] = mod
+
+    rag = types.ModuleType("cyllama.rag")
+    rag.Document = _FakeDocument
+    rag.Chunk = _FakeChunk
+    rag.Embedder = _FakeEmbedder
+    rag.SqliteVectorStore = _FakeSqliteVectorStore
+    rag.TextSplitter = _FakeTextSplitter
+    rag.RAG = _FakeRAG
+    rag.RAGConfig = _FakeRAGConfig
+    rag.SearchResult = _FakeSearchResult
+    rag.load_document = _fake_load_document
+    rag.load_directory = _fake_load_directory
+    sys.modules["cyllama.rag"] = rag
+    mod.rag = rag
 
 
 _install_cyllama_stub()
@@ -164,6 +348,7 @@ def sidecar_app(tmp_path, monkeypatch):
     monkeypatch.setenv("CYLLAMA_SIDECAR_PARENT_PID", "0")
     monkeypatch.setenv("CYLLAMA_SIDECAR_ARTIFACTS", str(tmp_path / "artifacts"))
     monkeypatch.setenv("CYLLAMA_SIDECAR_MODELS", str(tmp_path / "models"))
+    monkeypatch.setenv("CYLLAMA_SIDECAR_RAG", str(tmp_path / "rag"))
 
     sidecar_path = Path(__file__).resolve().parent.parent / "python-sidecar"
     sys.path.insert(0, str(sidecar_path))
@@ -179,6 +364,12 @@ def sidecar_app(tmp_path, monkeypatch):
     sys.modules.pop("sidecar", None)
     sys.path.remove(str(sidecar_path))
     _FakeLLM.instances.clear()
+    _FakeEmbedder.instances.clear()
+    _FakeSqliteVectorStore.instances.clear()
+    _FakeRAG.instances.clear()
+    _FakeRAG._chunks = ["hello", " ", "world"]
+    _FakeRAG._sources = []
+    _FakeRAG.closed_count = 0
 
 
 @pytest.fixture()

@@ -39,28 +39,36 @@
     <div class="app" id="app">
       <!-- Left: nav rail -->
       <nav class="nav-rail" aria-label="Primary">
-        <button class="nav-btn active" title="Chats"><svg><use href="#i-chat"/></svg></button>
+        <button class="nav-btn active" data-sidebar-view="chats" title="Chats"><svg><use href="#i-chat"/></svg></button>
+        <button class="nav-btn" data-sidebar-view="documents" title="Documents"><svg><use href="#i-stack"/></svg></button>
         <button class="nav-btn" id="navConsole" title="Console"><svg><use href="#i-terminal"/></svg></button>
         <div class="nav-spacer"></div>
         <button class="nav-btn" data-tab-jump="general" title="Settings"><svg><use href="#i-cog"/></svg></button>
       </nav>
 
-      <!-- Chat workspace: sidebar + main-col + params-panel each tagged
-           data-workspace="chat" so the router hides them together when a
-           different workspace is active. -->
-
-      <!-- Left: chat list -->
+      <!-- Left sidebar. Holds one ``.sidebar-view`` at a time; the
+           nav-rail buttons with ``data-sidebar-view`` switch between
+           them. -->
       <aside class="sidebar">
-        <header class="sidebar-header">
-          <h2>Chats</h2>
-          <button class="icon-btn" id="newChatBtn" title="New chat"><svg><use href="#i-edit"/></svg></button>
-        </header>
-        <div class="sidebar-search">
-          <svg class="search-icon"><use href="#i-search"/></svg>
-          <input type="search" placeholder="Search chats..." />
+        <div class="sidebar-view active" data-view="chats">
+          <header class="sidebar-header">
+            <h2>Chats</h2>
+            <button class="icon-btn" id="newChatBtn" title="New chat"><svg><use href="#i-edit"/></svg></button>
+          </header>
+          <div class="sidebar-search">
+            <svg class="search-icon"><use href="#i-search"/></svg>
+            <input type="search" placeholder="Search chats..." />
+          </div>
+          <div class="chat-list" id="chatList">
+            <!-- populated by renderer.js -->
+          </div>
         </div>
-        <div class="chat-list" id="chatList">
-          <!-- populated by renderer.js -->
+
+        <div class="sidebar-view sv-documents" data-view="documents" hidden>
+          <header class="sidebar-header">
+            <h2>Documents</h2>
+          </header>
+          <div class="sv-documents-body" id="docsBody"></div>
         </div>
       </aside>
 
@@ -104,9 +112,9 @@
           </div>
         </div>
 
-        <!-- Sidecar log; hidden by default, toggled via the nav-rail
-             Terminal button. Sits below the composer so it doesn't
-             displace the conversation when shown. -->
+        <!-- Sidecar log: lives inside .main-col so it's bounded by the
+             middle column rather than spanning the full window. Toggled
+             by the nav-rail Terminal button. Sits below the composer. -->
         <section class="console" id="console" aria-hidden="true" hidden>
           <header class="console-header">
             <span class="console-title">Sidecar log</span>
@@ -117,6 +125,7 @@
           </header>
           <div class="console-body" id="consoleBody"></div>
         </section>
+
       </main>
 
       <!-- Right: tabbed sidebar.
@@ -284,6 +293,7 @@
 
         </div>
       </aside>
+
     </div>
 
     <!-- Vendor scripts (copied from node_modules by scripts/copy-vendor.sh) -->

@@ -154,6 +154,13 @@ svg circle, svg rect, svg polygon { fill: none; }
   border-right: 1px solid var(--border);
   min-height: 0;
 }
+.sidebar-view {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.sidebar-view[hidden] { display: none; }
 .sidebar-header {
   display: flex;
   align-items: center;
@@ -537,6 +544,9 @@ svg circle, svg rect, svg polygon { fill: none; }
    Console (sidecar log panel)
    ============================================================ */
 .console {
+  /* In-flow at the bottom of the chat main column, below the composer.
+     ``.main-col`` is a flex column already; this just sits as the last
+     child and takes up to 38vh / down to 160px. */
   display: flex;
   flex-direction: column;
   border-top: 1px solid var(--border);
@@ -1120,4 +1130,101 @@ svg circle, svg rect, svg polygon { fill: none; }
   background: var(--bg-sunken);
   border-radius: 6px;
   word-break: break-word;
+}
+
+/* ============================================================
+   Documents sidebar view (Phase 4 RAG: collections, ingest, query)
+   ============================================================ */
+.sv-documents-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 12px 14px 24px;
+}
+/* Stack rows vertically inside the narrow sidebar (label above, control
+   below). Override the default ``flex: row`` from the original full-pane
+   layout. */
+.sv-documents-body .dp-row { flex-direction: column; gap: 4px; align-items: stretch; }
+.sv-documents-body .dp-row.dp-actions { flex-direction: row; justify-content: flex-end; gap: 6px; }
+.sv-documents-body .dp-label { width: auto; padding-top: 0; }
+.sv-documents-body .dp-header { flex-wrap: wrap; gap: 6px; }
+.sv-documents-body .dp-header .dp-select { flex: 1 1 100%; min-width: 0; }
+.sv-documents-body .dp-section { padding: 10px 12px; }
+
+/* Documents view content (legacy ``.dp-`` prefix kept) */
+.dp-header {
+  display: flex; align-items: center; gap: 12px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 16px;
+}
+.dp-header h2 { font-size: 18px; font-weight: 600; margin: 0; }
+.dp-header-label { font-size: 11px; color: var(--fg-faint); text-transform: uppercase; letter-spacing: 0.04em; }
+.dp-header-actions { display: flex; gap: 8px; margin-left: auto; align-items: center; }
+.dp-status { font-size: 11px; color: var(--fg-faint); margin-bottom: 8px; min-height: 14px; }
+.dp-status[data-kind="err"] { color: #c33; }
+.dp-empty { font-size: 13px; color: var(--fg-faint); padding: 24px 0; }
+.dp-meta { font-size: 11px; color: var(--fg-faint); padding: 6px 0 14px; line-height: 1.5; }
+
+.dp-section {
+  margin-top: 16px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-elev);
+}
+.dp-section h3 { font-size: 13px; font-weight: 600; margin: 0 0 10px; }
+.dp-row { display: flex; gap: 10px; align-items: flex-start; margin-bottom: 8px; }
+.dp-row.dp-actions { justify-content: flex-end; }
+.dp-label { font-size: 11px; color: var(--fg-faint); width: 110px; padding-top: 6px; flex-shrink: 0; }
+
+.dp-input, .dp-textarea, .dp-select {
+  flex: 1; min-width: 0;
+  padding: 6px 8px;
+  font: inherit; font-size: 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--fg);
+}
+.dp-textarea { resize: vertical; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.dp-input:focus, .dp-textarea:focus, .dp-select:focus { outline: none; border-color: var(--border-strong); }
+.dp-select { cursor: pointer; }
+
+.dp-create-form {
+  margin-top: 12px;
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-elev);
+}
+
+.dp-ingest-log {
+  margin: 8px 0 0;
+  max-height: 180px;
+  overflow: auto;
+  padding: 8px 10px;
+  background: var(--bg-sunken);
+  border-radius: 6px;
+  font: 11px ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--fg);
+  white-space: pre-wrap;
+}
+
+.dp-sources { margin-top: 12px; }
+.dp-sources h4 { font-size: 11px; font-weight: 600; color: var(--fg-faint); margin: 0 0 6px; text-transform: uppercase; letter-spacing: 0.04em; }
+.dp-source { padding: 8px 10px; margin-bottom: 6px; border-left: 2px solid var(--border-strong); background: var(--bg-sunken); border-radius: 0 6px 6px 0; }
+.dp-source-head { display: flex; gap: 8px; font-size: 10px; color: var(--fg-faint); margin-bottom: 4px; }
+.dp-source-idx { font-weight: 600; }
+.dp-source-text { font-size: 12px; line-height: 1.5; word-break: break-word; }
+
+.dp-answer {
+  margin-top: 12px;
+  padding: 12px 14px;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 13px; line-height: 1.55;
+  white-space: pre-wrap;
+  min-height: 24px;
 }

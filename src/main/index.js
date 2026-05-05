@@ -160,6 +160,10 @@ async function startSidecar() {
   // surface; HF cache is enumerated read-only as a secondary listing.
   const modelsDir = path.join(userDataDir(), "models");
   fs.mkdirSync(modelsDir, { recursive: true });
+  // RAG state for the active workspace: collections.json manifest +
+  // <collection_id>.sqlite per collection.
+  const ragDir = path.join(workspaceDir(), "rag");
+  fs.mkdirSync(ragDir, { recursive: true });
 
   sidecarProc = spawn(pythonBin, [script], {
     env: {
@@ -169,6 +173,7 @@ async function startSidecar() {
       CYLLAMA_SIDECAR_PARENT_PID: String(process.pid),
       CYLLAMA_SIDECAR_ARTIFACTS: artifactsDir,
       CYLLAMA_SIDECAR_MODELS: modelsDir,
+      CYLLAMA_SIDECAR_RAG: ragDir,
       PYTHONUNBUFFERED: "1",
     },
     stdio: ["ignore", "pipe", "pipe"],
