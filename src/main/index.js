@@ -428,6 +428,15 @@ ipcMain.handle("dialog:pickAudio", async () => {
   return r.filePaths[0];
 });
 
+ipcMain.handle("dialog:pickFolder", async () => {
+  const r = await dialog.showOpenDialog(mainWindow, {
+    title: "Select sandbox folder",
+    properties: ["openDirectory"],
+  });
+  if (r.canceled || r.filePaths.length === 0) return null;
+  return r.filePaths[0];
+});
+
 app.whenReady().then(async () => {
   buildApplicationMenu();
   try {

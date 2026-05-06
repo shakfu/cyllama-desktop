@@ -185,6 +185,24 @@ _SD_IMAGE_CLS = _resolve_attr((
     ("cyllama.sd", "SDImage"),
 ))
 
+# Phase 7 -- Agents. ``ReActAgent`` is the workhorse; ``Tool`` defines
+# the schema cyllama hands to the LLM as a function-calling preamble;
+# ``AgentEvent`` / ``EventType`` are the streamed trace payload.
+_AGENT_REACT_CLS = _resolve_attr((
+    ("cyllama.agents", "ReActAgent"),
+))
+_AGENT_TOOL_CLS = _resolve_attr((
+    ("cyllama.agents", "Tool"),
+))
+_AGENT_EVENT_CLS = _resolve_attr((
+    ("cyllama.agents", "AgentEvent"),
+    ("cyllama.agents.types", "AgentEvent"),
+))
+_AGENT_EVENT_TYPE = _resolve_attr((
+    ("cyllama.agents", "EventType"),
+    ("cyllama.agents.types", "EventType"),
+))
+
 
 # Capability flags surfaced via /info. ``grammar`` reflects whether
 # GenerationConfig actually accepts a ``grammar`` field AND whether the
@@ -256,6 +274,10 @@ _FEATURE_FLAGS: dict[str, bool] = {
     "image": (
         _SD_TEXT_TO_IMAGE is not None
         and _SD_IMAGE_CLS is not None
+    ),
+    "agents": (
+        _AGENT_REACT_CLS is not None
+        and _AGENT_TOOL_CLS is not None
     ),
 }
 # stop_sequences is whitelisted via _coerce_stop_sequences rather than
@@ -2170,6 +2192,315 @@ async def jobs_image_txt2img(req: Request):
         })
 
     job = await run_job("image.txt2img", producer)
+    return {"job_id": job.id}
+
+
+# ---------------------------------------------------------------------------
+# Agents (Phase 7): /jobs/agent/run wraps ``cyllama.agents.ReActAgent``.
+#
+# The renderer picks which built-in tools to enable per run. The catalog is
+# server-side because:
+#   - tool callables run inside the sidecar's process (CPU + filesystem +
+#     network) and we don't want them defined in the renderer where the
+#     code path crosses an IPC boundary;
+#   - sandbox / network gating live next to the implementations so review
+#     stays in one place.
+#
+# Tools shipped:
+#   calculator  -- safe arithmetic via ``ast.literal_eval`` of a small
+#                  expression dialect. Always available.
+#   read_file   -- read a UTF-8 text file under a user-chosen sandbox dir.
+#                  Refuses path-escape; refuses files > 1 MiB.
+#   web_fetch   -- HTTP GET. Off by default; the renderer must explicitly
+#                  enable. Loopback-only safety net does NOT apply here --
+#                  this is by design (web fetch is the point), but we cap
+#                  response size and disallow non-http(s) schemes.
+#   rag_query   -- retrieve top-K chunks from a chosen RAG collection.
+# ---------------------------------------------------------------------------
+
+
+register_job_kind("agent.run")
+
+
+# Maximum bytes to read from the filesystem / pull from a URL. Larger reads
+# blow up the LLM's context window before they help; cap conservatively.
+_AGENT_MAX_FILE_BYTES = 1024 * 1024
+_AGENT_MAX_FETCH_BYTES = 1024 * 1024
+
+
+def _make_calculator_tool():
+    import ast
+    import operator
+
+    _OPS = {
+        ast.Add: operator.add, ast.Sub: operator.sub,
+        ast.Mult: operator.mul, ast.Div: operator.truediv,
+        ast.FloorDiv: operator.floordiv, ast.Mod: operator.mod,
+        ast.Pow: operator.pow, ast.USub: operator.neg, ast.UAdd: operator.pos,
+    }
+
+    def _eval(node):
+        if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)):
+            return node.value
+        if isinstance(node, ast.BinOp) and type(node.op) in _OPS:
+            return _OPS[type(node.op)](_eval(node.left), _eval(node.right))
+        if isinstance(node, ast.UnaryOp) and type(node.op) in _OPS:
+            return _OPS[type(node.op)](_eval(node.operand))
+        raise ValueError("expression rejected by calculator sandbox")
+
+    def calculator(expression: str) -> str:
+        """Evaluate a simple arithmetic expression and return the result."""
+        try:
+            tree = ast.parse(str(expression), mode="eval")
+            return str(_eval(tree.body))
+        except Exception as exc:  # noqa: BLE001
+            return f"error: {exc}"
+
+    return _AGENT_TOOL_CLS(
+        name="calculator",
+        description="Evaluate an arithmetic expression like '2 + 2 * 3'. Returns a number.",
+        func=calculator,
+        parameters={
+            "type": "object",
+            "properties": {"expression": {"type": "string"}},
+            "required": ["expression"],
+        },
+    )
+
+
+def _make_read_file_tool(sandbox_root: Path):
+    sandbox_root = sandbox_root.resolve()
+    if not sandbox_root.is_dir():
+        raise HTTPException(400, f"sandbox_dir not a directory: {sandbox_root}")
+
+    def read_file(path: str) -> str:
+        """Read a UTF-8 text file under the agent's sandbox dir."""
+        # Reject anything that resolves outside the sandbox -- this is the
+        # security boundary, do NOT loosen without a redesign. Symlinks
+        # are followed by resolve() so a symlink-out-of-sandbox is also
+        # caught here.
+        try:
+            target = (sandbox_root / path).resolve()
+        except Exception:  # noqa: BLE001
+            return "error: invalid path"
+        try:
+            target.relative_to(sandbox_root)
+        except ValueError:
+            return "error: refusing path outside sandbox"
+        if not target.is_file():
+            return f"error: not a file: {path}"
+        try:
+            size = target.stat().st_size
+        except OSError as exc:
+            return f"error: {exc}"
+        if size > _AGENT_MAX_FILE_BYTES:
+            return f"error: file too large ({size} bytes; cap {_AGENT_MAX_FILE_BYTES})"
+        try:
+            return target.read_text("utf-8", errors="replace")
+        except Exception as exc:  # noqa: BLE001
+            return f"error: {exc}"
+
+    return _AGENT_TOOL_CLS(
+        name="read_file",
+        description=f"Read a UTF-8 text file under {sandbox_root}. Path is relative to that dir.",
+        func=read_file,
+        parameters={
+            "type": "object",
+            "properties": {"path": {"type": "string"}},
+            "required": ["path"],
+        },
+    )
+
+
+def _make_web_fetch_tool():
+    import httpx
+
+    def web_fetch(url: str) -> str:
+        """HTTP GET a URL and return the body (truncated)."""
+        if not isinstance(url, str) or not url.startswith(("http://", "https://")):
+            return "error: only http(s) URLs"
+        try:
+            with httpx.Client(follow_redirects=True, timeout=20.0) as cl:
+                # We let the server stream so we can stop at the byte cap
+                # without buffering the full body.
+                with cl.stream("GET", url) as r:
+                    if r.status_code >= 400:
+                        return f"error: HTTP {r.status_code}"
+                    chunks: list[bytes] = []
+                    received = 0
+                    for c in r.iter_bytes(chunk_size=64 * 1024):
+                        received += len(c)
+                        if received > _AGENT_MAX_FETCH_BYTES:
+                            chunks.append(c[: _AGENT_MAX_FETCH_BYTES - (received - len(c))])
+                            break
+                        chunks.append(c)
+                    return b"".join(chunks).decode("utf-8", errors="replace")
+        except Exception as exc:  # noqa: BLE001
+            return f"error: {exc}"
+
+    return _AGENT_TOOL_CLS(
+        name="web_fetch",
+        description="HTTP GET a URL and return the response body (text, truncated to 1 MiB).",
+        func=web_fetch,
+        parameters={
+            "type": "object",
+            "properties": {"url": {"type": "string"}},
+            "required": ["url"],
+        },
+    )
+
+
+def _make_rag_query_tool(collection: dict, top_k: int = 3):
+    embedder, store = _get_retrieve(collection)
+
+    def rag_query(query: str, k: int = top_k) -> str:
+        """Retrieve top-k chunks from the configured RAG collection."""
+        try:
+            kk = max(1, min(20, int(k)))
+        except (TypeError, ValueError):
+            kk = top_k
+        vecs = embedder.embed_batch([str(query)])
+        if not vecs:
+            return "error: failed to embed query"
+        results = store.search(vecs[0], k=kk)
+        srcs = _serialize_sources(results)
+        if not srcs:
+            return "(no matches)"
+        return "\n\n".join(f"[{i+1}] {s['text']}" for i, s in enumerate(srcs))
+
+    return _AGENT_TOOL_CLS(
+        name="rag_query",
+        description=f"Retrieve up to {top_k} relevant chunks from collection '{collection.get('name')}'.",
+        func=rag_query,
+        parameters={
+            "type": "object",
+            "properties": {
+                "query": {"type": "string"},
+                "k": {"type": "integer", "minimum": 1, "maximum": 20},
+            },
+            "required": ["query"],
+        },
+    )
+
+
+def _build_agent_tools(spec: dict) -> list:
+    """Translate the renderer's ``tools`` spec into a list of ``Tool`` objects.
+
+    Spec shape: ``{"calculator": true, "read_file": {"sandbox_dir": "..."},
+    "web_fetch": true, "rag_query": {"collection_id": "...", "top_k": 3}}``.
+    Unknown keys are ignored. Empty tool list is allowed -- the agent then
+    runs as a plain reasoning loop without tool calls.
+    """
+    out: list = []
+    if spec.get("calculator"):
+        out.append(_make_calculator_tool())
+    if "read_file" in spec:
+        # Treat key-present as intent to enable -- a misconfigured tool
+        # (no sandbox_dir) surfaces here as 400 rather than letting the
+        # agent run without it. Renderer should drop the key entirely
+        # when the user didn't pick a folder.
+        rf = spec["read_file"] if isinstance(spec["read_file"], dict) else {}
+        sandbox = rf.get("sandbox_dir") or ""
+        if not sandbox:
+            raise HTTPException(400, "read_file requires sandbox_dir")
+        out.append(_make_read_file_tool(Path(sandbox)))
+    if spec.get("web_fetch"):
+        out.append(_make_web_fetch_tool())
+    if "rag_query" in spec:
+        rq = spec["rag_query"] if isinstance(spec["rag_query"], dict) else {}
+        coll_id = rq.get("collection_id") or ""
+        if not coll_id or not _RAG_ID_RE.match(coll_id):
+            raise HTTPException(400, "rag_query requires a valid collection_id")
+        coll = _rag_collection_get(coll_id)
+        if coll is None:
+            raise HTTPException(404, f"rag_query collection not found: {coll_id}")
+        top_k = int(rq.get("top_k") or 3)
+        out.append(_make_rag_query_tool(coll, top_k=top_k))
+    return out
+
+
+def _agent_event_type_name(ev) -> str:
+    """Coerce an EventType enum (or anything string-y) to a plain name."""
+    t = getattr(ev, "type", None)
+    if t is None:
+        return "UNKNOWN"
+    n = getattr(t, "name", None)
+    if n is not None:
+        return str(n)
+    return str(t)
+
+
+@app.post("/jobs/agent/run")
+async def jobs_agent_run(req: Request):
+    if not _FEATURE_FLAGS.get("agents"):
+        raise HTTPException(501, "agents not available in this cyllama build")
+    body = await req.json()
+    model_path = (body.get("model_path") or "").strip()
+    task = body.get("task") or ""
+    if not model_path or not os.path.isfile(model_path):
+        raise HTTPException(400, "model_path required and must exist")
+    if not isinstance(task, str) or not task.strip():
+        raise HTTPException(400, "task required")
+    system_prompt = body.get("system_prompt") or None
+    try:
+        max_iterations = max(1, min(50, int(body.get("max_iterations") or 10)))
+    except (TypeError, ValueError):
+        max_iterations = 10
+
+    # Tool catalog wiring runs *before* the job is spawned so a misconfigured
+    # tool (e.g. missing sandbox_dir) surfaces as a 400 rather than as an
+    # error event mid-trace. The renderer can't fix this from the trace.
+    tools = _build_agent_tools(body.get("tools") or {})
+
+    # Cache the LLM the same way /chat does -- avoids reloading the model
+    # for back-to-back agent runs against the same target.
+    llm = _get_llm(model_path, body.get("params"))
+
+    async def producer(job: Job) -> None:
+        agent = _AGENT_REACT_CLS(
+            llm=llm,
+            tools=tools,
+            system_prompt=system_prompt,
+            max_iterations=max_iterations,
+            verbose=False,
+        )
+
+        # cyllama's ``stream`` is synchronous and does its own LLM calls
+        # under the hood. Same TestClient-portal constraint as /image:
+        # offloading to an executor races the request boundary in tests.
+        # The job is already coarse-grained, and per-event awaits below
+        # give the loop room to service SSE consumers.
+        events: list[dict] = []
+        final_answer: Optional[str] = None
+        try:
+            it = iter(agent.stream(task))
+        except Exception as exc:  # noqa: BLE001
+            raise RuntimeError(f"agent.stream failed: {exc}") from exc
+
+        for ev in it:
+            etype = _agent_event_type_name(ev)
+            content = getattr(ev, "content", "")
+            metadata = getattr(ev, "metadata", {}) or {}
+            ev_dict = {
+                "event_type": etype,
+                "content": str(content) if content is not None else "",
+                "metadata": _jsonify(metadata),
+            }
+            events.append(ev_dict)
+            if etype == "ANSWER":
+                final_answer = ev_dict["content"]
+            await _emit(job, {"type": "trace", **ev_dict})
+
+        await _emit(job, {
+            "type": "result",
+            "result": {
+                "events": events,
+                "answer": final_answer,
+                "iterations": sum(1 for e in events if e["event_type"] == "ACTION"),
+            },
+        })
+
+    job = await run_job("agent.run", producer)
     return {"job_id": job.id}
 
 

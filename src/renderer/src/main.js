@@ -888,6 +888,7 @@ async function applySupportedParams() {
   applyMultiGpuVisibility(info);
   transcribePane.applyVisibility(features);
   imagePane.applyVisibility(features);
+  agentsTab.applyVisibility(features);
 }
 
 // Hide main_gpu / split_mode / tensor_split rows when the machine has

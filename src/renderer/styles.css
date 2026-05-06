@@ -1278,6 +1278,70 @@ svg circle, svg rect, svg polygon { fill: none; }
   overflow: hidden;
 }
 .dp-source-file { margin-left: auto; font-size: 10px; color: var(--fg-faint); }
+/* Agents right-tab. Lives inside .params-panel so .btn etc. apply
+   from the global rules; layout uses .ag-* primitives so it doesn't
+   collide with the .dp-* sidebar-pane stack. */
+.ag-row { margin-bottom: 10px; display: flex; flex-direction: column; gap: 4px; }
+.ag-label {
+  font-size: 11px; font-weight: 600;
+  color: var(--fg-faint);
+  text-transform: uppercase; letter-spacing: 0.04em;
+}
+.ag-tools { display: flex; flex-direction: column; gap: 6px; }
+.ag-tool-row {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 12px; cursor: pointer;
+}
+.ag-tool-row input { margin: 0; }
+.ag-tool-hint { margin-left: auto; font-size: 10px; color: var(--fg-faint); }
+.ag-tool-row-stack { display: flex; flex-direction: column; gap: 4px; }
+.ag-tool-sub {
+  display: flex; align-items: center; gap: 6px;
+  padding-left: 22px;
+  font-size: 11px; color: var(--fg-faint);
+}
+.ag-tool-path {
+  flex: 1; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.ag-actions { display: flex; gap: 6px; margin-top: 8px; }
+.ag-actions .btn { flex: 1; }
+.ag-status {
+  font-size: 11px; color: var(--fg-faint);
+  margin-top: 8px; min-height: 14px;
+}
+.ag-trace { display: flex; flex-direction: column; gap: 4px; }
+.ag-event {
+  display: flex; gap: 8px;
+  padding: 6px 8px;
+  background: var(--bg-sunken);
+  border-radius: 4px;
+  font-size: 12px;
+  border-left: 2px solid var(--border-strong);
+}
+.ag-ev-type {
+  flex: 0 0 auto;
+  font-size: 9px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 0.04em;
+  color: var(--fg-faint);
+  padding-top: 2px;
+}
+.ag-ev-content { flex: 1; line-height: 1.45; word-break: break-word; white-space: pre-wrap; }
+.ag-ev-thought   { border-left-color: #888; }
+.ag-ev-action    { border-left-color: #4a9eff; }
+.ag-ev-observation { border-left-color: #6ab04c; }
+.ag-ev-answer    { border-left-color: #f0a000; }
+.ag-ev-error,
+.ag-ev-contract-violation { border-left-color: #c33; }
+.ag-answer {
+  font-size: 13px; line-height: 1.5;
+  padding: 10px;
+  background: var(--bg-sunken);
+  border-radius: 6px;
+  white-space: pre-wrap; word-break: break-word;
+  min-height: 24px;
+}
+
 /* Transcribe + Image sidebar views reuse the .dp-* primitives that the
    Documents pane defines; only the narrow-sidebar overrides + truly
    domain-specific elements (segment row, image preview, W/H grid) are

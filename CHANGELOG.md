@@ -6,6 +6,60 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added (Phase 7 - agents)
+- **`POST /jobs/agent/run`** wraps `cyllama.agents.ReActAgent.stream`.
+  Body: `{model_path, task, tools, max_iterations?, system_prompt?,
+  params?}`. Streams each `AgentEvent` as a `{type:"trace",
+  event_type, content, metadata}` SSE frame; final result event
+  carries the full event list, the answer, and a count of ACTION
+  events (= effective tool-call iterations). Reuses `_get_llm` so a
+  back-to-back agent run against the same model doesn't reload it.
+  `max_iterations` clamped to `[1, 50]`.
+- **`/info.features.agents`** flag, true when both
+  `cyllama.agents.ReActAgent` and `cyllama.agents.Tool` resolve.
+- **Server-side tool catalog** (`_build_agent_tools`):
+  - `calculator` -- arithmetic via an AST walker that whitelists
+    `BinOp`/`UnaryOp` over `int`/`float` constants. Names, calls,
+    and attribute access are rejected, so
+    `__import__('os').system(...)` and `(1).__class__` both surface
+    as `error: ...`.
+  - `read_file` -- reads UTF-8 text under a user-chosen sandbox dir.
+    `Path.relative_to` checks every resolved target so a `..`
+    traversal or out-of-sandbox symlink returns
+    `error: refusing path outside sandbox`. 1 MiB cap.
+  - `web_fetch` -- `httpx.Client.stream` GET with a 1 MiB cap and
+    only `http(s)` URLs. Off by default; renderer requires explicit
+    user confirmation before the toggle flips on.
+  - `rag_query` -- top-k retrieve over an existing RAG collection
+    via the `_get_retrieve` cache (Embedder + SqliteVectorStore),
+    so it doesn't pull a second generation model into memory.
+  Tool selection is "key present = intent to enable" rather than
+  truthy-value -- a misconfigured tool (e.g. `read_file: {}` with no
+  sandbox) returns 400 instead of silently dropping.
+- **`dialog:pickFolder` IPC** (preload `window.cyllama.pickFolder`)
+  for the read_file sandbox picker.
+- **Agents right-sidebar tab** rebuilt from the placeholder. Form:
+  model picker (cached + Browse fallback), task textarea, max-iter
+  input, and a tool block with toggleable Calculator / Read file
+  (sandbox folder picker) / Web fetch (confirms before enabling) /
+  RAG query (collection dropdown). Run/Stop spawn or cancel the
+  agent job. Live trace below the form renders each event with a
+  type-tagged colored left border (THOUGHT grey, ACTION blue,
+  OBSERVATION green, ANSWER amber, ERROR / CONTRACT_VIOLATION red);
+  the final ANSWER also flows into a separate Answer card. Tab
+  shows a "not available" notice when `features.agents` is false.
+- Tests in `tests/test_agents.py` cover the feature flag, validation
+  (missing model / missing task / blank task), 501 path,
+  trace-then-result event ordering, max_iterations clamping, the
+  read_file tool's path-escape refusal, calculator AST safety,
+  rag_query 404/400 paths, and the tool-list pass-through.
+  Conftest grows `_FakeReActAgent` / `_FakeAgentTool` /
+  `_FakeAgentEvent` / `_FakeAgentEventType` and a `cyllama.agents`
+  module stub.
+- Deferred from Phase 7: ContractAgent pre/post conditions UI
+  (cyllama exposes `ContractSpec` / `PreCondition` / `PostCondition`
+  but the wire shape needs more thought; tracked for a follow-up).
+
 ### Changed (sidebar-pane UI consistency)
 - The Transcribe and Image panes now reuse the same base primitives
   the Documents pane defines (`.dp-section`, `.dp-row`, `.dp-label`,

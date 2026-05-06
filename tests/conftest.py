@@ -380,6 +380,58 @@ class _FakeWhisperContext:
     def close(self): self.closed = True
 
 
+class _FakeAgentEventType:
+    """Minimal stand-in for cyllama.agents.EventType.
+
+    The sidecar reads ``ev.type.name`` so an enum-shaped object is enough.
+    """
+    def __init__(self, name):
+        self.name = name
+
+
+class _FakeAgentEvent:
+    """Mirror cyllama.agents.types.AgentEvent (dataclass-like)."""
+    def __init__(self, type, content="", metadata=None):
+        self.type = type
+        self.content = content
+        self.metadata = metadata or {}
+
+
+class _FakeAgentTool:
+    """Match cyllama.agents.Tool's signature: name + description + func +
+    parameters. The sidecar only inspects these fields, so a plain
+    object satisfies it."""
+    def __init__(self, name, description, func, parameters=None):
+        self.name = name
+        self.description = description
+        self.func = func
+        self.parameters = parameters or {}
+
+
+class _FakeReActAgent:
+    """Stub the ReActAgent. ``stream`` yields a scripted trace so tests
+    can assert on event ordering. Class-level ``_script`` is the
+    knob tests poke to drive different behaviours."""
+    instances: list["_FakeReActAgent"] = []
+    # Default: one THOUGHT, one ANSWER. Tests override per-case.
+    _script = [
+        ("THOUGHT", "let me think"),
+        ("ANSWER", "42"),
+    ]
+
+    def __init__(self, llm, tools=None, system_prompt=None,
+                 max_iterations=10, verbose=False, **kwargs):  # noqa: ARG002
+        self.llm = llm
+        self.tools = list(tools or [])
+        self.system_prompt = system_prompt
+        self.max_iterations = max_iterations
+        type(self).instances.append(self)
+
+    def stream(self, task):  # noqa: ARG002
+        for kind, content in type(self)._script:
+            yield _FakeAgentEvent(_FakeAgentEventType(kind), content)
+
+
 class _FakeSDImage:
     """Minimal stand-in for cyllama.sd.SDImage.
 
@@ -472,6 +524,15 @@ def _install_cyllama_stub() -> None:
     sys.modules["cyllama.sd"] = sd
     mod.sd = sd
 
+    # Agents stub: cyllama.agents.{ReActAgent, Tool, AgentEvent, EventType}.
+    agents = types.ModuleType("cyllama.agents")
+    agents.ReActAgent = _FakeReActAgent
+    agents.Tool = _FakeAgentTool
+    agents.AgentEvent = _FakeAgentEvent
+    agents.EventType = _FakeAgentEventType
+    sys.modules["cyllama.agents"] = agents
+    mod.agents = agents
+
     rag = types.ModuleType("cyllama.rag")
     rag.Document = _FakeDocument
     rag.Chunk = _FakeChunk
@@ -530,6 +591,11 @@ def sidecar_app(tmp_path, monkeypatch):
     _FakeRAG.closed_count = 0
     _FakeWhisperContext.instances.clear()
     _FakeSDImage.saved_paths.clear()
+    _FakeReActAgent.instances.clear()
+    _FakeReActAgent._script = [
+        ("THOUGHT", "let me think"),
+        ("ANSWER", "42"),
+    ]
 
 
 @pytest.fixture()
