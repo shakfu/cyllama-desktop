@@ -22,10 +22,10 @@ or move them to `CHANGELOG.md` under `[Unreleased]`.
 - [x] **Stop-generation that actually stops.** Done: cyllama exposes
       `LLM.cancel()` (Python event + nogil ggml_abort_callback), sidecar
       calls it on `asyncio.CancelledError`. Bump pin to `cyllama>=0.2.14`.
-- [x] **Copy / regenerate** message actions wired. Edit and Branch
-      still pending: edit needs an in-place editable user-text and a
-      regenerate-after-edit flow; branch clones history up to the
-      exchange and creates a new chat.
+- [x] **Copy / regenerate** message actions wired.
+- [ ] **Edit and Branch** message actions. Edit: in-place editable
+      user-text + regenerate-after-edit flow. Branch: clone history
+      up to the exchange and create a new chat.
 
 ## Sampling and model parameters
 
@@ -37,26 +37,27 @@ or move them to `CHANGELOG.md` under `[Unreleased]`.
       plus user-saved bundles in `localStorage` under `presets_v1`. Active
       preset persisted in `presets_v1_active`. Lives at the top of the
       Models tab Sampling section.
-- [ ] **Forward-looking sampler fields** (UI is wired but cyllama 0.2.15
-      doesn't accept them in `GenerationConfig`). Affected keys:
-      `presence_penalty`, `frequency_penalty`, `mirostat`, `mirostat_tau`,
-      `mirostat_eta`. Sidecar already filters via `_GC_ACCEPTED` (signature
-      introspection) so the rows are hidden in the UI today; they will
-      auto-reveal when the next cyllama exposes the fields.
+- [x] **Stop sequences** UI (Phase 2).
+- [x] **Grammar / GBNF** input (Phase 2). `/grammar/from-schema`
+      endpoint + advanced UI shipped. End-to-end `LLM.chat` grammar
+      enforcement still depends on cyllama exposing it in
+      `GenerationConfig`; the sidecar's `_GC_ACCEPTED` gate makes it
+      auto-light up when that lands.
+- [x] **Speculative + n-gram** UI rows (Phase 2). UI + sidecar wire
+      shipped behind `data-feature` gates that consume
+      `/info.features.{speculative,ngram}`; rows hidden until cyllama
+      threads the classes through `LLM.chat`.
+- [ ] **Forward-looking sampler fields** still waiting on cyllama for
+      `presence_penalty`, `frequency_penalty`, `mirostat`,
+      `mirostat_tau`, `mirostat_eta`, `grammar`, `speculative`,
+      `ngram` to actually take effect. UI + sidecar whitelist are
+      already in place; rows surface automatically once
+      `/info.supported_params` and `/info.features` advertise them.
       Verification on bump: `build/python-mac-arm64/bin/python3 -c
-      "from cyllama import GenerationConfig; print(GenerationConfig(presence_penalty=0.3, mirostat=2))"`
-      should not raise. Confirm `/info`'s `supported_params` then includes
-      the fields and the rows surface automatically. No code change
-      expected if the names match; if cyllama uses different names the
-      UI/whitelist need to be remapped.
-- [ ] Speculative decoding configuration. Blocked: `cyllama.Speculative` /
-      `SpeculativeParams` are absent in 0.2.15. Re-probe on next bump.
-- [ ] Structured output / grammar UI. Partially possible:
-      `cyllama.utils.json_schema_to_grammar` exists in 0.2.15, but the
-      `LLM.chat` path doesn't accept a grammar in 0.2.15 so this is a
-      no-op end-to-end until cyllama wires the decoder side.
-- [ ] N-gram cache toggle. Blocked: `cyllama.NgramCache` absent in 0.2.15.
-- [ ] Stop sequences.
+      "from cyllama import GenerationConfig;
+       print(GenerationConfig(presence_penalty=0.3, mirostat=2))"`
+      should not raise. If cyllama uses different names, remap in
+      `_ALLOWED_PARAMS` and the renderer's `PARAM_DEFAULTS`.
 
 ## Markdown / rendering
 
@@ -72,21 +73,37 @@ or move them to `CHANGELOG.md` under `[Unreleased]`.
 
 ## Models
 
-- [ ] **Model manager**: list models in `app.getPath('userData')/models`,
-      drag-and-drop import, HuggingFace direct-URL downloader with progress
-      + resumable downloads.
-- [ ] Replace the file-picker-only flow with a model browser modal.
-- [ ] Per-model metadata: arch, quantization, parameter count, context size.
-      Read from GGUF header.
-- [x] Eject releases the `LLM` and frees GPU memory via the new
-      `/unload` sidecar endpoint.
+- [x] **Model manager**: cached models list, drag-drop import, HF
+      URL downloader with /jobs progress (Phase 1).
+- [x] ModelPicker dropdown replaces the file-picker-only flow
+      (Phase 1).
+- [x] Per-model GGUF metadata side panel (Phase 1).
+- [x] Quantize tool: source picker + ftype dropdown + dest filename
+      (Phase 9).
+- [x] Eject releases the `LLM` and frees GPU memory via `/unload`.
+- [ ] HF browse / search inside the app (currently URL-paste only).
+      Needs HF API surface + rate-limit handling.
+- [ ] Resumable HF downloads (current job re-fetches from byte 0).
 
 ## Multimodal
 
-- [ ] Image input (cyllama supports MTMD/LLAVA). Composer attach button +
-      multipart sidecar endpoint.
-- [ ] Whisper integration (transcribe audio in composer; voice prompts).
-- [ ] Stable Diffusion: separate workspace tab via the nav rail.
+- [x] **Image input** (LLAVA / MTMD). Composer paperclip + image
+      uploads + chat routing through `ImageAnalyzer`. Single-shot
+      answer; streaming-token multimodal via `VisionLanguageChat`
+      deferred. Multi-image per message also deferred.
+- [x] **Whisper transcription** as its own sidebar view with
+      timestamped segments and TXT/SRT/VTT copy. WAV-only for now;
+      ffmpeg fallback for mp3/m4a/flac/ogg deferred.
+- [x] **Stable Diffusion** as its own sidebar view (txt2img +
+      gallery). Img2img / inpaint / ControlNet / LoRA / ESRGAN /
+      video deferred.
+- [ ] Voice prompts: capture audio in the composer, run Whisper,
+      drop transcribed text into the prompt textarea.
+- [ ] Audio decode fallback for Transcribe: shell out to `ffmpeg`
+      when input is non-WAV. Detect ffmpeg at probe time, surface
+      via `/info.features.audio_decode`.
+- [ ] Streaming-token multimodal answers (`VisionLanguageChat`
+      generator) so long answers don't block.
 
 ## Agents
 
@@ -104,12 +121,15 @@ or move them to `CHANGELOG.md` under `[Unreleased]`.
 
 ## App shell
 
-- [ ] Wire remaining nav-rail buttons (Models — Chats and Console done).
+- [x] Nav-rail wired for Chats, Documents, Transcribe, Image,
+      Server, Batch, Console, plus the cog → General tab jump.
 - [x] Console / log view: live tail of sidecar stdout/stderr. Slide-up
       panel toggled by the Terminal nav-rail button. 2000-line ring
       buffer in main, lazy-populated on first open, color-coded stderr,
       sticky-scroll-aware.
-- [ ] Settings panel: theme override, default sampling, model directory.
+- [ ] Settings panel: theme override, default sampling, model
+      directory. The General tab is the home; About + Devices are
+      there now, Preferences is still a placeholder.
 - [ ] Update window title to active chat name.
 - [ ] Hidden-titlebar mode on macOS for a more polished feel
       (`titleBarStyle: 'hiddenInset'`); requires draggable header region.
@@ -130,19 +150,37 @@ or move them to `CHANGELOG.md` under `[Unreleased]`.
 
 ## Testing
 
-- [ ] Smoke test: `make python && make dev && curl /health` in CI for each
-      target platform.
-- [ ] Renderer e2e with Playwright: model-picker, send, abort, sidebar
-      collapse persistence, KaTeX render verification.
-- [ ] Sidecar pytest: bearer-token enforcement, `/health`, `/chat` SSE
-      framing, error envelope, parent-PID watchdog.
+- [x] **Sidecar pytest** (~170 cases): every endpoint, bearer-token
+      enforcement, `/health`, `/chat` SSE framing, error envelope,
+      whitelist + capability gating.
+- [x] **Renderer Playwright** per-pane smoke (10 specs): each
+      sidebar view + right-tab boots a fresh Electron + stubbed
+      sidecar and asserts the primary content renders.
+- [x] **CI** (`.github/workflows/ci.yml`): pytest + Playwright run
+      on push to `main` and pull_request, with `ubuntu-latest` +
+      `xvfb-run` for the e2e job.
+- [ ] Real-cyllama smoke suite (opt-in): a small `tests/smoke/` set
+      that runs against the bundled `build/python-mac-arm64/` python
+      env, exercising the actual cyllama API surface so capability
+      probes catch shape drifts on cyllama bumps. Slow + expensive,
+      so kept out of `make test`.
+- [ ] Cross-platform smoke: `make python && make dev && curl /health`
+      in CI for each target platform once Windows / Linux distribution
+      lands.
+- [ ] Deeper Playwright flows: model-picker round-trip, send +
+      abort, sidebar collapse persistence, KaTeX render verification.
+      Current suite is rendering-only.
 
 ## Tech debt
 
-- [ ] Renderer is a single ~300-line file. Will outgrow that with the items
-      above; break out into modules and add a bundler (esbuild) when it
-      starts hurting.
+- [x] Renderer split into per-feature modules under
+      `src/renderer/src/features/` and bundled with esbuild.
 - [ ] CSP currently includes `'unsafe-eval'` for KaTeX. Investigate
       `katex.min.js` builds without `Function()` use to drop it.
-- [ ] Move sidecar's per-model `LLM` slot to a real LRU; current single-slot
-      eviction churns when alternating between two models.
+- [ ] Move sidecar's per-model `LLM` slot to a real LRU; current
+      single-slot eviction churns when alternating between two
+      models.
+- [ ] Conftest's `_install_cyllama_stub()` runs `import pytest` at
+      module level, which forces the Playwright e2e launcher to
+      install pytest just to load the stub. Extract the stub into a
+      pytest-free helper so the e2e env stays leaner.

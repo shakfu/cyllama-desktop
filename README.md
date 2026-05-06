@@ -4,11 +4,22 @@ Electron desktop app that runs [cyllama](https://github.com/shakfu/cyllama) via 
 
 ## Concepts
 
-- **Pane.** A UI surface in the app shell. Today: Chat (the main pane) plus three right-sidebar tabs (Models, Agents, General). Future panes (Documents/RAG, Transcribe, Image, Agents, Batch, Server) get their own nav-rail entries.
-- **Workspace.** A *project*: a scoped bundle of inputs, outputs, chosen models, presets, agent tool sandbox, and config. Today only an implicit `default` workspace exists. Multi-workspace support and a workspace switcher land later (see `PLAN.md` S.9).
-- **Sidecar.** The bundled Python process running cyllama via FastAPI on `127.0.0.1`, gated by a per-launch bearer token. The renderer is a thin client; the sidecar is the single source of truth for inference, models, and jobs.
+- **Pane.** A UI surface in the app shell. Sidebar views (left
+  nav-rail): Chats, Documents, Transcribe, Image, Server, Batch,
+  Console. Right-sidebar tabs: Models, Agents, General. Panes whose
+  underlying cyllama capability isn't present in the build hide
+  themselves automatically via `/info.features`.
+- **Workspace.** A *project*: a scoped bundle of inputs, outputs,
+  chosen models, presets, agent tool sandbox, and config. Today only
+  an implicit `default` workspace exists. Multi-workspace support and
+  a workspace switcher land later (see `PLAN.md` S.9).
+- **Sidecar.** The bundled Python process running cyllama via FastAPI
+  on `127.0.0.1`, gated by a per-launch bearer token. The renderer is
+  a thin client; the sidecar is the single source of truth for
+  inference, models, and jobs.
 
-See `PLAN.md` for the phased rollout and `CHANGELOG.md` for what has shipped.
+See `PLAN.md` for the phased rollout and `CHANGELOG.md` for what has
+shipped.
 
 ## Build
 
@@ -18,6 +29,8 @@ Quick path: `make` builds an installer for the host platform (macOS arm64 -> `.d
 make           Build a distributable installer (default = dmg on macOS)
 make dev       npm install + build python env + npm start
 make python    Build only the bundled Python env
+make test      Run the sidecar pytest suite
+make e2e       Run the Playwright per-pane smoke suite
 make clean     Remove dist/ and build/
 make reset     Also remove node_modules/
 ```
@@ -43,7 +56,7 @@ What this does:
 
 - Detects your triple (`aarch64-apple-darwin` on Apple Silicon).
 - Downloads CPython 3.12 from python-build-standalone into `build/python-mac-arm64/`.
-- `pip install`s `cyllama` from PyPI plus `fastapi` and `uvicorn[standard]`. On macOS arm64 the PyPI wheel ships Metal as the default backend.
+- `pip install`s `cyllama` from PyPI plus `fastapi`, `uvicorn[standard]`, and `python-multipart`. On macOS arm64 the PyPI wheel ships Metal as the default backend.
 - Smoke-tests `import cyllama` and prunes caches.
 
 Expect ~2-5 minutes the first time. Output ends with a `du -sh` of the resulting tree (typically 200-400 MB depending on which cyllama backends are linked).
@@ -132,14 +145,58 @@ cyllama-desktop/
       dist/renderer.js              esbuild output bundle (loaded by index.html)
       vendor/                       marked + katex vendored under CSP 'self'
   python-sidecar/
-    sidecar.py                      FastAPI: /health, /info, /chat (SSE), /tokenize, /unload, /models/*, /jobs/*, /hardware/estimate-layers
-    pyproject.toml                  declares cyllama + fastapi + uvicorn
-  tests/                            pytest suite for the sidecar (50 cases)
+    sidecar.py                      FastAPI app -- see endpoint list below
+    pyproject.toml                  cyllama + fastapi + uvicorn + python-multipart
+  tests/
+    test_*.py                       pytest suite for the sidecar (~170 cases)
+    e2e/                            Playwright per-pane smoke (boots Electron
+                                    against tests/e2e/sidecar_launcher.py, which
+                                    reuses the conftest cyllama stub so no real
+                                    cyllama is required)
+  playwright.config.js              e2e config; npm run test:e2e
+  .github/workflows/ci.yml          pytest + Playwright on push + PR
   scripts/
     build-python-env.sh             python-build-standalone bundler -> build/python-<os>-<arch>/
     notarize.js                     afterSign hook (no-op unless APPLE_ID set)
   resources/
     entitlements.mac.plist          hardened-runtime entitlements for dlopen + JIT
+```
+
+Sidecar endpoints (all bearer-auth gated except `/health`):
+
+```
+GET  /health                          -- liveness probe
+GET  /info                            -- version, backends, devices, features, paths
+POST /chat                            -- SSE chat (text-only or multimodal route)
+POST /tokenize                        -- count tokens for a prompt
+POST /unload                          -- release the cached LLM slot
+POST /grammar/from-schema             -- JSON schema -> GBNF
+POST /hardware/estimate-layers        -- VRAM-aware n_gpu_layers estimate
+GET  /models/cached                   -- list cached + HF-cached GGUFs
+POST /models/inspect                  -- GGUF metadata
+POST /models/import                   -- copy a local .gguf into MODELS_DIR
+POST /models/hf/peek                  -- HEAD a HuggingFace resolve URL
+POST /jobs/models.hf-download         -- download from HuggingFace (job)
+POST /jobs/models/quantize            -- model_quantize wrapper (job)
+GET  /quantize/ftypes                 -- ftype label -> int map
+POST /jobs/batch                      -- batch_generate wrapper (job)
+GET  /rag/collections                 -- list RAG collections
+POST /rag/collections                 -- create
+DEL  /rag/collections/{id}            -- delete
+POST /jobs/rag.ingest                 -- ingest documents into a collection (job)
+POST /rag/query                       -- streaming RAG query w/ sources (SSE)
+POST /rag/retrieve                    -- retrieve-only top-k (no LLM)
+POST /jobs/transcribe                 -- whisper transcription (job)
+POST /jobs/image/txt2img              -- stable-diffusion text-to-image (job)
+GET  /artifacts/image                 -- list past txt2img outputs
+GET  /artifacts/{id}/{name}           -- serve a job's artifact (registry-free)
+POST /jobs/agent/run                  -- ReActAgent runner with tool catalog (job)
+POST /server/start /server/stop       -- start/stop OpenAI-compat server
+GET  /server/status                   -- current server state
+POST /chat/upload                     -- multipart image upload (multimodal)
+GET  /chat/upload/{name}              -- serve an uploaded image
+GET  /jobs                            -- list / GET /jobs/{id}, /events, /result
+POST /jobs/{id}/cancel                -- cancel a running job
 ```
 
 Runtime data (under `app.getPath('userData')`):
@@ -151,7 +208,9 @@ Runtime data (under `app.getPath('userData')`):
   workspaces/
     default/                        the implicit default workspace
       chats/<chatId>.json             persisted chat history (atomic tmp+rename writes)
-      artifacts/<jobId>/...           outputs from /jobs (HF downloads now; image/video/batch later)
+      artifacts/<jobId>/...           job outputs (HF downloads, image txt2img, batch JSONL, ...)
+      rag/<collId>.sqlite             per-RAG-collection vector store + collections.json manifest
+      uploads/<uuid>.<ext>            multimodal chat attachments (served via /chat/upload/<name>)
       presets/                        reserved (presets currently live in localStorage)
       sandbox/                        reserved (per-workspace agent file-tool sandbox root)
       settings.json                   reserved (per-workspace model pin, preset, system prompt)
