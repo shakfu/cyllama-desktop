@@ -108,6 +108,46 @@ def test_extended_sampler_whitelist_filtered_by_gc_signature(sidecar_app):
         sidecar_app._GC_ACCEPTED = saved
 
 
+def test_chat_accepts_grammar_param_without_500(client, auth, fake_model):
+    # Unsupported in stub GenerationConfig -> dropped silently.
+    body = {
+        "model_path": fake_model,
+        "messages": [{"role": "user", "content": "hi"}],
+        "params": {"grammar": "root ::= \"a\""},
+    }
+    with client.stream("POST", "/chat", json=body, headers=auth) as r:
+        assert r.status_code == 200
+        text = "".join(r.iter_text())
+    assert "data: [DONE]" in text
+
+
+def test_chat_accepts_speculative_param_without_500(client, auth, fake_model):
+    body = {
+        "model_path": fake_model,
+        "messages": [{"role": "user", "content": "hi"}],
+        "params": {"speculative": {
+            "draft_model_path": "/tmp/draft.gguf",
+            "n_max": 16, "n_min": 0, "p_split": 0.1, "p_min": 0.75,
+        }},
+    }
+    with client.stream("POST", "/chat", json=body, headers=auth) as r:
+        assert r.status_code == 200
+        text = "".join(r.iter_text())
+    assert "data: [DONE]" in text
+
+
+def test_chat_accepts_ngram_toggle_without_500(client, auth, fake_model):
+    body = {
+        "model_path": fake_model,
+        "messages": [{"role": "user", "content": "hi"}],
+        "params": {"ngram": True},
+    }
+    with client.stream("POST", "/chat", json=body, headers=auth) as r:
+        assert r.status_code == 200
+        text = "".join(r.iter_text())
+    assert "data: [DONE]" in text
+
+
 def test_supported_params_in_info(client, auth, sidecar_app):
     """/info must publish the list the renderer uses to hide UI rows."""
     r = client.get("/info", headers=auth)

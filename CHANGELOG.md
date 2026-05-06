@@ -38,9 +38,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   for `Speculative`, `SpeculativeParams`, `NgramCache`, and
   `json_schema_to_grammar` so the sidecar can advertise capabilities
   without crashing on older cyllama builds.
-- Tests in `tests/test_phase2.py` cover the grammar endpoint, info
-  features, chat tolerating new params without 500, and
-  `_build_config` dropping `grammar` when unsupported.
+- Tests: grammar endpoint and `_build_config` grammar-drop in
+  `tests/test_grammar.py`; `/info.features` shape in
+  `tests/test_health_info.py`; `/chat` tolerating
+  grammar/speculative/ngram params without 500 in `tests/test_chat.py`.
 
 ### Added (Phase 4 - RAG, slice 4d: chat integration)
 - **`POST /rag/retrieve`** — retrieve-only endpoint. Body

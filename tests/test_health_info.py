@@ -31,3 +31,17 @@ def test_info_shape(client, auth):
 def test_bad_token_rejected(client):
     r = client.get("/info", headers={"authorization": "Bearer wrong"})
     assert r.status_code == 401
+
+
+def test_info_exposes_features(client, auth):
+    r = client.get("/info", headers=auth)
+    assert r.status_code == 200
+    body = r.json()
+    assert "features" in body
+    feats = body["features"]
+    # Stub installs json_schema_to_grammar; the rest depend on
+    # GenerationConfig accepting matching kwargs (it doesn't in the stub).
+    assert feats.get("json_schema_to_grammar") is True
+    assert feats.get("grammar") is False
+    assert feats.get("speculative") is False
+    assert feats.get("ngram") is False
