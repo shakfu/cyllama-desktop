@@ -1346,34 +1346,95 @@ svg circle, svg rect, svg polygon { fill: none; }
    Documents pane defines; only the narrow-sidebar overrides + truly
    domain-specific elements (segment row, image preview, W/H grid) are
    declared here. */
-.sv-transcribe-body, .sv-image-body, .sv-server-body { padding: 8px 14px 12px; overflow-y: auto; }
+.sv-transcribe-body, .sv-image-body, .sv-server-body, .sv-batch-body {
+  padding: 8px 14px 12px; overflow-y: auto;
+}
 .sv-transcribe-body .dp-row,
 .sv-image-body .dp-row,
-.sv-server-body .dp-row { flex-direction: column; gap: 4px; align-items: stretch; }
+.sv-server-body .dp-row,
+.sv-batch-body .dp-row { flex-direction: column; gap: 4px; align-items: stretch; }
 .sv-transcribe-body .dp-row.dp-actions,
 .sv-image-body .dp-row.dp-actions,
-.sv-server-body .dp-row.dp-actions { flex-direction: row; gap: 6px; margin-top: 8px; }
+.sv-server-body .dp-row.dp-actions,
+.sv-batch-body .dp-row.dp-actions { flex-direction: row; gap: 6px; margin-top: 8px; }
 .sv-transcribe-body .dp-label,
 .sv-image-body .dp-label,
-.sv-server-body .dp-label { width: auto; padding-top: 0; }
+.sv-server-body .dp-label,
+.sv-batch-body .dp-label { width: auto; padding-top: 0; }
 .sv-transcribe-body .dp-section,
 .sv-image-body .dp-section,
-.sv-server-body .dp-section { padding: 10px 12px; }
+.sv-server-body .dp-section,
+.sv-batch-body .dp-section { padding: 10px 12px; }
 /* The first card in the body would otherwise stack a 16px section
    margin on top of the 8px body padding, leaving the header floating
    far above the content. Reset it so the body padding alone controls
    the gap. */
 .sv-transcribe-body .dp-section:first-child,
 .sv-image-body .dp-section:first-child,
-.sv-server-body .dp-section:first-child { margin-top: 0; }
+.sv-server-body .dp-section:first-child,
+.sv-batch-body .dp-section:first-child { margin-top: 0; }
 /* Sidebar-pane primary actions are dominant (Transcribe / Generate /
-   Start) -- stretch full-width so a sole button doesn't sit lonely
-   in a corner. When Stop is shown alongside, both share the row
-   equally. The Server pane's running view shows a single Stop button
-   styled the same way. */
+   Start / Run batch) -- stretch full-width so a sole button doesn't
+   sit lonely in a corner. When Stop is shown alongside, both share
+   the row equally. */
 .sv-transcribe-body .dp-actions .btn,
 .sv-image-body .dp-actions .btn,
-.sv-server-body .dp-actions .btn { flex: 1; }
+.sv-server-body .dp-actions .btn,
+.sv-batch-body .dp-actions .btn { flex: 1; }
+
+/* Batch pane: result cards stack vertically; long prompts and
+   responses wrap. Mono prompt to distinguish input from output. */
+.sv-batch-body .dp-hint .btn-mini { margin-right: 4px; }
+.bt-rows { display: flex; flex-direction: column; gap: 6px; }
+.bt-empty { font-size: 11px; color: var(--fg-faint); padding: 8px; }
+.bt-row-card {
+  padding: 8px 10px;
+  border-left: 2px solid var(--border-strong);
+  background: var(--bg-sunken);
+  border-radius: 0 4px 4px 0;
+  display: flex; flex-direction: column; gap: 4px;
+}
+.bt-row-prompt {
+  font-size: 11px; color: var(--fg-faint);
+  word-break: break-word; line-height: 1.4;
+}
+.bt-row-response {
+  font-size: 12px; color: var(--fg);
+  word-break: break-word; line-height: 1.5; white-space: pre-wrap;
+}
+
+/* Models tab Tools section (quantize). */
+.mt-subhead {
+  font-size: 11px; color: var(--fg-faint);
+  text-transform: uppercase; letter-spacing: 0.04em;
+  margin-bottom: 6px;
+}
+.mt-quant-row {
+  display: flex; flex-direction: column; gap: 3px;
+  margin-bottom: 8px;
+}
+.mt-quant-label {
+  font-size: 10px; color: var(--fg-faint);
+  text-transform: uppercase; letter-spacing: 0.04em;
+}
+.mt-quant-actions { display: flex; gap: 6px; margin-top: 4px; }
+.mt-quant-actions .btn { flex: 1; }
+.mt-quant-status {
+  font-size: 11px; color: var(--fg-faint);
+  margin-top: 6px; min-height: 14px;
+}
+.mt-quant-status[data-kind="ok"] { color: #6ab04c; }
+.mt-quant-status[data-kind="err"] { color: #c33; }
+.mt-input {
+  width: 100%;
+  padding: 6px 8px;
+  font: inherit; font-size: 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--fg);
+}
+.mt-input:focus { outline: none; border-color: var(--border-strong); }
 
 /* Server-specific: URL pill, curl block, hint copy. */
 .sv-server-body .dp-hint {

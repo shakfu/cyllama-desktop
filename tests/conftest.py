@@ -380,6 +380,38 @@ class _FakeWhisperContext:
     def close(self): self.closed = True
 
 
+class _FakeBatchResponse:
+    """Mirror cyllama.api.Response just enough for the batch job's
+    ``.text`` / ``.stats`` access patterns."""
+    def __init__(self, text: str):
+        self.text = text
+        self.stats = type("_FakeStats", (), {"__dict__": {"tokens": len(text)}})()
+
+
+def _fake_batch_generate(prompts, model_path, batch_size=512, n_seq_max=8, **kwargs):  # noqa: ARG001
+    # Echo each prompt as "ECHO: <prompt>" so tests can assert the
+    # response text and ordering.
+    return [_FakeBatchResponse(f"ECHO: {p}") for p in prompts]
+
+
+class _FakeQuantizeParams:
+    """Stand-in for cyllama.llama.llama_cpp.LlamaModelQuantizeParams.
+    Cython class in real cyllama; plain dataclass-shape suffices here."""
+    def __init__(self):
+        self.ftype = 7
+        self.nthread = 0
+        self.allow_requantize = False
+        self.quantize_output_tensor = True
+        self.only_copy = False
+
+
+def _fake_model_quantize(fname_inp, fname_out, params=None):  # noqa: ARG001
+    # Pretend to write a quantized GGUF: copy a header-y blob to the
+    # destination so subsequent stat() calls find a non-empty file.
+    from pathlib import Path as _P
+    _P(fname_out).write_bytes(b"GGUF\x00" + b"\x00" * 64)
+
+
 class _FakeServerConfig:
     """Minimal stand-in for cyllama's ServerConfig dataclass."""
     def __init__(self, model_path, host="127.0.0.1", port=8080, **kwargs):
@@ -526,6 +558,7 @@ def _install_cyllama_stub() -> None:
     mod.GenerationConfig = _FakeGenerationConfig
     mod._backend = _FakeBackend
     mod.GGUFContext = _FakeGGUFContext
+    mod.batch_generate = _fake_batch_generate
     sys.modules["cyllama"] = mod
 
     # cyllama.utils.json_schema_to_grammar -- the sidecar resolves this
@@ -573,8 +606,16 @@ def _install_cyllama_stub() -> None:
     sys.modules["cyllama.agents"] = agents
     mod.agents = agents
 
+    # cyllama.llama.llama_cpp stub for Phase 9 (quantize). Contains
+    # the helper + params class the sidecar's _resolve_attr probes for.
+    llama_cpp = types.ModuleType("cyllama.llama.llama_cpp")
+    llama_cpp.model_quantize = _fake_model_quantize
+    llama_cpp.LlamaModelQuantizeParams = _FakeQuantizeParams
+    sys.modules["cyllama.llama.llama_cpp"] = llama_cpp
+
     # Server stubs: cyllama.llama.server.{embedded,python}.
     llama = types.ModuleType("cyllama.llama")
+    llama.llama_cpp = llama_cpp
     server = types.ModuleType("cyllama.llama.server")
     embedded = types.ModuleType("cyllama.llama.server.embedded")
     embedded.EmbeddedServer = _FakeEmbeddedServer

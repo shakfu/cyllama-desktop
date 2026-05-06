@@ -6,6 +6,59 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added (Phase 9 - batch + quantize tooling)
+- **`POST /jobs/batch`** wraps `cyllama.batch_generate`. Body
+  `{model_path, prompts, params?, batch_size?, n_seq_max?}` where
+  `prompts` accepts either a list of strings or a newline-delimited
+  string (forgiving for ad-hoc curl). 1024-prompt cap. Per-result
+  events stream as `{type:"result_row", index, prompt, response}`;
+  the full set is also written to `outputs.jsonl` under the job
+  artifact dir for download. Final `result` event carries the row
+  count + artifact URL. cyllama 0.2.x doesn't expose a progress
+  callback, so the wall-clock progress is coarse (one big jump
+  after `batch_generate` returns); the JSONL writes incrementally
+  to keep memory bounded for large batches.
+- **`POST /jobs/models/quantize`** wraps
+  `cyllama.llama.llama_cpp.model_quantize`. Body
+  `{src_path, dst_name, ftype, nthread?, allow_requantize?,
+  only_copy?}`. Output always lands in `MODELS_DIR`; `dst_name` is
+  a bare filename (slashes / leading dots / paths that resolve out
+  of MODELS_DIR all 400) so a hand-crafted POST can't escape the
+  cache. `.gguf` extension auto-appended. 409 on collision.
+  Half-written destinations are unlinked on failure so the next
+  attempt isn't blocked.
+- **`GET /quantize/ftypes`** returns the label→int ftype map (Q2_K
+  through F32) so the renderer's dropdown drives off a single
+  source of truth instead of a magic-number table.
+- **`/info.features.batch`** + **`/info.features.quantize`** flags.
+- **Batch sidebar view** (`features/batch-pane.js`). Reuses
+  `.dp-*` primitives. Model picker, prompts textarea + Import...
+  button (accepts `.txt` line-per-prompt or `.jsonl` with `prompt`
+  field), Run/Stop. Live result cards stream in as the job emits
+  `result_row` events. Three export buttons: client-side CSV /
+  JSONL of the in-memory rows, plus a "Server JSONL" button that
+  downloads the canonical artifact via the authenticated sidecar
+  fetch (so it's always identical to what the sidecar wrote, even
+  if the renderer's accumulator dropped a row).
+- **Tools section in the Models tab.** Source model picker reuses
+  the cached models list, ftype dropdown sourced from
+  `/quantize/ftypes`, dest filename auto-suggested from the source
+  basename + ftype. Quantize button spawns the job with live status
+  + Stop. On completion fires `models:cache-changed` so the chat
+  ModelPicker, Speculative draft picker, and Server / Batch / Image
+  pickers all refresh to show the new file.
+- Tests in `tests/test_batch_quantize.py` cover both feature flags,
+  the `/quantize/ftypes` endpoint, batch validation 400s (missing
+  model / missing prompts / empty prompts / over the 1024 cap),
+  the 501 paths, per-row streaming + final artifact, accepting a
+  newline-string prompts field, quantize validation (missing src /
+  missing dst / path separators in dst / unknown ftype label /
+  missing ftype / 501), success path writing into MODELS_DIR, and
+  the 409 collision path. Conftest grows `_fake_batch_generate`,
+  `_FakeBatchResponse`, `_fake_model_quantize`,
+  `_FakeQuantizeParams`, and a `cyllama.llama.llama_cpp` module
+  stub.
+
 ### Added (Phase 8 - OpenAI-compatible server)
 - **`POST /server/start`**, **`POST /server/stop`**,
   **`GET /server/status`**. The start endpoint accepts

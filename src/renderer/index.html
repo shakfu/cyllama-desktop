@@ -32,6 +32,7 @@
         <symbol id="i-box" viewBox="0 0 24 24"><path d="M21 16V8a2 2 0 0 0-1-1.7l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.7l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.3 7 12 12 20.7 7"/><line x1="12" y1="22" x2="12" y2="12"/></symbol>
         <symbol id="i-sidebar-l" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="9" y1="3" x2="9" y2="21"/></symbol>
         <symbol id="i-sidebar-r" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="15" y1="3" x2="15" y2="21"/></symbol>
+        <symbol id="i-list" viewBox="0 0 24 24"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><circle cx="4" cy="6" r="1"/><circle cx="4" cy="12" r="1"/><circle cx="4" cy="18" r="1"/></symbol>
         <symbol id="i-server" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="6" rx="1.5"/><rect x="3" y="14" width="18" height="6" rx="1.5"/><line x1="7" y1="7" x2="7" y2="7.01"/><line x1="7" y1="17" x2="7" y2="17.01"/></symbol>
         <symbol id="i-image" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></symbol>
         <symbol id="i-mic" viewBox="0 0 24 24"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></symbol>
@@ -47,6 +48,7 @@
         <button class="nav-btn" data-sidebar-view="transcribe" id="navTranscribe" title="Transcribe" hidden><svg><use href="#i-mic"/></svg></button>
         <button class="nav-btn" data-sidebar-view="image" id="navImage" title="Image" hidden><svg><use href="#i-image"/></svg></button>
         <button class="nav-btn" data-sidebar-view="server" id="navServer" title="Server" hidden><svg><use href="#i-server"/></svg></button>
+        <button class="nav-btn" data-sidebar-view="batch" id="navBatch" title="Batch" hidden><svg><use href="#i-list"/></svg></button>
         <button class="nav-btn" id="navConsole" title="Console"><svg><use href="#i-terminal"/></svg></button>
         <div class="nav-spacer"></div>
         <button class="nav-btn" data-tab-jump="general" title="Settings"><svg><use href="#i-cog"/></svg></button>
@@ -75,6 +77,13 @@
             <h2>Documents</h2>
           </header>
           <div class="sv-documents-body" id="docsBody"></div>
+        </div>
+
+        <div class="sidebar-view sv-batch" data-view="batch" hidden>
+          <header class="sidebar-header">
+            <h2>Batch</h2>
+          </header>
+          <div class="sv-batch-body" id="batchBody"></div>
         </div>
 
         <div class="sidebar-view sv-server" data-view="server" hidden>

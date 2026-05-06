@@ -7,6 +7,8 @@
 // code can keep using their fixed IDs.
 
 import { listModels, inspectModel, importModel, hfPeek, hfDownload } from "../lib/models.js";
+import { startJob } from "../lib/jobs.js";
+import { sidecarFetch, getInfo } from "../lib/sidecar.js";
 
 let onPickModel = (path) => {};
 let revealInFolder = (path) => {};
@@ -17,6 +19,15 @@ const state = {
   selected: null,
   metaCache: new Map(),
   metaOpen: false,
+  quantizeAvailable: false,
+  quantizeFtypes: {},
+  quantize: {
+    src: "",
+    ftype: "Q4_K_M",
+    dst: "",
+    job: null,
+    status: "",
+  },
 };
 
 function fmtBytes(n) {
@@ -274,6 +285,159 @@ function redraw() {
 
   host.appendChild(el("div", { class: "rt-section" }, picker, renderSelected()));
   host.appendChild(el("div", { class: "rt-section" }, addHead, renderHfRow(), dropHint));
+
+  if (state.quantizeAvailable) {
+    host.appendChild(renderQuantizeSection());
+  }
+}
+
+// --- Quantize tool --------------------------------------------------------
+//
+// Lives as a section inside the Models tab so the source model picker can
+// reuse the cached models list rather than duplicating its own. Output
+// always lands in MODELS_DIR; the sidecar enforces that.
+function renderQuantizeSection() {
+  const head = el("div", { class: "rt-section-head" }, el("h3", {}, "Tools"));
+  const subhead = el("div", { class: "mt-subhead" }, "Quantize");
+
+  const srcSel = el("select", { class: "mt-select" });
+  srcSel.appendChild(el("option", { value: "" }, "Pick source model..."));
+  for (const m of state.models) {
+    srcSel.appendChild(el("option", { value: m.path }, `${m.name} · ${fmtBytes(m.size)}`));
+  }
+  srcSel.value = state.quantize.src || "";
+  srcSel.addEventListener("change", () => {
+    state.quantize.src = srcSel.value;
+    // Auto-fill the dst name based on the source basename + ftype.
+    if (state.quantize.src && !state.quantize.dst) {
+      const base = state.quantize.src.split(/[\\/]/).pop() || "model.gguf";
+      const stem = base.replace(/\.gguf$/i, "");
+      state.quantize.dst = `${stem}.${state.quantize.ftype}.gguf`;
+      const dstInput = document.getElementById("mt-quantize-dst");
+      if (dstInput) dstInput.value = state.quantize.dst;
+    }
+    updateQuantizeRunEnabled();
+  });
+
+  const ftypeSel = el("select", { class: "mt-select" });
+  for (const label of Object.keys(state.quantizeFtypes)) {
+    ftypeSel.appendChild(el("option", { value: label }, label));
+  }
+  if (state.quantizeFtypes[state.quantize.ftype]) ftypeSel.value = state.quantize.ftype;
+  ftypeSel.addEventListener("change", () => {
+    state.quantize.ftype = ftypeSel.value;
+    // Update auto-suggested dst extension.
+    if (state.quantize.src) {
+      const base = state.quantize.src.split(/[\\/]/).pop() || "model.gguf";
+      const stem = base.replace(/\.gguf$/i, "");
+      state.quantize.dst = `${stem}.${state.quantize.ftype}.gguf`;
+      const dstInput = document.getElementById("mt-quantize-dst");
+      if (dstInput) dstInput.value = state.quantize.dst;
+    }
+  });
+
+  const dstInput = el("input", {
+    id: "mt-quantize-dst", type: "text", class: "mt-input",
+    placeholder: "output-name.gguf",
+    value: state.quantize.dst,
+  });
+  dstInput.addEventListener("input", () => {
+    state.quantize.dst = dstInput.value.trim();
+    updateQuantizeRunEnabled();
+  });
+
+  const runBtn = el("button", {
+    type: "button", id: "mt-quantize-run", class: "btn primary",
+    disabled: true, onclick: runQuantize,
+  }, "Quantize");
+  const stopBtn = el("button", {
+    type: "button", id: "mt-quantize-stop", class: "btn", hidden: true,
+    onclick: () => { if (state.quantize.job) state.quantize.job.cancel(); },
+  }, "Stop");
+
+  return el("div", { class: "rt-section" },
+    head, subhead,
+    el("div", { class: "mt-quant-row" },
+      el("label", { class: "mt-quant-label" }, "Source"), srcSel),
+    el("div", { class: "mt-quant-row" },
+      el("label", { class: "mt-quant-label" }, "Type"), ftypeSel),
+    el("div", { class: "mt-quant-row" },
+      el("label", { class: "mt-quant-label" }, "Output"), dstInput),
+    el("div", { class: "mt-quant-actions" }, runBtn, stopBtn),
+    el("div", { id: "mt-quantize-status", class: "mt-quant-status" }, state.quantize.status),
+  );
+}
+
+function updateQuantizeRunEnabled() {
+  const btn = document.getElementById("mt-quantize-run");
+  if (!btn) return;
+  btn.disabled = !!state.quantize.job
+    || !state.quantize.src
+    || !state.quantize.dst.trim();
+}
+
+function setQuantizeStatus(s, kind = "info") {
+  state.quantize.status = s;
+  const node = document.getElementById("mt-quantize-status");
+  if (node) { node.textContent = s; node.dataset.kind = kind; }
+}
+
+async function runQuantize() {
+  if (state.quantize.job) return;
+  setQuantizeStatus("starting...");
+  let job;
+  try {
+    job = await startJob("models.quantize", {
+      src_path: state.quantize.src,
+      dst_name: state.quantize.dst,
+      ftype: state.quantize.ftype,
+    });
+  } catch (e) {
+    setQuantizeStatus(`failed: ${e.message}`, "err");
+    return;
+  }
+  state.quantize.job = job;
+  const r = document.getElementById("mt-quantize-run");
+  const s = document.getElementById("mt-quantize-stop");
+  if (r) r.hidden = true;
+  if (s) s.hidden = false;
+  updateQuantizeRunEnabled();
+
+  const off = job.onEvent((ev) => {
+    if (ev.type === "log" && ev.message) setQuantizeStatus(ev.message);
+    else if (ev.type === "error") setQuantizeStatus(`error: ${ev.message}`, "err");
+  });
+  try {
+    const result = await job.done;
+    setQuantizeStatus(`done · ${result?.name} (${fmtBytes(result?.size)})`, "ok");
+    // Refresh the cached models list so the new file shows up in the
+    // picker. Other panes that listen to this event get the same update.
+    refresh();
+    try { window.dispatchEvent(new CustomEvent("models:cache-changed")); } catch {}
+  } catch (e) {
+    setQuantizeStatus(`failed: ${e.message}`, "err");
+  } finally {
+    off();
+    state.quantize.job = null;
+    if (r) r.hidden = false;
+    if (s) s.hidden = true;
+    updateQuantizeRunEnabled();
+  }
+}
+
+async function loadQuantizeMeta() {
+  try {
+    const info = await getInfo();
+    state.quantizeAvailable = !!(info && info.features && info.features.quantize);
+    if (state.quantizeAvailable) {
+      try {
+        const r = await sidecarFetch("/quantize/ftypes");
+        if (r.ok) state.quantizeFtypes = (await r.json()).ftypes || {};
+      } catch {}
+    }
+  } catch {
+    state.quantizeAvailable = false;
+  }
 }
 
 async function handleDrop(ev) {
@@ -303,6 +467,9 @@ export function mount({ onPick, reveal } = {}) {
   host.addEventListener("drop", handleDrop);
   redraw();
   refresh();
+  // Quantize availability is async; redraw once it lands so the Tools
+  // section can appear without a manual reload.
+  loadQuantizeMeta().then(() => redraw());
 }
 
 export { refresh };

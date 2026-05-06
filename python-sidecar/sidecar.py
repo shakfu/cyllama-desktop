@@ -217,6 +217,18 @@ _SERVER_CONFIG_CLS = _resolve_attr((
     ("cyllama.llama.server.python", "ServerConfig"),
 ))
 
+# Phase 9 -- batch + quantize tooling.
+_BATCH_GENERATE = _resolve_attr((
+    ("cyllama", "batch_generate"),
+))
+_MODEL_QUANTIZE = _resolve_attr((
+    ("cyllama.llama.llama_cpp", "model_quantize"),
+    ("cyllama", "model_quantize"),
+))
+_QUANTIZE_PARAMS_CLS = _resolve_attr((
+    ("cyllama.llama.llama_cpp", "LlamaModelQuantizeParams"),
+))
+
 
 # Capability flags surfaced via /info. ``grammar`` reflects whether
 # GenerationConfig actually accepts a ``grammar`` field AND whether the
@@ -300,6 +312,11 @@ _FEATURE_FLAGS: dict[str, bool] = {
         _SERVER_CONFIG_CLS is not None
         and (_EMBEDDED_SERVER_CLS is not None or _PYTHON_SERVER_CLS is not None)
     ),
+    "batch": _BATCH_GENERATE is not None,
+    # The params class isn't strictly required (model_quantize accepts
+    # ``None``) but its absence is a strong signal that the C bindings
+    # didn't link the quantize symbols. Gate on both for clarity.
+    "quantize": _MODEL_QUANTIZE is not None and _QUANTIZE_PARAMS_CLS is not None,
 }
 
 # Granular per-kind availability so the renderer can hide the radio
@@ -2682,6 +2699,244 @@ def server_stop():
             "model_path": None, "host": None, "port": None,
         })
     return {"ok": True, "wasRunning": True}
+
+
+# ---------------------------------------------------------------------------
+# Phase 9 -- batch generation + quantize tooling.
+#
+# Both go through /jobs because they're long-running and we want one
+# progress/cancel pattern. The batch job is incremental (one event per
+# completed prompt); quantize is a single C call with no progress hook
+# in cyllama 0.2.x, so we emit start + done.
+# ---------------------------------------------------------------------------
+
+
+register_job_kind("batch")
+register_job_kind("models.quantize")
+
+
+_BATCH_MAX_PROMPTS = 1024  # ceiling so a runaway paste doesn't blow up
+
+
+def _coerce_prompts(raw) -> list[str]:
+    """Accept list[str] or a single newline-delimited string."""
+    if isinstance(raw, list):
+        return [str(x) for x in raw]
+    if isinstance(raw, str):
+        return [ln for ln in raw.splitlines() if ln.strip()]
+    return []
+
+
+@app.post("/jobs/batch")
+async def jobs_batch(req: Request):
+    if not _FEATURE_FLAGS.get("batch"):
+        raise HTTPException(501, "batch_generate not available in this cyllama build")
+    body = await req.json()
+    model_path = (body.get("model_path") or "").strip()
+    if not model_path or not os.path.isfile(model_path):
+        raise HTTPException(400, "model_path required and must exist")
+    prompts = _coerce_prompts(body.get("prompts"))
+    prompts = [p.strip() for p in prompts if p and p.strip()]
+    if not prompts:
+        raise HTTPException(400, "prompts required (non-empty list or newline string)")
+    if len(prompts) > _BATCH_MAX_PROMPTS:
+        raise HTTPException(400, f"too many prompts (cap {_BATCH_MAX_PROMPTS})")
+
+    config = _build_config(body.get("params"))
+    try:
+        batch_size = int(body.get("batch_size") or 512)
+        n_seq_max = int(body.get("n_seq_max") or 8)
+    except (TypeError, ValueError):
+        batch_size, n_seq_max = 512, 8
+    batch_size = max(1, min(8192, batch_size))
+    n_seq_max = max(1, min(64, n_seq_max))
+
+    async def producer(job: Job) -> None:
+        out_dir = (ARTIFACTS_DIR / job.id).resolve()
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out_path = out_dir / "outputs.jsonl"
+
+        await _emit(job, {
+            "type": "log",
+            "message": f"running batch_generate on {len(prompts)} prompts...",
+        })
+
+        # cyllama's batch_generate is a single synchronous call that
+        # returns the full list. There is no progress callback in 0.2.x,
+        # so per-prompt SSE events get emitted *after* the call returns
+        # rather than during -- the renderer's progress bar fills in
+        # one big jump. The artifact JSONL is written incrementally as
+        # we iterate the result, which keeps memory bounded for large
+        # batches even though the wall-clock progress is coarse.
+        try:
+            kwargs = {"batch_size": batch_size, "n_seq_max": n_seq_max}
+            if config is not None:
+                kwargs["config"] = config
+            responses = _BATCH_GENERATE(prompts, model_path, **kwargs)
+        except Exception as exc:  # noqa: BLE001
+            raise RuntimeError(f"batch_generate failed: {exc}") from exc
+
+        results: list[dict] = []
+        with open(out_path, "w", encoding="utf-8") as f:
+            for i, resp in enumerate(responses):
+                # ``Response`` objects expose ``.text`` plus a ``.stats``
+                # dataclass; coerce defensively in case the shape moves
+                # (it has across versions).
+                text = getattr(resp, "text", None)
+                if text is None:
+                    text = str(resp)
+                row = {
+                    "index": i,
+                    "prompt": prompts[i] if i < len(prompts) else None,
+                    "response": text,
+                }
+                stats = getattr(resp, "stats", None)
+                if stats is not None:
+                    row["stats"] = _jsonify(getattr(stats, "__dict__", {}) or {})
+                f.write(json.dumps(row, ensure_ascii=False) + "\n")
+                results.append(row)
+                await _emit(job, {
+                    "type": "result_row",
+                    "index": i,
+                    "prompt": row["prompt"],
+                    "response": row["response"],
+                })
+                # Heart-beat progress so the UI bar moves even though
+                # the underlying call already finished.
+                await _emit(job, {
+                    "type": "progress",
+                    "value": (i + 1) / len(responses) if responses else 1.0,
+                })
+
+        job.artifact_path = out_dir
+        await _emit(job, {
+            "type": "result",
+            "result": {
+                "n": len(results),
+                "artifact_name": out_path.name,
+                "artifact_url": f"/jobs/{job.id}/artifact/{out_path.name}",
+            },
+        })
+
+    job = await run_job("batch", producer)
+    return {"job_id": job.id}
+
+
+# Friendly map of common llama.cpp ftype integer codes. The sidecar
+# accepts either an int or a label so the renderer dropdown can be
+# label-driven without a magic-number lookup table.
+_QUANTIZE_FTYPES: dict[str, int] = {
+    "F32":     0,
+    "F16":     1,
+    "Q4_0":    2,
+    "Q4_1":    3,
+    "Q8_0":    7,
+    "Q5_0":    8,
+    "Q5_1":    9,
+    "Q2_K":   10,
+    "Q3_K_S": 11,
+    "Q3_K_M": 12,
+    "Q3_K_L": 13,
+    "Q4_K_S": 14,
+    "Q4_K_M": 15,
+    "Q5_K_S": 16,
+    "Q5_K_M": 17,
+    "Q6_K":   18,
+}
+
+
+@app.post("/jobs/models/quantize")
+async def jobs_models_quantize(req: Request):
+    if not _FEATURE_FLAGS.get("quantize"):
+        raise HTTPException(501, "model_quantize not available in this cyllama build")
+    body = await req.json()
+    src = (body.get("src_path") or "").strip()
+    if not src or not os.path.isfile(src):
+        raise HTTPException(400, "src_path required and must exist")
+
+    # Destination resolution: the renderer sends a bare filename; we
+    # always write into MODELS_DIR so the result shows up in the
+    # cached-models listing. Refusing absolute / traversing names is
+    # defence-in-depth -- the renderer constrains the input field but
+    # a hand-crafted POST shouldn't be able to escape MODELS_DIR.
+    dst_name = (body.get("dst_name") or "").strip()
+    if not dst_name or "/" in dst_name or "\\" in dst_name or dst_name.startswith("."):
+        raise HTTPException(400, "dst_name required and must be a plain filename")
+    if not dst_name.endswith(".gguf"):
+        dst_name += ".gguf"
+    dst = (MODELS_DIR / dst_name).resolve()
+    try:
+        dst.relative_to(MODELS_DIR.resolve())
+    except ValueError:
+        raise HTTPException(400, "dst_name escapes MODELS_DIR")
+    if dst.exists():
+        raise HTTPException(409, f"already exists: {dst.name}")
+
+    ftype_in = body.get("ftype")
+    if isinstance(ftype_in, str):
+        if ftype_in not in _QUANTIZE_FTYPES:
+            raise HTTPException(400, f"unknown ftype label: {ftype_in!r}")
+        ftype = _QUANTIZE_FTYPES[ftype_in]
+    elif isinstance(ftype_in, int):
+        ftype = ftype_in
+    else:
+        raise HTTPException(400, "ftype required (label or integer)")
+
+    nthread = body.get("nthread")
+    try:
+        nthread = int(nthread) if nthread not in (None, "") else 0
+    except (TypeError, ValueError):
+        nthread = 0
+    allow_requantize = bool(body.get("allow_requantize", False))
+    only_copy = bool(body.get("only_copy", False))
+
+    async def producer(job: Job) -> None:
+        params = _QUANTIZE_PARAMS_CLS()
+        # Each setattr is wrapped because the params class is a Cython
+        # type and attribute names can drift across cyllama versions.
+        for attr, val in (
+            ("ftype", ftype),
+            ("nthread", nthread),
+            ("allow_requantize", allow_requantize),
+            ("only_copy", only_copy),
+        ):
+            try: setattr(params, attr, val)
+            except (AttributeError, TypeError): pass
+
+        await _emit(job, {
+            "type": "log",
+            "message": f"quantizing {Path(src).name} -> {dst.name} (ftype={ftype})...",
+        })
+        try:
+            _MODEL_QUANTIZE(src, str(dst), params)
+        except Exception as exc:  # noqa: BLE001
+            # Best-effort cleanup of a half-written destination so the
+            # next attempt isn't blocked by the 409 above.
+            try:
+                if dst.exists(): dst.unlink()
+            except OSError:
+                pass
+            raise RuntimeError(f"model_quantize failed: {exc}") from exc
+
+        await _emit(job, {
+            "type": "result",
+            "result": {
+                "path": str(dst),
+                "name": dst.name,
+                "size": dst.stat().st_size if dst.exists() else 0,
+                "ftype": ftype,
+            },
+        })
+
+    job = await run_job("models.quantize", producer)
+    return {"job_id": job.id}
+
+
+@app.get("/quantize/ftypes")
+def quantize_ftypes():
+    """Return the label->int ftype map so the renderer's dropdown can
+    drive its options off a single source of truth."""
+    return {"ftypes": dict(_QUANTIZE_FTYPES)}
 
 
 def _shutdown_server_silently():
