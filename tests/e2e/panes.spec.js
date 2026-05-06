@@ -16,6 +16,22 @@ test.afterEach(async () => {
   }
 });
 
+test("composer paperclip surfaces when an mmproj is pinned", async () => {
+  ctx = await launchApp();
+  const { window } = ctx;
+  // Hidden until an mmproj path is pinned, even though
+  // /info.features.multimodal is true under the conftest stub.
+  await expect(window.locator("#attach")).toBeHidden();
+  // Pin a stub path via localStorage and dispatch the same custom
+  // event the Models tab fires; the chat init listener should
+  // re-evaluate and reveal the paperclip.
+  await window.evaluate(() => {
+    localStorage.setItem("mmproj_path", "/stub/path/mmproj.gguf");
+    window.dispatchEvent(new CustomEvent("mmproj:changed", { detail: "/stub/path/mmproj.gguf" }));
+  });
+  await expect(window.locator("#attach")).toBeVisible({ timeout: 5_000 });
+});
+
 test("Chat pane renders by default", async () => {
   ctx = await launchApp();
   const { window } = ctx;

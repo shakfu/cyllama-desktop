@@ -347,7 +347,130 @@ function updateSendEnabled() {
                 : "Send";
 }
 
-function makeExchange(prompt) {
+/* ----------------------------------------------------------------
+   Multimodal attachments (LLAVA / MTMD)
+   ---------------------------------------------------------------- */
+const MMPROJ_PATH_KEY = "mmproj_path";
+// Pending attachments for the *next* send. Each entry is the
+// /chat/upload response: ``{id, name, size, path, url}``. Cleared
+// after the message is committed to history.
+let pendingAttachments = [];
+// Cached blob URLs for display: keyed on the upload's ``url`` so a
+// chat-log replay (or the regenerate path) reuses the same blob.
+const attachmentBlobCache = new Map();
+
+function getMmprojPath() {
+  try { return localStorage.getItem(MMPROJ_PATH_KEY) || ""; } catch { return ""; }
+}
+function setMmprojPath(v) {
+  try {
+    if (v) localStorage.setItem(MMPROJ_PATH_KEY, v);
+    else localStorage.removeItem(MMPROJ_PATH_KEY);
+  } catch {}
+}
+
+async function attachmentBlobUrl(upload) {
+  // upload.url is the sidecar-relative path like ``/chat/upload/<file>``.
+  // Authenticated fetch -> blob URL works under the existing
+  // ``img-src 'self' data:`` CSP.
+  if (!upload || !upload.url) return "";
+  if (attachmentBlobCache.has(upload.url)) return attachmentBlobCache.get(upload.url);
+  try {
+    const res = await cyllamaSidecar.sidecarFetch(upload.url);
+    if (!res.ok) return "";
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    attachmentBlobCache.set(upload.url, url);
+    return url;
+  } catch {
+    return "";
+  }
+}
+
+async function uploadAttachmentFile(file) {
+  // Multipart POST to /chat/upload. We use sidecarUrl to pick up the
+  // bearer token so the sidecar's auth middleware accepts it.
+  const url = await cyllamaSidecar.sidecarUrl("/chat/upload");
+  const info = await cyllamaSidecar.getSidecarInfo();
+  const fd = new FormData();
+  fd.append("file", file);
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "authorization": `Bearer ${info.token}` },
+    body: fd,
+  });
+  if (!res.ok) {
+    const detail = await res.text().catch(() => "");
+    throw new Error(`upload failed: ${res.status} ${detail}`);
+  }
+  return res.json();
+}
+
+function renderPendingAttachments() {
+  const host = document.getElementById("composerAttachments");
+  if (!host) return;
+  if (!pendingAttachments.length) {
+    host.replaceChildren();
+    host.hidden = true;
+    return;
+  }
+  host.hidden = false;
+  host.replaceChildren();
+  pendingAttachments.forEach((a, i) => {
+    const card = document.createElement("div");
+    card.className = "attachment-chip";
+    const img = document.createElement("img");
+    img.className = "attachment-thumb";
+    img.alt = a.name || "";
+    img.title = a.name || "";
+    attachmentBlobUrl(a).then((u) => { if (u) img.src = u; });
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "attachment-remove";
+    remove.title = "Remove";
+    remove.innerHTML = '<svg><use href="#i-x"/></svg>';
+    remove.addEventListener("click", () => {
+      pendingAttachments.splice(i, 1);
+      renderPendingAttachments();
+    });
+    card.appendChild(img);
+    card.appendChild(remove);
+    host.appendChild(card);
+  });
+}
+
+function renderMessageAttachments(images, host) {
+  // ``images`` is the persisted ``[{id, name, url, path}, ...]`` list.
+  if (!Array.isArray(images) || !images.length) return;
+  const strip = document.createElement("div");
+  strip.className = "msg-attachments";
+  for (const a of images) {
+    const img = document.createElement("img");
+    img.className = "msg-attachment-thumb";
+    img.alt = a.name || "";
+    img.title = a.name || "";
+    attachmentBlobUrl(a).then((u) => { if (u) img.src = u; });
+    strip.appendChild(img);
+  }
+  host.appendChild(strip);
+}
+
+async function onAttachFiles(files) {
+  if (!files || !files.length) return;
+  const errors = [];
+  for (const f of files) {
+    try {
+      const upload = await uploadAttachmentFile(f);
+      pendingAttachments.push(upload);
+    } catch (e) {
+      errors.push(`${f.name}: ${e.message}`);
+    }
+  }
+  if (errors.length) errorLine(`attach: ${errors.join("; ")}`);
+  renderPendingAttachments();
+}
+
+function makeExchange(prompt, images) {
   dismissEmpty();
   const wrap = document.createElement("article");
   wrap.className = "exchange";
@@ -365,6 +488,13 @@ function makeExchange(prompt) {
   // Render the user prompt through markdown + KaTeX (one-shot).
   renderStatic(userText, prompt);
   userBlock.appendChild(userRole);
+  // Multimodal attachments sit between the role label and the text so
+  // the visual order matches what the model "sees" -- image first,
+  // then question. Persisted on the chat row's dataset for replay.
+  if (Array.isArray(images) && images.length) {
+    renderMessageAttachments(images, userBlock);
+    try { wrap.dataset.userImages = JSON.stringify(images); } catch {}
+  }
   userBlock.appendChild(userText);
 
   const asstBlock = document.createElement("div");
@@ -895,6 +1025,19 @@ async function applySupportedParams() {
   agentsTab.applyVisibility(features);
   serverPane.applyVisibility(features);
   batchPane.applyVisibility(features);
+  // Composer paperclip is gated on the multimodal capability AND a
+  // pinned mmproj path. The /info.features check alone isn't enough
+  // -- attaching an image without an mmproj would 200 OK but the
+  // sidecar would route through llm.chat() and silently drop the
+  // attachment, so we hide the button until both pieces are in place.
+  applyAttachButtonVisibility(features);
+}
+
+function applyAttachButtonVisibility(features) {
+  const btn = document.getElementById("attach");
+  if (!btn) return;
+  const ok = !!(features && features.multimodal) && !!getMmprojPath();
+  btn.hidden = !ok;
 }
 
 // Hide main_gpu / split_mode / tensor_split rows when the machine has
@@ -1278,7 +1421,12 @@ function replayMessages(msgs) {
     const ur = document.createElement("div"); ur.className = "role-label"; ur.textContent = "You";
     const ut = document.createElement("div"); ut.className = "user-text";
     renderStatic(ut, u.content);
-    ub.appendChild(ur); ub.appendChild(ut);
+    ub.appendChild(ur);
+    if (Array.isArray(u.images) && u.images.length) {
+      renderMessageAttachments(u.images, ub);
+      try { wrap.dataset.userImages = JSON.stringify(u.images); } catch {}
+    }
+    ub.appendChild(ut);
     wrap.appendChild(ub);
 
     if (a) {
@@ -1452,6 +1600,26 @@ ejectBtn.addEventListener("click", async () => {
 const newChatBtn = document.getElementById("newChatBtn");
 if (newChatBtn) newChatBtn.addEventListener("click", newChat);
 
+// Multimodal: paperclip button forwards clicks to a hidden file
+// input. Multi-select; each picked file is uploaded via /chat/upload.
+const attachBtn = document.getElementById("attach");
+const attachInput = document.getElementById("attachInput");
+if (attachBtn && attachInput) {
+  attachBtn.addEventListener("click", () => attachInput.click());
+  attachInput.addEventListener("change", async () => {
+    const files = Array.from(attachInput.files || []);
+    attachInput.value = "";  // allow re-selecting the same file
+    await onAttachFiles(files);
+  });
+}
+// Models tab fires this when the user pins / clears an mmproj. Re-run
+// the visibility check so the paperclip appears immediately.
+window.addEventListener("mmproj:changed", () => {
+  cyllamaSidecar.getInfo().then((info) => {
+    applyAttachButtonVisibility(info && info.features);
+  }).catch(() => applyAttachButtonVisibility({ multimodal: true }));
+});
+
 sendBtn.addEventListener("click", () => {
   if (inFlight) abortCtl?.abort();
   else send();
@@ -1491,11 +1659,19 @@ async function send() {
   stickyScroll = true;
   bumpTokens(prompt);
 
+  // Snapshot the current attachments so we can append them to this
+  // turn's user message and clear the composer strip atomically.
+  const turnImages = pendingAttachments.slice();
+  pendingAttachments = [];
+  renderPendingAttachments();
+
   // Append the user turn to history before rendering so the outgoing
   // payload reflects the new turn even if the request fails.
-  messages.push({ role: "user", content: prompt });
+  const userMsg = { role: "user", content: prompt };
+  if (turnImages.length) userMsg.images = turnImages;
+  messages.push(userMsg);
 
-  const exchange = makeExchange(prompt);
+  const exchange = makeExchange(prompt, turnImages);
   const { asstText } = exchange;
   const render = createIncrementalRenderer(asstText);
 
@@ -1529,6 +1705,11 @@ async function send() {
         model_path: modelPath,
         messages: outgoing,
         params: getCurrentParams(),
+        // Multimodal: when an mmproj is pinned, the sidecar routes
+        // image-bearing user messages through ImageAnalyzer instead
+        // of llm.chat(). Empty string is the same as omitting -- the
+        // sidecar guards on truthiness.
+        mmproj_path: getMmprojPath(),
       }),
       signal: abortCtl.signal,
     });

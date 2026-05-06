@@ -1403,6 +1403,72 @@ svg circle, svg rect, svg polygon { fill: none; }
   word-break: break-word; line-height: 1.5; white-space: pre-wrap;
 }
 
+/* Composer attachments strip + paperclip. */
+.composer-attachments {
+  display: flex; flex-wrap: wrap; gap: 6px;
+  padding: 6px 8px 0;
+}
+.attachment-chip {
+  position: relative;
+  width: 56px; height: 56px;
+  border-radius: 6px;
+  overflow: hidden;
+  background: var(--bg-sunken);
+  border: 1px solid var(--border);
+}
+.attachment-thumb {
+  width: 100%; height: 100%;
+  object-fit: cover; display: block;
+}
+.attachment-remove {
+  position: absolute; top: 2px; right: 2px;
+  width: 18px; height: 18px;
+  border: 0; border-radius: 50%;
+  background: rgba(0,0,0,0.6); color: #fff;
+  display: inline-flex; align-items: center; justify-content: center;
+  cursor: pointer; padding: 0;
+}
+.attachment-remove svg { width: 12px; height: 12px; stroke: currentColor; fill: none; stroke-width: 2; }
+.composer-attach-btn {
+  appearance: none;
+  background: transparent;
+  border: 0;
+  color: var(--fg-faint);
+  cursor: pointer;
+  padding: 4px;
+  margin-right: 4px;
+  display: inline-flex; align-items: center;
+}
+/* The class above overrides the user-agent ``[hidden] { display:none }``
+   rule, so the HTML ``hidden`` attribute stops working without this
+   re-assertion. Same fix applies to the attachments strip. */
+.composer-attach-btn[hidden],
+.composer-attachments[hidden] { display: none; }
+.composer-attach-btn:hover { color: var(--fg); }
+.composer-attach-btn svg { width: 16px; height: 16px; stroke: currentColor; fill: none; stroke-width: 1.8; }
+
+/* Inline image strip on a chat-log user message. */
+.msg-attachments {
+  display: flex; flex-wrap: wrap; gap: 6px;
+  margin-bottom: 6px;
+}
+.msg-attachment-thumb {
+  max-width: 240px; max-height: 240px;
+  border-radius: 6px;
+  display: block;
+  background: var(--bg-sunken);
+}
+
+/* Multimodal projector pin row in the Models tab. */
+.mt-mmproj-row { display: flex; gap: 6px; margin-bottom: 6px; }
+.mt-mmproj-row .btn { flex: 1; }
+.mt-mmproj-path {
+  font-size: 11px; color: var(--fg-faint);
+  word-break: break-all; line-height: 1.4;
+  margin-bottom: 6px;
+}
+.mt-mmproj-hint { font-size: 11px; color: var(--fg-faint); line-height: 1.4; }
+
 /* Models tab Tools section (quantize). */
 .mt-subhead {
   font-size: 11px; color: var(--fg-faint);

@@ -43,6 +43,11 @@ class _FakeLLM:
         self.model_path = model_path
         self.config = config
         self.vocab = _FakeVocab()
+        # Multimodal: ImageAnalyzer takes the underlying LlamaModel,
+        # not the LLM wrapper. Real cyllama exposes it as ``.model``;
+        # we expose a sentinel object so identity comparisons in tests
+        # can verify the analyzer was built with our fake LLM's model.
+        self.model = object()
         self.closed = False
         self.cancelled = False
         _FakeLLM.instances.append(self)
@@ -380,6 +385,27 @@ class _FakeWhisperContext:
     def close(self): self.closed = True
 
 
+class _FakeImageAnalyzer:
+    """Stand-in for cyllama.llama.mtmd.ImageAnalyzer.
+
+    Records constructor args so tests can assert the sidecar built the
+    analyzer with the expected (mmproj, model) pair, and exposes
+    ``answer_question`` returning a deterministic string the chat
+    assertion can match.
+    """
+    instances: list["_FakeImageAnalyzer"] = []
+
+    def __init__(self, mmproj_path, llama_model, **kwargs):  # noqa: ARG002
+        self.mmproj_path = mmproj_path
+        self.llama_model = llama_model
+        self.calls: list[tuple[str, str]] = []
+        type(self).instances.append(self)
+
+    def answer_question(self, question, image):
+        self.calls.append((question, image))
+        return f"VISION ANSWER for {question!r} on {image!r}"
+
+
 class _FakeBatchResponse:
     """Mirror cyllama.api.Response just enough for the batch job's
     ``.text`` / ``.stats`` access patterns."""
@@ -613,9 +639,15 @@ def _install_cyllama_stub() -> None:
     llama_cpp.LlamaModelQuantizeParams = _FakeQuantizeParams
     sys.modules["cyllama.llama.llama_cpp"] = llama_cpp
 
+    # Multimodal: cyllama.llama.mtmd.ImageAnalyzer.
+    mtmd = types.ModuleType("cyllama.llama.mtmd")
+    mtmd.ImageAnalyzer = _FakeImageAnalyzer
+    sys.modules["cyllama.llama.mtmd"] = mtmd
+
     # Server stubs: cyllama.llama.server.{embedded,python}.
     llama = types.ModuleType("cyllama.llama")
     llama.llama_cpp = llama_cpp
+    llama.mtmd = mtmd
     server = types.ModuleType("cyllama.llama.server")
     embedded = types.ModuleType("cyllama.llama.server.embedded")
     embedded.EmbeddedServer = _FakeEmbeddedServer
@@ -666,6 +698,7 @@ def sidecar_app(tmp_path, monkeypatch):
     monkeypatch.setenv("CYLLAMA_SIDECAR_ARTIFACTS", str(tmp_path / "artifacts"))
     monkeypatch.setenv("CYLLAMA_SIDECAR_MODELS", str(tmp_path / "models"))
     monkeypatch.setenv("CYLLAMA_SIDECAR_RAG", str(tmp_path / "rag"))
+    monkeypatch.setenv("CYLLAMA_SIDECAR_UPLOADS", str(tmp_path / "uploads"))
 
     sidecar_path = Path(__file__).resolve().parent.parent / "python-sidecar"
     sys.path.insert(0, str(sidecar_path))
@@ -695,6 +728,7 @@ def sidecar_app(tmp_path, monkeypatch):
         ("THOUGHT", "let me think"),
         ("ANSWER", "42"),
     ]
+    _FakeImageAnalyzer.instances.clear()
     for cls in (_FakeServer, _FakeEmbeddedServer, _FakePythonServer):
         cls.instances.clear()
         # ``start_returns`` may have been shadowed on the subclass by a

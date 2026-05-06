@@ -184,6 +184,10 @@ async function startSidecar() {
   // <collection_id>.sqlite per collection.
   const ragDir = path.join(workspaceDir(), "rag");
   fs.mkdirSync(ragDir, { recursive: true });
+  // Multimodal chat attachments (Phase: multimodal). One file per upload,
+  // uuid-named, served back through /chat/upload/<name> with auth.
+  const uploadsDir = path.join(workspaceDir(), "uploads");
+  fs.mkdirSync(uploadsDir, { recursive: true });
 
   sidecarProc = spawn(pythonBin, [script], {
     env: {
@@ -194,6 +198,7 @@ async function startSidecar() {
       CYLLAMA_SIDECAR_ARTIFACTS: artifactsDir,
       CYLLAMA_SIDECAR_MODELS: modelsDir,
       CYLLAMA_SIDECAR_RAG: ragDir,
+      CYLLAMA_SIDECAR_UPLOADS: uploadsDir,
       PYTHONUNBUFFERED: "1",
     },
     stdio: ["ignore", "pipe", "pipe"],

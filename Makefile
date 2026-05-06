@@ -87,8 +87,9 @@ test-deps:
 	@if [ -z "$(PYTEST_PY)" ]; then \
 	  echo "no python3 found"; exit 1; \
 	fi
-	@$(PYTEST_PY) -c "import pytest, fastapi, httpx" 2>/dev/null || \
-	  $(PYTEST_PY) -m pip install --quiet pytest "fastapi>=0.115" "httpx>=0.27"
+	@$(PYTEST_PY) -c "import pytest, fastapi, httpx, multipart" 2>/dev/null || \
+	  $(PYTEST_PY) -m pip install --quiet pytest "fastapi>=0.115" "httpx>=0.27" \
+	    "python-multipart>=0.0.9"
 
 test: test-deps
 	$(PYTEST_PY) -m pytest tests/ --ignore=tests/e2e -v

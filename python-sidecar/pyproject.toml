@@ -7,4 +7,6 @@ dependencies = [
   "cyllama",
   "fastapi>=0.115",
   "uvicorn[standard]>=0.32",
+  # Required for FastAPI multipart parsing (POST /chat/upload).
+  "python-multipart>=0.0.9",
 ]

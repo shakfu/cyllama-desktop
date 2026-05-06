@@ -229,6 +229,16 @@ _QUANTIZE_PARAMS_CLS = _resolve_attr((
     ("cyllama.llama.llama_cpp", "LlamaModelQuantizeParams"),
 ))
 
+# Multimodal (LLAVA / MTMD). ``ImageAnalyzer`` is the high-level wrapper
+# that takes an mmproj path + a LlamaModel and exposes
+# ``answer_question(question, image)``. We use the single-shot
+# answer_question path rather than ``VisionLanguageChat`` because the
+# desktop's chat history is owned by the renderer; cyllama-side
+# conversation state would diverge from what the user sees.
+_MTMD_IMAGE_ANALYZER = _resolve_attr((
+    ("cyllama.llama.mtmd", "ImageAnalyzer"),
+))
+
 
 # Capability flags surfaced via /info. ``grammar`` reflects whether
 # GenerationConfig actually accepts a ``grammar`` field AND whether the
@@ -317,6 +327,7 @@ _FEATURE_FLAGS: dict[str, bool] = {
     # ``None``) but its absence is a strong signal that the C bindings
     # didn't link the quantize symbols. Gate on both for clarity.
     "quantize": _MODEL_QUANTIZE is not None and _QUANTIZE_PARAMS_CLS is not None,
+    "multimodal": _MTMD_IMAGE_ANALYZER is not None,
 }
 
 # Granular per-kind availability so the renderer can hide the radio
@@ -485,6 +496,15 @@ RAG_DIR = Path(
 ).resolve()
 RAG_DIR.mkdir(parents=True, exist_ok=True)
 
+# Per-workspace image upload root. Multimodal chat attachments land here
+# (one file per upload, named with a uuid prefix to keep collisions
+# trivial). Files survive restarts so chat replay can serve them.
+UPLOADS_DIR = Path(
+    os.environ.get("CYLLAMA_SIDECAR_UPLOADS")
+    or (Path.home() / ".cache" / "cyllama-desktop" / "uploads")
+).resolve()
+UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
+
 # HF cache locations to enumerate read-only as a secondary listing. Both
 # the llama.cpp-flavoured cache and the standard HuggingFace hub cache
 # are scanned; missing dirs are silently skipped.
@@ -604,6 +624,7 @@ _INFO_CACHE: dict = {
         "artifacts_dir": str(ARTIFACTS_DIR),
         "models_dir": str(MODELS_DIR),
         "rag_dir": str(RAG_DIR),
+        "uploads_dir": str(UPLOADS_DIR),
     },
     # Subset of _ALLOWED_PARAMS that ``GenerationConfig`` in the
     # installed cyllama actually accepts. Renderer hides UI rows whose
@@ -1028,6 +1049,139 @@ async def tokenize(req: Request):
 
 _VALID_ROLES = {"system", "user", "assistant"}
 
+# ---------------------------------------------------------------------------
+# Multimodal: image upload, serve, and the /chat routing branch that uses
+# ``cyllama.llama.mtmd.ImageAnalyzer`` instead of ``LLM.chat`` when an
+# image is attached and an mmproj path is configured.
+# ---------------------------------------------------------------------------
+
+
+# Single-slot ImageAnalyzer cache keyed on ``(mmproj_path, model_path)``.
+# Keeps the projector + model bound across consecutive turns so a quick
+# back-and-forth about the same image isn't re-loading the projector
+# each time. Different chat models or different projectors evict.
+_MTMD_INSTANCE: dict = {"key": None, "analyzer": None}
+
+
+def _get_image_analyzer(mmproj_path: str, llm) -> object:
+    if _MTMD_IMAGE_ANALYZER is None:
+        raise HTTPException(501, "multimodal not available in this cyllama build")
+    if not os.path.isfile(mmproj_path):
+        raise HTTPException(400, f"mmproj_path not found: {mmproj_path}")
+    key = (mmproj_path, getattr(llm, "model_path", None))
+    if _MTMD_INSTANCE.get("key") == key and _MTMD_INSTANCE.get("analyzer") is not None:
+        return _MTMD_INSTANCE["analyzer"]
+    # ``ImageAnalyzer(mmproj_path, llama_model)`` -- pass ``llm.model``
+    # which is the underlying ``LlamaModel`` (cyllama LLM exposes it as
+    # a public attribute).
+    inner_model = getattr(llm, "model", None)
+    if inner_model is None:
+        raise HTTPException(500, "LLM has no .model attribute (cyllama API change?)")
+    try:
+        analyzer = _MTMD_IMAGE_ANALYZER(mmproj_path, inner_model)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(500, f"failed to build ImageAnalyzer: {exc}")
+    _MTMD_INSTANCE["key"] = key
+    _MTMD_INSTANCE["analyzer"] = analyzer
+    return analyzer
+
+
+_UPLOAD_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+_UPLOAD_ALLOWED_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"}
+_UPLOAD_MAX_BYTES = 16 * 1024 * 1024  # 16 MiB cap; LLAVA inputs rarely need more
+
+
+@app.post("/chat/upload")
+async def chat_upload(req: Request):
+    """Accept a multipart image upload and stash it under UPLOADS_DIR.
+
+    Body: multipart/form-data with a single ``file`` field. The
+    response is ``{id, name, size, path, url}`` where ``url`` is the
+    auth-fetchable serving path the renderer hands to ``<img src=>``
+    via a blob (CSP forbids loopback HTTP for img-src).
+    """
+    form = await req.form()
+    upload = form.get("file")
+    if upload is None:
+        raise HTTPException(400, "file field required")
+
+    # FastAPI's UploadFile API. ``filename`` may be ``None`` for raw
+    # blobs; we fall back to a generic name in that case.
+    raw_name = (getattr(upload, "filename", "") or "image.bin").strip()
+    suffix = Path(raw_name).suffix.lower()
+    if suffix not in _UPLOAD_ALLOWED_EXTS:
+        raise HTTPException(400, f"unsupported image type: {suffix or '(none)'}")
+
+    # Drain the upload while enforcing a size cap. Streaming so a
+    # huge upload doesn't balloon process memory before we reject.
+    body = bytearray()
+    while True:
+        chunk = await upload.read(64 * 1024)
+        if not chunk:
+            break
+        body.extend(chunk)
+        if len(body) > _UPLOAD_MAX_BYTES:
+            raise HTTPException(400, f"upload exceeds {_UPLOAD_MAX_BYTES} bytes")
+
+    upload_id = uuid.uuid4().hex
+    dest = (UPLOADS_DIR / f"{upload_id}{suffix}").resolve()
+    # Defence in depth: even though the name is built from server-side
+    # uuid + a whitelisted suffix, double-check the resolved path
+    # stays inside UPLOADS_DIR.
+    try:
+        dest.relative_to(UPLOADS_DIR.resolve())
+    except ValueError:
+        raise HTTPException(400, "path escape")
+    with open(dest, "wb") as f:
+        f.write(bytes(body))
+
+    return {
+        "id": upload_id,
+        "name": raw_name,
+        "size": len(body),
+        "path": str(dest),
+        "url": f"/chat/upload/{dest.name}",
+    }
+
+
+@app.get("/chat/upload/{name}")
+def chat_upload_serve(name: str):
+    """Serve a previously uploaded image. Sandboxed to UPLOADS_DIR."""
+    if not _UPLOAD_NAME_RE.match(name):
+        raise HTTPException(400, "invalid upload name")
+    target = (UPLOADS_DIR / name).resolve()
+    try:
+        target.relative_to(UPLOADS_DIR.resolve())
+    except ValueError:
+        raise HTTPException(400, "path escape")
+    if not target.is_file():
+        raise HTTPException(404, "upload not found")
+    return FileResponse(str(target))
+
+
+def _latest_user_image_path(messages: list[dict]) -> Optional[str]:
+    """Return the first image path on the most recent user message.
+
+    Multi-image is deferred -- ImageAnalyzer.answer_question takes a
+    single image. The renderer is allowed to attach more than one for
+    persistence reasons (a chat may mention several images in passing)
+    but only the first goes into the multimodal call.
+    """
+    for m in reversed(messages):
+        if m.get("role") != "user":
+            continue
+        imgs = m.get("images") or []
+        if isinstance(imgs, list) and imgs:
+            first = imgs[0]
+            if isinstance(first, str):
+                return first
+            if isinstance(first, dict):
+                p = first.get("path")
+                if isinstance(p, str):
+                    return p
+        return None
+    return None
+
 
 def _normalize_messages(body: dict) -> list[dict]:
     """Build the message list to send to llm.chat().
@@ -1054,7 +1208,16 @@ def _normalize_messages(body: dict) -> list[dict]:
                 raise HTTPException(400, f"messages[{i}].role must be one of {sorted(_VALID_ROLES)}")
             if not isinstance(content, str):
                 raise HTTPException(400, f"messages[{i}].content must be a string")
-            out.append({"role": role, "content": content})
+            entry: dict = {"role": role, "content": content}
+            # Preserve attached image references on user messages so
+            # the multimodal branch in /chat can route through
+            # ImageAnalyzer. Validation is deliberately lenient here
+            # -- the chat path checks the resolved paths before use.
+            if role == "user":
+                imgs = m.get("images")
+                if isinstance(imgs, list) and imgs:
+                    entry["images"] = imgs
+            out.append(entry)
         return out
 
     # Legacy fallback.
@@ -1083,12 +1246,65 @@ async def chat(req: Request):
     llm = _get_llm(model_path, raw_params)
     loop = asyncio.get_running_loop()
 
+    # Multimodal route: if the latest user message has an image and the
+    # caller provided an mmproj path, hand off to ImageAnalyzer. This
+    # bypasses LLM.chat() entirely -- ImageAnalyzer.answer_question is
+    # a single-shot path that returns a string, so we yield the result
+    # as one SSE chunk rather than streaming tokens. (Streaming the
+    # multimodal answer would need the lower-level VisionLanguageChat
+    # generator, which is more invasive; deferring until a user asks.)
+    image_path = _latest_user_image_path(messages)
+    mmproj_path = (body.get("mmproj_path") or "").strip()
+    if image_path and mmproj_path:
+        if not os.path.isfile(image_path):
+            raise HTTPException(400, f"image not found: {image_path}")
+        # Sandbox: only paths under UPLOADS_DIR are accepted, so a
+        # malicious renderer can't ask the analyzer to ingest /etc/passwd
+        # via this route. Comparing against the resolved upload root
+        # so symlinks-out-of-uploads are caught too.
+        try:
+            Path(image_path).resolve().relative_to(UPLOADS_DIR.resolve())
+        except ValueError:
+            raise HTTPException(400, "image must live under UPLOADS_DIR")
+        analyzer = _get_image_analyzer(mmproj_path, llm)
+        # The user's textual question. Trailing whitespace stripped so
+        # the prompt the analyzer sees matches what the user typed.
+        question = next(
+            (m["content"] for m in reversed(messages) if m.get("role") == "user"),
+            "",
+        ).strip() or "Describe this image."
+
+        async def mm_stream():
+            try:
+                # answer_question is synchronous + CPU/GPU-bound. Run on
+                # the executor so the loop keeps servicing SSE consumers.
+                # (TestClient note: this matches the transcribe pattern,
+                # which works because the run_in_executor result feeds a
+                # single emit -- no inter-await race window.)
+                answer = await loop.run_in_executor(
+                    None, analyzer.answer_question, question, image_path,
+                )
+            except Exception as exc:  # noqa: BLE001
+                yield "data: " + json.dumps({"error": str(exc)}) + "\n\n"
+                yield "data: [DONE]\n\n"
+                return
+            yield "data: " + json.dumps({"text": str(answer)}) + "\n\n"
+            yield "data: [DONE]\n\n"
+
+        return StreamingResponse(mm_stream(), media_type="text/event-stream")
+
     # Always go through llm.chat() now -- it handles single-turn and
     # multi-turn uniformly via the model's chat template (cyllama's
     # Jinja path covers Gemma's "system role not supported" trap and
-    # similar GGUF template quirks).
+    # similar GGUF template quirks). Strip the multimodal ``images``
+    # field before handing off; cyllama's chat templater hasn't
+    # historically been forgiving of unexpected dict keys.
+    text_only_messages = [
+        {"role": m["role"], "content": m["content"]} for m in messages
+    ]
+
     def _stream():
-        return llm.chat(messages, stream=True, config=config)
+        return llm.chat(text_only_messages, stream=True, config=config)
 
     async def event_stream():
         # cyllama streams synchronously; bridge to async via a producer

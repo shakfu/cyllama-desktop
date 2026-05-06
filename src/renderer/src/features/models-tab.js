@@ -289,7 +289,61 @@ function redraw() {
   if (state.quantizeAvailable) {
     host.appendChild(renderQuantizeSection());
   }
+
+  host.appendChild(renderMultimodalSection());
 }
+
+// --- Multimodal projector pin ---------------------------------------------
+//
+// LLAVA / MTMD chat needs both the main GGUF model and a separate
+// mmproj-only GGUF (the vision projector). The user picks an mmproj
+// once; we persist the path in localStorage and the chat composer's
+// paperclip button gates on it being set.
+const MMPROJ_PATH_KEY = "mmproj_path";
+
+function getMmprojPath() {
+  try { return localStorage.getItem(MMPROJ_PATH_KEY) || ""; } catch { return ""; }
+}
+function setMmprojPath(v) {
+  try {
+    if (v) localStorage.setItem(MMPROJ_PATH_KEY, v);
+    else localStorage.removeItem(MMPROJ_PATH_KEY);
+  } catch {}
+  // The chat composer's paperclip listens on this so it can reveal /
+  // hide as soon as the user pins or clears a projector.
+  try { window.dispatchEvent(new CustomEvent("mmproj:changed", { detail: v })); } catch {}
+}
+
+function renderMultimodalSection() {
+  const head = el("div", { class: "rt-section-head" }, el("h3", {}, "Multimodal"));
+  const subhead = el("div", { class: "mt-subhead" }, "Vision projector (mmproj)");
+  const current = el("div", { class: "mt-mmproj-path mono" },
+    getMmprojPath() ? basenameLike(getMmprojPath()) : "(not set)");
+  const browse = el("button", {
+    type: "button", class: "btn",
+    onclick: async () => {
+      const p = await window.cyllama.pickModel();
+      if (p) {
+        setMmprojPath(p);
+        current.textContent = basenameLike(p);
+      }
+    },
+  }, "Browse...");
+  const clear = el("button", {
+    type: "button", class: "btn",
+    onclick: () => { setMmprojPath(""); current.textContent = "(not set)"; },
+  }, "Clear");
+  return el("div", { class: "rt-section" },
+    head, subhead,
+    el("div", { class: "mt-mmproj-row" }, browse, clear),
+    current,
+    el("div", { class: "mt-mmproj-hint" },
+      "Pinned mmproj enables the paperclip in the chat composer. Pair it ",
+      "with a vision-capable main model (LLaVA, Qwen-VL, ...) for image Q&A."),
+  );
+}
+
+function basenameLike(p) { return p ? p.split(/[\\/]/).pop() : ""; }
 
 // --- Quantize tool --------------------------------------------------------
 //

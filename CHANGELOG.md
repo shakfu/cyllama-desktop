@@ -6,6 +6,73 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added (multimodal chat — LLAVA / MTMD)
+- **Composer attach button**. A paperclip lives next to the send
+  button in the chat composer; clicking it opens a hidden
+  `<input type=file>` accepting PNG / JPEG / WebP / GIF / BMP. Each
+  picked file is uploaded to `/chat/upload` and rendered as a
+  thumbnail chip with a remove button in the composer attachments
+  strip. The button is gated on both `/info.features.multimodal`
+  *and* a pinned mmproj path (so attaching without a projector
+  configured isn't a silent no-op).
+- **`POST /chat/upload`** (multipart) writes the file to
+  `<workspaces/default/uploads>/<uuid>.<ext>` with a 16 MiB cap
+  enforced via streaming chunks, an extension allowlist, and a
+  resolve-then-relative_to sandbox check. Returns
+  `{id, name, size, path, url}`.
+- **`GET /chat/upload/{name}`** serves a previously-uploaded image
+  with bearer auth and the same path-traversal sandbox.
+- **`/chat` body extensions**: `mmproj_path` at the top level and
+  `images` per user message. When the latest user message has an
+  image and an mmproj is configured, the request routes through
+  `cyllama.llama.mtmd.ImageAnalyzer.answer_question` instead of
+  `LLM.chat()`. The text-only message list is stripped of the
+  `images` field before being passed to `llm.chat()` so cyllama's
+  Jinja templater doesn't choke on unexpected dict keys. Sandbox:
+  image paths must resolve under `UPLOADS_DIR` -- a hand-crafted
+  body asking the analyzer to ingest `/etc/passwd` is rejected
+  with 400.
+- **Single-shot multimodal answers**. cyllama's
+  `answer_question` returns a string rather than streaming, so
+  the SSE response is one `{text}` chunk followed by `[DONE]`.
+  Streaming-token multimodal would need the lower-level
+  `VisionLanguageChat` generator and is deferred.
+- **Multimodal projector pin** in the Models tab. A new section
+  with Browse / Clear buttons stores the user-picked mmproj path
+  in `localStorage` (`mmproj_path`). Setting / clearing dispatches
+  a `mmproj:changed` window event which the chat init listener
+  consumes to re-evaluate the paperclip's visibility without a
+  reload.
+- **Chat persistence schema** gains `images: [{id, name, url, path}]`
+  on user messages. Replay walks the array and renders each
+  attachment via the same auth-fetched blob URL pipeline used at
+  send time. The blob URL cache is keyed on the artifact `url` so
+  re-renders / regenerate paths reuse the same blob.
+- **`<userData>/workspaces/default/uploads/`** is the new
+  per-workspace uploads root, surfaced via `CYLLAMA_SIDECAR_UPLOADS`
+  + `/info.sidecar.uploads_dir`. Files survive sidecar restarts so
+  chat replay can serve them.
+- New runtime dep: `python-multipart` (FastAPI multipart parser).
+  Added to `python-sidecar/pyproject.toml`, the `make test-deps`
+  install line, and both CI jobs.
+- 18 new pytest cases in `tests/test_multimodal.py` cover the
+  feature flag + uploads_dir info field, upload validation
+  (missing file / unsupported extension / size cap / auth gate),
+  the upload→serve roundtrip, the chat routing branch (image
+  attached + mmproj set goes through ImageAnalyzer with the right
+  args), the no-mmproj fallback to `llm.chat()`, sandbox refusal
+  of out-of-uploads paths, and 400s for missing image / missing
+  mmproj. Conftest grows `_FakeImageAnalyzer`,
+  `cyllama.llama.mtmd` module stub, and a `model` attribute on
+  `_FakeLLM` (the analyzer takes the underlying model, not the
+  LLM wrapper).
+- One new Playwright spec asserts the paperclip is hidden by
+  default and surfaces after `mmproj_path` is set + the
+  `mmproj:changed` event fires. Required restoring
+  `[hidden] { display: none }` on the button + attachments strip
+  (the `display: inline-flex` class rule was overriding the
+  user-agent rule for the HTML `hidden` attribute).
+
 ### Added (CI workflow + image gallery)
 - **`.github/workflows/ci.yml`**. Two parallel jobs on `ubuntu-latest`:
   `test` runs the pytest suite (with `--ignore=tests/e2e`), `e2e`
