@@ -6,6 +6,26 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added (Phase 3 - hardware controls)
+- **`/info.devices`** lists ggml backend devices as
+  `[{name, description, type}, ...]`. Probed once at module load via
+  `cyllama.llama.llama_cpp.{llama_backend_init, ggml_backend_load_all,
+  ggml_backend_dev_info}`; failures return an empty list so the
+  renderer falls back to always-show rather than mis-hiding controls
+  on a real multi-GPU rig with an old probe.
+- **Multi-GPU controls auto-hide on single-GPU machines.** The
+  renderer counts GPU/iGPU-typed entries in `/info.devices`; if there
+  is at most one and the probe returned a non-empty list, it hides
+  `main_gpu`, `split_mode`, and `tensor_split`. `n_gpu_layers`,
+  `n_ctx`, `n_batch` stay visible (they're useful on single-GPU and
+  CPU-only setups). Empty device list = unknown = leave visible.
+- **Devices section** in the General tab listing each device's name,
+  description, and type. Lives alongside About so users can see at a
+  glance what backends cyllama linked.
+- Tests: `/info.devices` shape and probe override in
+  `tests/test_hardware.py` (existing eviction-on-load-change tests
+  already cover the model-reload path).
+
 ### Added (Phase 2 - chat parity with cyllama sampler surface)
 - **`POST /grammar/from-schema`** wraps
   `cyllama.utils.json_schema_to_grammar.json_schema_to_grammar`. Accepts

@@ -163,6 +163,44 @@ _NGRAM_CACHE_CLS = _resolve_attr((
 # for the chat path to actually use them. Until cyllama threads these
 # through ``LLM.chat()``, the flags are False even when the classes
 # exist, which is correct -- the UI hides rows that wouldn't take effect.
+def _probe_devices() -> list[dict]:
+    """Best-effort enumeration of ggml backend devices.
+
+    Returns ``[{name, description, type}, ...]``. Used by Phase 3 to
+    decide whether to show multi-GPU controls (split_mode, tensor_split,
+    main_gpu) -- a single-GPU machine doesn't need them. Failure to
+    probe returns ``[]`` rather than raising; the renderer treats empty
+    as "unknown" and falls back to always-show.
+    """
+    try:
+        mod = importlib.import_module("cyllama.llama.llama_cpp")
+    except Exception:
+        return []
+    init = getattr(mod, "llama_backend_init", None)
+    load_all = getattr(mod, "ggml_backend_load_all", None)
+    dev_info = getattr(mod, "ggml_backend_dev_info", None)
+    if dev_info is None:
+        return []
+    try:
+        if callable(init): init()
+        if callable(load_all): load_all()
+        raw = dev_info()
+    except Exception:
+        return []
+    out: list[dict] = []
+    for d in (raw or []):
+        if isinstance(d, dict):
+            out.append({
+                "name": str(d.get("name", "")),
+                "description": str(d.get("description", "")),
+                "type": str(d.get("type", "")),
+            })
+    return out
+
+
+_DEVICES: list[dict] = _probe_devices()
+
+
 _FEATURE_FLAGS: dict[str, bool] = {
     "grammar": ("grammar" in _GC_ACCEPTED),
     "json_schema_to_grammar": _JSON_SCHEMA_TO_GRAMMAR is not None,
@@ -464,6 +502,12 @@ _INFO_CACHE: dict = {
     # ``json_schema_to_grammar`` flag is independent (the helper can
     # produce GBNF text even if chat can't apply it yet).
     "features": dict(_FEATURE_FLAGS),
+    # Phase 3: ggml backend devices. Renderer counts GPU-typed entries
+    # to decide whether to show multi-GPU controls. Empty list means
+    # the probe failed or this cyllama doesn't expose the helpers --
+    # in that case the renderer leaves the controls visible (safer
+    # than hiding them on a real multi-GPU rig with an old probe).
+    "devices": list(_DEVICES),
 }
 
 

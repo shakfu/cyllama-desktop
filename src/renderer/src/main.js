@@ -881,6 +881,36 @@ async function applySupportedParams() {
 
   applyMirostatVisibility();
   applySpeculativeVisibility();
+  applyMultiGpuVisibility(info);
+}
+
+// Hide main_gpu / split_mode / tensor_split rows when the machine has
+// at most one GPU-typed device. With a single GPU the only meaningful
+// hardware knob is n_gpu_layers; the rest are noise. Empty / missing
+// device list means the probe failed -- leave rows visible (safer
+// than hiding on a real multi-GPU rig).
+const MULTI_GPU_KEYS = ["main_gpu", "split_mode", "tensor_split"];
+function applyMultiGpuVisibility(info) {
+  const devices = (info && Array.isArray(info.devices)) ? info.devices : [];
+  // GPU-typed entries: ggml reports CPU/ACCEL/GPU/iGPU. Treat both
+  // 'GPU' and 'iGPU' as a GPU for this purpose.
+  const gpuCount = devices.filter((d) => /^i?GPU$/i.test(String(d.type || ""))).length;
+  // No probe data -> assume multi-GPU possible, leave visible.
+  const hide = devices.length > 0 && gpuCount <= 1;
+  for (const key of MULTI_GPU_KEYS) {
+    const el = paramEl(key);
+    if (!el) continue;
+    const row = el.closest(".param");
+    if (!row) continue;
+    // Don't override a row already hidden by supported_params filtering.
+    if (row.hidden && !row.dataset.multiGpuShown) continue;
+    if (hide) {
+      row.dataset.multiGpuShown = row.hidden ? "0" : "1";
+      row.hidden = true;
+    } else {
+      delete row.dataset.multiGpuShown;
+    }
+  }
 }
 
 // Sub-rows that only matter when a draft model is selected (n_max,

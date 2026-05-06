@@ -6,6 +6,12 @@ import { getInfo } from "../lib/sidecar.js";
 
 let cached = null;
 
+function escapeHtml(s) {
+  return String(s ?? "").replace(/[&<>"']/g, (c) => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+  }[c]));
+}
+
 function fmtBackends(b) {
   if (!b || typeof b !== "object") return "(none reported)";
   const on = Object.entries(b).filter(([, v]) => v).map(([k]) => k);
@@ -20,6 +26,15 @@ async function refresh() {
     catch (e) { cached = { error: e.message }; }
   }
   const info = cached;
+  const devices = Array.isArray(info.devices) ? info.devices : [];
+  const devicesHtml = devices.length
+    ? devices.map((d) => `
+        <div class="rt-kv">
+          <div class="k">${escapeHtml(d.type || "?")}</div>
+          <div class="v">${escapeHtml(d.name || "")}<span class="rt-dev-desc">${escapeHtml(d.description ? " · " + d.description : "")}</span></div>
+        </div>
+      `).join("")
+    : `<div class="rt-placeholder"><p>No devices reported. cyllama may not expose the probe in this build.</p></div>`;
   host.innerHTML = `
     <div class="rt-section">
       <div class="rt-section-head"><h3>About</h3></div>
@@ -29,6 +44,10 @@ async function refresh() {
         <div class="k">models dir</div><div class="v mono" data-bind="modelsDir">-</div>
         <div class="k">artifacts dir</div><div class="v mono" data-bind="artifactsDir">-</div>
       </div>
+    </div>
+    <div class="rt-section">
+      <div class="rt-section-head"><h3>Devices</h3></div>
+      ${devicesHtml}
     </div>
     <div class="rt-section">
       <div class="rt-section-head"><h3>Preferences</h3></div>

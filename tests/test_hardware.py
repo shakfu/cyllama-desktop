@@ -100,6 +100,34 @@ def test_estimate_layers_happy_path(client, auth, fake_model, sidecar_app):
     assert body["notes"] == "ok"
 
 
+def test_info_devices_shape(client, auth, sidecar_app):
+    """/info.devices is a list of {name, description, type}. Empty in
+    the test stub since the probe imports cyllama.llama.llama_cpp which
+    isn't installed; renderer treats empty as 'unknown' and falls back
+    to always-show on the multi-GPU rows."""
+    r = client.get("/info", headers=auth)
+    body = r.json()
+    assert "devices" in body
+    assert isinstance(body["devices"], list)
+    for d in body["devices"]:
+        assert set(d.keys()) >= {"name", "description", "type"}
+
+
+def test_info_devices_uses_probe(client, auth, sidecar_app, monkeypatch):
+    """When the probe finds devices, /info surfaces them verbatim."""
+    fake = [
+        {"name": "MTL0", "description": "Apple M1", "type": "GPU"},
+        {"name": "CPU", "description": "host", "type": "CPU"},
+    ]
+    monkeypatch.setattr(sidecar_app, "_DEVICES", fake)
+    # /info reads from the cached _INFO_CACHE built at import; rebuild
+    # the relevant slice so the change is visible.
+    sidecar_app._INFO_CACHE["devices"] = list(fake)
+    r = client.get("/info", headers=auth)
+    devs = r.json()["devices"]
+    assert devs == fake
+
+
 def test_supported_params_includes_hardware(client, auth, sidecar_app):
     """If cyllama's GenerationConfig accepts hardware fields (the conftest
     stub does), /info advertises them so the renderer surfaces the rows."""
