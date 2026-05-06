@@ -185,30 +185,36 @@ function rebuildSelect() {
 }
 
 function build() {
-  // Insert a small bar at the top of the Sampling rt-section. Located by
-  // walking from the Sampling header.
+  // Mount the presets bar into the dedicated "Preset" section at the
+  // top of the Parameters tab (LMStudio-style IA: preset is a chat-
+  // start choice, not a sub-control of Sampling). Fall back to the
+  // Sampling section if a future layout drops the dedicated Preset
+  // header so the bar still surfaces somewhere coherent.
   const headers = document.querySelectorAll(".rt-section-head h3");
-  let samplingSection = null;
+  let target = null;
   for (const h of headers) {
-    if ((h.textContent || "").trim().toLowerCase() === "sampling") {
-      samplingSection = h.closest(".rt-section");
-      break;
+    const t = (h.textContent || "").trim().toLowerCase();
+    if (t === "preset") { target = h.closest(".rt-section"); break; }
+  }
+  if (!target) {
+    for (const h of headers) {
+      const t = (h.textContent || "").trim().toLowerCase();
+      if (t === "sampling") { target = h.closest(".rt-section"); break; }
     }
   }
-  if (!samplingSection) return null;
+  if (!target) return null;
 
   host = document.createElement("div");
   host.className = "presets-bar";
   host.innerHTML = `
-    <label class="presets-label">Preset</label>
     <select class="presets-select" aria-label="Preset"></select>
     <button type="button" class="icon-btn presets-save" title="Save current as preset">+</button>
     <button type="button" class="icon-btn presets-delete" title="Delete preset" disabled>×</button>
   `;
   // Insert directly after the section head and before the params form.
-  const head = samplingSection.querySelector(".rt-section-head");
+  const head = target.querySelector(".rt-section-head");
   if (head) head.insertAdjacentElement("afterend", host);
-  else samplingSection.prepend(host);
+  else target.prepend(host);
 
   select = host.querySelector(".presets-select");
   saveBtn = host.querySelector(".presets-save");

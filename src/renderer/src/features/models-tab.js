@@ -2,7 +2,7 @@
 //
 // Sidebar-width compression of what was the Models workspace. Vertical
 // stack: cached list, HF download, drop hint, selected metadata
-// (collapsible). Sits inside #modelsTabHost; the system-prompt and
+// (collapsible). Sits inside #modelsPaneHost; the system-prompt and
 // sampling sections are static HTML in index.html so the existing chat
 // code can keep using their fixed IDs.
 
@@ -267,7 +267,7 @@ function renderSelected() {
 }
 
 function redraw() {
-  const host = document.getElementById("modelsTabHost");
+  const host = document.getElementById("modelsPaneHost");
   if (!host) return;
   while (host.firstChild) host.removeChild(host.firstChild);
 
@@ -524,7 +524,7 @@ async function loadQuantizeMeta() {
 
 async function handleDrop(ev) {
   ev.preventDefault();
-  const host = document.getElementById("modelsTabHost");
+  const host = document.getElementById("modelsPaneHost");
   if (host) host.classList.remove("dragging");
   const files = Array.from(ev.dataTransfer?.files || []);
   if (!files.length) return;
@@ -542,7 +542,7 @@ async function handleDrop(ev) {
 export function mount({ onPick, reveal } = {}) {
   if (typeof onPick === "function") onPickModel = onPick;
   if (typeof reveal === "function") revealInFolder = reveal;
-  const host = document.getElementById("modelsTabHost");
+  const host = document.getElementById("modelsPaneHost");
   if (!host) return;
   host.addEventListener("dragover", (e) => { e.preventDefault(); host.classList.add("dragging"); });
   host.addEventListener("dragleave", (e) => { if (e.target === host) host.classList.remove("dragging"); });

@@ -42,10 +42,11 @@
       </defs>
     </svg>
 
-    <div class="app" id="app">
+    <div class="app" id="app" data-pane="chats">
       <!-- Left: nav rail -->
       <nav class="nav-rail" aria-label="Primary">
-        <button class="nav-btn active" data-sidebar-view="chats" title="Chats"><svg><use href="#i-chat"/></svg></button>
+        <button class="nav-btn active" data-sidebar-view="chats" data-pane-jump="chats" title="Chats"><svg><use href="#i-chat"/></svg></button>
+        <button class="nav-btn" data-pane-jump="models" title="Models"><svg><use href="#i-box"/></svg></button>
         <button class="nav-btn" data-sidebar-view="documents" title="Documents"><svg><use href="#i-stack"/></svg></button>
         <button class="nav-btn" data-sidebar-view="transcribe" id="navTranscribe" title="Transcribe" hidden><svg><use href="#i-mic"/></svg></button>
         <button class="nav-btn" data-sidebar-view="image" id="navImage" title="Image" hidden><svg><use href="#i-image"/></svg></button>
@@ -53,7 +54,7 @@
         <button class="nav-btn" data-sidebar-view="batch" id="navBatch" title="Batch" hidden><svg><use href="#i-list"/></svg></button>
         <button class="nav-btn" id="navConsole" title="Console"><svg><use href="#i-terminal"/></svg></button>
         <div class="nav-spacer"></div>
-        <button class="nav-btn" data-tab-jump="general" title="Settings"><svg><use href="#i-cog"/></svg></button>
+        <button class="nav-btn" id="navPrefs" title="Settings (Cmd+,)"><svg><use href="#i-cog"/></svg></button>
       </nav>
 
       <!-- Left sidebar. Holds one ``.sidebar-view`` at a time; the
@@ -177,54 +178,42 @@
            which is visible. -->
       <aside class="params-panel">
         <nav class="rt-tabs" role="tablist" aria-label="Right sidebar">
-          <button class="rt-tab active" role="tab" data-tab="models" aria-selected="true">Models</button>
+          <button class="rt-tab active" role="tab" data-tab="models" aria-selected="true">Parameters</button>
           <button class="rt-tab" role="tab" data-tab="agents" aria-selected="false">Agents</button>
-          <button class="rt-tab" role="tab" data-tab="general" aria-selected="false">General</button>
         </nav>
         <div class="rt-body" id="rightTabBody">
 
-          <!-- Models tab: model selection + system prompt + sampling.
-               Most of this is rendered by features/models-tab.js into the
-               #modelsTabHost slot; the system-prompt + sampling sliders
-               are static HTML so the existing param IDs the chat code
-               depends on (p-temperature, p-system_prompt, ...) keep
-               working without a JS migration. -->
+          <!-- Parameters tab: per-chat session settings, organized
+               LMStudio-style as collapsible sections. The model picker /
+               HF download / metadata inspector / quantize / mmproj
+               projector pin all moved out to the Models sidebar-view in
+               the left nav-rail; this tab is now strictly per-chat
+               configuration. Static HTML retains the #p-* IDs the chat
+               code binds to. -->
           <section class="rt-pane active" data-tab="models">
-            <div id="modelsTabHost"></div>
 
+            <!-- Preset (formerly nested inside Sampling). Promoted out
+                 because picking a preset is a chat-start activity, not
+                 a per-slider tweak. The presets-bar JS attaches itself
+                 by walking from the Sampling section head; we keep that
+                 anchor below so the presets module mounts unchanged. -->
             <div class="rt-section">
-              <div class="rt-section-head">
-                <h3>System Prompt</h3>
-              </div>
+              <div class="rt-section-head"><h3>Preset</h3></div>
+            </div>
+
+            <details class="rt-section rt-collapsible" open>
+              <summary class="rt-section-head"><h3>System Prompt</h3></summary>
               <div class="param">
                 <textarea id="p-system_prompt" rows="3" placeholder="Optional. e.g. You are a concise, technical assistant."></textarea>
                 <div class="param-hint">Prepended as a <code>system</code> message via the model's chat template.</div>
               </div>
-            </div>
+            </details>
 
-            <div class="rt-section">
-              <div class="rt-section-head">
-                <h3>Retrieval</h3>
-                <button class="icon-btn" id="ragRefresh" title="Refresh collections"><svg><use href="#i-refresh"/></svg></button>
-              </div>
-              <div class="param">
-                <label for="p-rag_collection"><span>Collection</span></label>
-                <select id="p-rag_collection" class="dp-select">
-                  <option value="">— none —</option>
-                </select>
-                <div class="param-hint">When set, each user turn is augmented with top-K chunks from this collection.</div>
-              </div>
-              <div class="param">
-                <label for="p-rag_top_k"><span>Top K</span><output id="p-rag_top_k-out">3</output></label>
-                <input id="p-rag_top_k" type="range" min="1" max="10" step="1" value="3" />
-              </div>
-            </div>
-
-            <div class="rt-section">
-              <div class="rt-section-head">
+            <details class="rt-section rt-collapsible" open>
+              <summary class="rt-section-head">
                 <h3>Sampling</h3>
-                <button class="icon-btn" id="resetParams" title="Reset to defaults"><svg><use href="#i-refresh"/></svg></button>
-              </div>
+                <button class="icon-btn" id="resetParams" title="Reset to defaults" onclick="event.preventDefault();event.stopPropagation()"><svg><use href="#i-refresh"/></svg></button>
+              </summary>
               <div id="paramsForm">
                 <div class="param">
                   <label for="p-temperature"><span>Temperature</span><output id="p-temperature-out">0.80</output></label>
@@ -295,64 +284,65 @@
                   <div class="param-hint">Generation halts when any sequence appears.</div>
                 </div>
               </div>
+            </details>
 
-              <details class="rt-advanced" id="samplingAdvanced">
-                <summary>Advanced</summary>
-
-                <div class="param" data-feature="grammar">
-                  <label for="p-grammar">
-                    <span>Grammar (GBNF)</span>
-                    <button type="button" class="link-btn" id="grammarFromSchemaBtn"
-                            title="Generate GBNF from a JSON schema">From JSON Schema...</button>
-                  </label>
-                  <textarea id="p-grammar" rows="4" placeholder="root ::= ..." spellcheck="false"></textarea>
-                  <div class="param-hint">Constrain output to this grammar. Empty = unconstrained.</div>
-                </div>
-
-                <div class="param" data-feature="speculative">
-                  <label for="p-spec_draft_model"><span>Speculative draft model</span></label>
-                  <select id="p-spec_draft_model" class="dp-select">
-                    <option value="">— off —</option>
-                  </select>
-                  <div class="param-hint">A small fast model proposes tokens; the main model verifies.</div>
-                </div>
-                <div class="param" data-feature="speculative" data-spec-only>
-                  <label for="p-spec_n_max"><span>Draft n_max</span><output id="p-spec_n_max-out">16</output></label>
-                  <input id="p-spec_n_max" type="range" min="1" max="64" step="1" value="16" />
-                  <div class="param-hint">Max tokens drafted per step.</div>
-                </div>
-                <div class="param" data-feature="speculative" data-spec-only>
-                  <label for="p-spec_n_min"><span>Draft n_min</span><output id="p-spec_n_min-out">0</output></label>
-                  <input id="p-spec_n_min" type="range" min="0" max="32" step="1" value="0" />
-                </div>
-                <div class="param" data-feature="speculative" data-spec-only>
-                  <label for="p-spec_p_split"><span>Split prob</span><output id="p-spec_p_split-out">0.10</output></label>
-                  <input id="p-spec_p_split" type="range" min="0" max="1" step="0.01" value="0.1" />
-                </div>
-                <div class="param" data-feature="speculative" data-spec-only>
-                  <label for="p-spec_p_min"><span>Min accept prob</span><output id="p-spec_p_min-out">0.75</output></label>
-                  <input id="p-spec_p_min" type="range" min="0" max="1" step="0.01" value="0.75" />
-                </div>
-
-                <div class="param" data-feature="ngram">
-                  <label for="p-ngram_enabled" class="check-row">
-                    <input id="p-ngram_enabled" type="checkbox" />
-                    <span>Enable n-gram cache</span>
-                  </label>
-                  <div class="param-hint">Speeds up repetitive completions by drafting from prior text.</div>
-                </div>
-
-                <div class="param" id="advUnavailableNote" hidden>
-                  <div class="param-hint">No advanced features available in this cyllama build.</div>
-                </div>
-              </details>
-            </div>
-
-            <div class="rt-section">
-              <div class="rt-section-head">
-                <h3>Hardware</h3>
-                <button class="icon-btn" id="estimateLayersBtn" title="Estimate n_gpu_layers for the loaded model">est</button>
+            <details class="rt-section rt-collapsible" data-feature="grammar">
+              <summary class="rt-section-head"><h3>Structured Output</h3></summary>
+              <div class="param">
+                <label for="p-grammar">
+                  <span>Grammar (GBNF)</span>
+                  <button type="button" class="link-btn" id="grammarFromSchemaBtn"
+                          title="Generate GBNF from a JSON schema">From JSON Schema...</button>
+                </label>
+                <textarea id="p-grammar" rows="4" placeholder="root ::= ..." spellcheck="false"></textarea>
+                <div class="param-hint">Constrain output to this grammar. Empty = unconstrained.</div>
               </div>
+            </details>
+
+            <details class="rt-section rt-collapsible" data-feature="speculative">
+              <summary class="rt-section-head"><h3>Speculative Decoding</h3></summary>
+              <div class="param">
+                <label for="p-spec_draft_model"><span>Draft model</span></label>
+                <select id="p-spec_draft_model" class="dp-select">
+                  <option value="">— off —</option>
+                </select>
+                <div class="param-hint">A small fast model proposes tokens; the main model verifies.</div>
+              </div>
+              <div class="param" data-spec-only>
+                <label for="p-spec_n_max"><span>Draft n_max</span><output id="p-spec_n_max-out">16</output></label>
+                <input id="p-spec_n_max" type="range" min="1" max="64" step="1" value="16" />
+                <div class="param-hint">Max tokens drafted per step.</div>
+              </div>
+              <div class="param" data-spec-only>
+                <label for="p-spec_n_min"><span>Draft n_min</span><output id="p-spec_n_min-out">0</output></label>
+                <input id="p-spec_n_min" type="range" min="0" max="32" step="1" value="0" />
+              </div>
+              <div class="param" data-spec-only>
+                <label for="p-spec_p_split"><span>Split prob</span><output id="p-spec_p_split-out">0.10</output></label>
+                <input id="p-spec_p_split" type="range" min="0" max="1" step="0.01" value="0.1" />
+              </div>
+              <div class="param" data-spec-only>
+                <label for="p-spec_p_min"><span>Min accept prob</span><output id="p-spec_p_min-out">0.75</output></label>
+                <input id="p-spec_p_min" type="range" min="0" max="1" step="0.01" value="0.75" />
+              </div>
+            </details>
+
+            <details class="rt-section rt-collapsible" data-feature="ngram">
+              <summary class="rt-section-head"><h3>N-gram Cache</h3></summary>
+              <div class="param">
+                <label for="p-ngram_enabled" class="check-row">
+                  <input id="p-ngram_enabled" type="checkbox" />
+                  <span>Enable n-gram cache</span>
+                </label>
+                <div class="param-hint">Speeds up repetitive completions by drafting from prior text.</div>
+              </div>
+            </details>
+
+            <details class="rt-section rt-collapsible">
+              <summary class="rt-section-head">
+                <h3>Settings</h3>
+                <button class="icon-btn" id="estimateLayersBtn" title="Estimate n_gpu_layers for the loaded model" onclick="event.preventDefault();event.stopPropagation()">est</button>
+              </summary>
               <div id="hwForm">
                 <div class="param">
                   <label for="p-n_gpu_layers"><span>GPU layers</span><output id="p-n_gpu_layers-out">-1</output></label>
@@ -392,19 +382,45 @@
                   <output id="estimateOutput" class="hw-estimate-out"></output>
                 </div>
               </div>
-            </div>
+            </details>
+
+            <details class="rt-section rt-collapsible">
+              <summary class="rt-section-head">
+                <h3>Retrieval</h3>
+                <button class="icon-btn" id="ragRefresh" title="Refresh collections" onclick="event.preventDefault();event.stopPropagation()"><svg><use href="#i-refresh"/></svg></button>
+              </summary>
+              <div class="param">
+                <label for="p-rag_collection"><span>Collection</span></label>
+                <select id="p-rag_collection" class="dp-select">
+                  <option value="">— none —</option>
+                </select>
+                <div class="param-hint">When set, each user turn is augmented with top-K chunks from this collection.</div>
+              </div>
+              <div class="param">
+                <label for="p-rag_top_k"><span>Top K</span><output id="p-rag_top_k-out">3</output></label>
+                <input id="p-rag_top_k" type="range" min="1" max="10" step="1" value="3" />
+              </div>
+            </details>
           </section>
 
           <section class="rt-pane" data-tab="agents" hidden>
             <div id="agentsTabHost"></div>
           </section>
 
-          <section class="rt-pane" data-tab="general" hidden>
-            <div id="generalTabHost"></div>
-          </section>
 
         </div>
       </aside>
+
+      <!-- Models pane (full-area). Shown when .app[data-pane="models"];
+           hidden when in Chats. The 3-column grid maps to LMStudio's
+           Models view: subnav (kind filter), table (cached models),
+           detail rail (Model Information for the selected row).
+           Content is populated by features/models-pane.js. -->
+      <section class="app-pane" data-pane-view="models" id="modelsPane" hidden>
+        <aside class="mp-subnav" id="modelsPaneSubnav"></aside>
+        <main class="mp-main"      id="modelsPaneMain"></main>
+        <aside class="mp-detail"   id="modelsPaneDetail"></aside>
+      </section>
 
     </div>
 

@@ -121,6 +121,244 @@ svg circle, svg rect, svg polygon { fill: none; }
 .app[data-right="0"] .params-panel  { opacity: 0; pointer-events: none; }
 
 /* ============================================================
+   Pane mode (full-area panes vs the default Chat layout)
+   ============================================================
+   In Chats mode the original 4-column grid stands. In a non-Chat
+   pane (Models for now; Documents / Image / Transcribe / Server /
+   Batch can be promoted the same way later) the chat-related grid
+   children hide and a full-area pane spans columns 2 / -1. */
+.app-pane {
+  grid-column: 2 / -1;
+  grid-row: 1;
+  overflow: hidden;
+}
+.app[data-pane="chats"] .app-pane[data-pane-view="models"] { display: none; }
+.app[data-pane="models"] .sidebar,
+.app[data-pane="models"] .main-col,
+.app[data-pane="models"] .params-panel { display: none; }
+.app[data-pane="models"] {
+  grid-template-columns: var(--col-rail) 1fr;
+}
+.app[data-pane="models"] .app-pane[data-pane-view="models"] {
+  display: grid;
+  /* Subnav | Table | Detail rail. Subnav fixed, detail rail fixed,
+     table flexes to fill. */
+  grid-template-columns: 200px 1fr 360px;
+  height: 100vh;
+  background: var(--bg);
+}
+
+.mp-subnav {
+  border-right: 1px solid var(--border);
+  background: var(--bg-elev);
+  padding: 12px;
+  overflow-y: auto;
+}
+.mp-main {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--bg);
+}
+.mp-detail {
+  border-left: 1px solid var(--border);
+  background: var(--bg-elev);
+  overflow-y: auto;
+  padding: 14px;
+}
+
+/* Models pane: subnav (left rail) -- kind-filtered category list. */
+.mp-subnav-head {
+  font-size: 11px; font-weight: 600;
+  color: var(--fg-faint);
+  text-transform: uppercase; letter-spacing: 0.04em;
+  margin-bottom: 10px;
+}
+.mp-subnav-row {
+  appearance: none;
+  width: 100%;
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 8px 10px;
+  margin-bottom: 2px;
+  background: transparent;
+  border: 0;
+  border-radius: 6px;
+  color: var(--fg);
+  font: inherit; font-size: 13px;
+  cursor: pointer;
+  text-align: left;
+}
+.mp-subnav-row:hover { background: var(--bg-sunken); }
+.mp-subnav-row.active { background: var(--accent, #4a9eff); color: white; }
+.mp-subnav-row.active .mp-subnav-count { color: rgba(255,255,255,0.85); }
+.mp-subnav-count { font-size: 11px; color: var(--fg-faint); font-variant-numeric: tabular-nums; }
+
+/* Models pane: main column header + filter + add. */
+.mp-header {
+  display: grid;
+  grid-template-columns: max-content 1fr max-content;
+  gap: 12px;
+  align-items: center;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+}
+.mp-header h1 { font-size: 16px; font-weight: 600; margin: 0; }
+.mp-filter {
+  width: 100%;
+  max-width: 360px;
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--fg);
+  font: inherit; font-size: 12px;
+}
+.mp-filter:focus { outline: none; border-color: var(--border-strong); }
+.mp-header-actions { display: flex; align-items: center; gap: 8px; }
+
+/* "Add a model" inline block in the header (HF URL + Download). */
+.mp-add { display: flex; flex-direction: column; gap: 4px; min-width: 320px; }
+.mp-hf-row { display: flex; gap: 6px; }
+.mp-hf-input {
+  flex: 1;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--fg);
+  font: inherit; font-size: 12px;
+}
+.mp-hf-status { font-size: 11px; color: var(--fg-faint); }
+.mp-hf-progress { display: flex; align-items: center; gap: 6px; }
+.mp-hf-bar { flex: 1; height: 4px; background: var(--bg-sunken); border-radius: 2px; overflow: hidden; }
+.mp-hf-bar-fill { height: 100%; background: var(--accent, #4a9eff); transition: width 200ms; }
+.mp-hf-bar-text { font-size: 10px; color: var(--fg-faint); }
+
+/* Models pane: table. */
+.mp-table {
+  flex: 1;
+  overflow-y: auto;
+  padding: 6px 16px 0;
+}
+.mp-row {
+  appearance: none;
+  width: 100%;
+  display: grid;
+  grid-template-columns: 120px 1fr max-content max-content;
+  gap: 16px;
+  align-items: center;
+  padding: 10px 12px;
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  background: transparent;
+  color: var(--fg);
+  font: inherit; font-size: 13px;
+  cursor: pointer;
+  text-align: left;
+}
+.mp-row:hover { background: var(--bg-sunken); }
+.mp-row.active { background: var(--bg-sunken); border-color: var(--accent, #4a9eff); }
+.mp-row-head {
+  cursor: default;
+  font-size: 11px;
+  color: var(--fg-faint);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  position: sticky;
+  top: 0;
+  background: var(--bg);
+  border-bottom: 1px solid var(--border);
+  z-index: 1;
+}
+.mp-row-head:hover { background: var(--bg); }
+.mp-col-name {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+}
+.mp-col-size { font-variant-numeric: tabular-nums; color: var(--fg-faint); font-size: 12px; }
+.mp-col-source { color: var(--fg-faint); font-size: 12px; }
+
+.mp-kind-chip {
+  display: inline-block;
+  padding: 2px 8px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--fg-faint);
+}
+.mp-kind-chip.mp-kind-chat      { color: #4a9eff; border-color: rgba(74,158,255,0.4); }
+.mp-kind-chip.mp-kind-mmproj    { color: #f0a000; border-color: rgba(240,160,0,0.4); }
+.mp-kind-chip.mp-kind-whisper   { color: #6ab04c; border-color: rgba(106,176,76,0.4); }
+.mp-kind-chip.mp-kind-sd        { color: #c060f0; border-color: rgba(192,96,240,0.4); }
+.mp-kind-chip.mp-kind-embedding { color: #20a0a0; border-color: rgba(32,160,160,0.4); }
+.mp-kind-chip.mp-kind-unknown   { color: var(--fg-faint); }
+
+.mp-empty {
+  padding: 32px 16px;
+  text-align: center;
+  font-size: 12px;
+  color: var(--fg-faint);
+}
+
+.mp-footer {
+  border-top: 1px solid var(--border);
+  padding: 8px 16px;
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 12px;
+  font-size: 11px; color: var(--fg-faint);
+}
+.mp-footer-path {
+  max-width: 50%;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+/* Models pane: detail rail. */
+.mp-detail-empty { font-size: 12px; color: var(--fg-faint); padding: 32px 0; text-align: center; }
+.mp-detail-head { display: flex; align-items: center; margin-bottom: 12px; }
+.mp-detail-name { font-size: 14px; font-weight: 600; margin: 0; word-break: break-all; }
+.mp-detail-actions { display: flex; gap: 6px; margin-bottom: 8px; }
+.mp-detail-actions .btn { flex: 1; }
+.mp-detail-hint {
+  font-size: 11px; color: var(--fg-faint); min-height: 14px; margin-bottom: 12px;
+}
+.mp-detail-hint[data-kind="ok"] { color: #6ab04c; }
+
+.mp-detail-section {
+  font-size: 11px; font-weight: 600; color: var(--fg-faint);
+  text-transform: uppercase; letter-spacing: 0.04em;
+  margin: 16px 0 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+}
+.mp-meta { display: flex; flex-direction: column; gap: 4px; }
+.mp-meta-row {
+  display: grid;
+  grid-template-columns: 120px 1fr;
+  gap: 8px;
+  font-size: 12px;
+}
+.mp-meta-k { color: var(--fg-faint); }
+.mp-meta-v {
+  color: var(--fg);
+  word-break: break-word;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  padding: 2px 6px;
+  background: var(--bg-sunken);
+  border-radius: 3px;
+}
+.mp-source-path { font-size: 11px; word-break: break-all; }
+
+/* Drag-drop highlight on the whole pane. */
+.app-pane[data-pane-view="models"].dragging {
+  outline: 2px dashed var(--accent, #4a9eff);
+  outline-offset: -8px;
+}
+
+/* ============================================================
    Nav rail
    ============================================================ */
 .nav-rail {
@@ -896,6 +1134,50 @@ svg circle, svg rect, svg polygon { fill: none; }
   display: flex; align-items: center; justify-content: space-between;
   margin-bottom: 10px;
 }
+
+/* LMStudio-style accordion sections in the Parameters right-tab. The
+   summary acts as the row that's always visible; clicking expands.
+   Native disclosure triangle is suppressed and replaced with a
+   chevron in the .rt-section-head row that rotates on open. */
+details.rt-collapsible {
+  padding-bottom: 0;
+}
+details.rt-collapsible + .rt-section,
+.rt-section + details.rt-collapsible {
+  border-top: 1px solid var(--border);
+  padding-top: 0;
+}
+details.rt-collapsible > summary {
+  list-style: none;
+  cursor: pointer;
+  padding: 12px 0;
+  margin-bottom: 0;
+  user-select: none;
+  position: relative;
+}
+details.rt-collapsible > summary::-webkit-details-marker { display: none; }
+details.rt-collapsible > summary::marker { display: none; content: ""; }
+details.rt-collapsible > summary::after {
+  content: "";
+  width: 8px; height: 8px;
+  border-right: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+  color: var(--fg-faint);
+  display: inline-block;
+  transform: rotate(-45deg);
+  margin-left: 8px;
+  transition: transform 120ms;
+}
+details.rt-collapsible[open] > summary::after { transform: rotate(45deg); }
+details.rt-collapsible[open] > summary { margin-bottom: 10px; }
+details.rt-collapsible > summary:hover h3 { color: var(--fg); }
+details.rt-collapsible > summary > h3 {
+  flex: 1;
+}
+/* When the section header carries an icon-btn (Reset, Refresh, est),
+   the inline onclick=preventDefault keeps it from toggling the
+   summary; the visual position is between the title and the chevron. */
+details.rt-collapsible > summary > .icon-btn { margin-right: 4px; }
 .rt-section-head h3 {
   margin: 0;
   font-size: 11px;

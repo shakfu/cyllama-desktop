@@ -1,0 +1,56 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Settings — Cyllama Desktop</title>
+    <meta http-equiv="Content-Security-Policy"
+          content="default-src 'self';
+                   connect-src http://127.0.0.1:* ;
+                   img-src 'self' data:;
+                   font-src 'self' data:;
+                   style-src 'self' 'unsafe-inline';
+                   script-src 'self'" />
+    <link rel="stylesheet" href="../renderer/styles.css" />
+    <link rel="stylesheet" href="prefs.css" />
+  </head>
+  <body class="prefs">
+    <div class="prefs-shell">
+      <aside class="prefs-sidebar" role="tablist" aria-label="Settings categories">
+        <header class="prefs-sidebar-head">
+          <h1>Settings</h1>
+        </header>
+        <nav class="prefs-nav">
+          <button class="prefs-nav-item active" role="tab" data-prefs-tab="general">General</button>
+          <button class="prefs-nav-item"        role="tab" data-prefs-tab="models">Models</button>
+          <button class="prefs-nav-item"        role="tab" data-prefs-tab="sidecar">Sidecar</button>
+          <button class="prefs-nav-item"        role="tab" data-prefs-tab="logs">Logs</button>
+        </nav>
+      </aside>
+      <main class="prefs-content">
+        <section class="prefs-pane active" data-prefs-pane="general">
+          <header class="prefs-pane-head"><h2>General</h2></header>
+          <div class="prefs-empty">
+            Theme, default sampling preset, and window behavior settings will land here.
+          </div>
+        </section>
+        <section class="prefs-pane" data-prefs-pane="models" hidden>
+          <header class="prefs-pane-head"><h2>Models</h2></header>
+          <div id="prefsModels"></div>
+        </section>
+        <section class="prefs-pane" data-prefs-pane="sidecar" hidden>
+          <header class="prefs-pane-head"><h2>Sidecar</h2></header>
+          <div id="prefsSidecar"></div>
+        </section>
+        <section class="prefs-pane" data-prefs-pane="logs" hidden>
+          <header class="prefs-pane-head">
+            <h2>Logs</h2>
+            <button class="btn-mini" id="prefsLogsClear">Clear</button>
+          </header>
+          <div class="prefs-logs" id="prefsLogs"></div>
+        </section>
+      </main>
+    </div>
+
+    <script src="dist/preferences.js"></script>
+  </body>
+</html>

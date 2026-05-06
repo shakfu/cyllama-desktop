@@ -291,6 +291,42 @@ function stopSidecar() {
   }, 3000);
 }
 
+// Single-instance Preferences window. Re-focuses the existing window
+// when the user picks Settings... a second time rather than spawning
+// a duplicate. Lives on the same Electron process so the IPC handlers
+// (settings, sidecar, log subscription) are shared with the main
+// renderer.
+let prefsWindow = null;
+function openPreferences() {
+  if (prefsWindow && !prefsWindow.isDestroyed()) {
+    prefsWindow.show();
+    prefsWindow.focus();
+    return;
+  }
+  prefsWindow = new BrowserWindow({
+    width: 720,
+    height: 560,
+    minWidth: 600,
+    minHeight: 400,
+    title: "Settings",
+    parent: mainWindow,
+    modal: false,
+    show: false,
+    webPreferences: {
+      preload: path.join(__dirname, "..", "preferences", "preload.js"),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: false,
+    },
+  });
+  prefsWindow.setMenuBarVisibility(false);
+  prefsWindow.loadFile(path.join(__dirname, "..", "preferences", "index.html"));
+  prefsWindow.once("ready-to-show", () => prefsWindow.show());
+  prefsWindow.on("closed", () => { prefsWindow = null; });
+}
+
+ipcMain.handle("prefs:open", () => openPreferences());
+
 function buildApplicationMenu() {
   // Defining the menu explicitly (using ``app.name`` for the leading
   // submenu label) forces macOS to display "Cyllama Desktop" instead
@@ -303,6 +339,12 @@ function buildApplicationMenu() {
       submenu: [
         { role: "about" },
         { type: "separator" },
+        // macOS standard: ``Settings...`` with ``Cmd+,``. ``role: appMenu``
+        // would handle this if we used it, but our explicit submenu lets
+        // us own the action target. Non-mac platforms get the same item
+        // under the File menu (added below).
+        { label: "Settings...", accelerator: "CommandOrControl+,", click: openPreferences },
+        { type: "separator" },
         { role: "services" },
         { type: "separator" },
         { role: "hide" },
@@ -311,7 +353,14 @@ function buildApplicationMenu() {
         { type: "separator" },
         { role: "quit" },
       ],
-    }] : []),
+    }] : [{
+      label: "File",
+      submenu: [
+        { label: "Settings...", accelerator: "CommandOrControl+,", click: openPreferences },
+        { type: "separator" },
+        { role: "quit" },
+      ],
+    }]),
     {
       label: "Edit",
       submenu: [

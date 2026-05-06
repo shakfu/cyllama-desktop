@@ -6,6 +6,132 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added (system-style Preferences window)
+- **`Settings...` menu item** with the standard `Cmd+,` accelerator,
+  available from the application menu on macOS and the File menu on
+  Windows / Linux. Routes through a new `prefs:open` IPC.
+- **Standalone Preferences `BrowserWindow`** under
+  `src/preferences/{index.html, preload.js, main.js, prefs.css}`,
+  bundled by a second esbuild target appended to `npm run
+  build:renderer`. Single-instance: re-focuses the existing window
+  when the user picks Settings... again. Loads the main renderer's
+  stylesheet for shared `--*` variables + `.btn` / `.btn-mini` /
+  `.mono` so the visual language stays consistent without
+  duplicating CSS.
+- **Scoped preload** exposes only what Preferences needs:
+  `settings.{get,set}`, `getSidecarInfo`, `restartSidecar`,
+  `pickFolder`, `revealItem`, `log.{recent,subscribe}`. The chat
+  IPC (chats / pickModel / pickAudio / pickImage) is deliberately
+  omitted -- the Preferences window has no business with chat
+  state.
+- **Four tabs** in the Preferences sidebar:
+  - **General** placeholder for theme / default sampling preset /
+    window behavior settings (lands here in follow-ups).
+  - **Models** -- model directories editor (was the General right
+    tab's Preferences section). Adds / removes extra read-only
+    scan roots, persists via `settings.set`, restarts the sidecar
+    so the new env splice takes effect.
+  - **Sidecar** -- read-only About (cyllama version + backends) +
+    Paths (models, artifacts, rag, uploads -- each clickable to
+    Reveal in the OS file manager) + Devices + Capabilities.
+  - **Logs** -- live tail of the sidecar stdout/stderr ring
+    buffer, same source as the main window's Console drawer.
+    Lazy-fetches the recent backlog on first click; live updates
+    subscribe at window load so tabs are current the moment they
+    open.
+
+### Changed (right sidebar -> chat-side controls only)
+- **General right-tab removed.** Right sidebar now shows two tabs:
+  Parameters and Agents. The cog nav-rail button is rebranded
+  "Settings (Cmd+,)" and opens the Preferences window via
+  `window.cyllama.openPreferences()`.
+- The `general-tab.js` module is no longer imported / mounted from
+  main.js. The file is retained on disk in case a follow-up wants
+  to re-mount Preferences-shaped controls inline somewhere; the
+  underlying `<userData>/settings.json` schema is unchanged.
+- Two Playwright specs updated: "right-sidebar tabs are Parameters
+  + Agents only" replaces the old General right-tab smoke; "cog
+  nav-rail opens the Preferences window" exercises the second
+  BrowserWindow end-to-end via Playwright's `electron.waitForEvent
+  ("window")`, asserting all four category tabs render with
+  General as the default-active.
+
+### Changed (Models promoted to a full-area pane)
+- **`.app[data-pane]` mode** introduced. Default `"chats"` keeps the
+  original `nav-rail | sidebar | main | params-panel` grid; switching
+  to `"models"` hides those children and renders a full-area pane
+  spanning grid columns `2 / -1`. `data-pane-jump="<name>"` on
+  nav-rail buttons drives the switch; `setPane()` mirrors
+  `setSidebarView()` for the new layout mode. Other sidebar-views
+  (Documents, Transcribe, Image, Server, Batch) are still
+  sidebar-view-shaped today; promoting them to full panes is one
+  CSS rule + one button-attribute change away.
+- **New Models pane** (`features/models-pane.js`) replaces the
+  Models *sidebar-view*. Three columns:
+  1. **Subnav** -- kind-filtered category list (View All / Chat /
+     Multimodal / Whisper / SD / Embedding / Unknown), each with a
+     count, empty buckets hidden.
+  2. **Main** -- header with filter input + an "Add a model"
+     inline block (HF URL → Download with peek + progress bar);
+     table with kind / name / size / source columns, sticky
+     header, click-to-select rows; footer with total count + disk
+     usage + revealable models-dir path.
+  3. **Detail rail** -- "Use in Chat" + "Set as mmproj" actions,
+     structured Model Information populated from
+     `/models/inspect` (Arch / Quantization / Parameters / Context
+     / Name), Source File path with Reveal button.
+- **Drag-drop import** rebound to the pane root: drop a `.gguf`
+  anywhere on the Models pane and it copies into MODELS_DIR via
+  `/models/import`.
+- The right-tab "Models" sidebar-view (one-column accordion)
+  introduced in the previous IA change is gone; that role is fully
+  served by the full-area pane now.
+- Two Playwright specs added: full-area layout shows subnav +
+  table + detail rail with the chat children hidden; switching
+  back to Chats restores composer + send.
+- **Regression to track**: the quantize tool from the old
+  right-sidebar Models tab isn't reattached to the new Models pane
+  yet. The `/jobs/models/quantize` endpoint is unchanged and the
+  Tools UI from `models-tab.js` lives on for reference; needs a
+  small re-mount as a Tools subsection (or a per-row "Quantize..."
+  action in the detail rail). Logged in TODO.md.
+
+### Changed (right-tab IA: LMStudio-style "Parameters")
+- **Right-sidebar tab renamed Models → Parameters.** The
+  `data-tab="models"` identifier stays for back-compat (router +
+  Playwright `openRightTab` keep working), only the visible label
+  changes. The tab is now strictly *per-chat session
+  configuration*, no model-management content.
+- **Sections restructured as collapsibles** (LMStudio order):
+  Preset (presets bar promoted to its own section at the top),
+  System Prompt (open), Sampling (open) -- now without the
+  "Advanced" disclosure -- Structured Output (Grammar GBNF + From
+  JSON Schema; was nested under Sampling Advanced), Speculative
+  Decoding (was under Advanced), N-gram Cache (was under
+  Advanced), Settings (renamed from Hardware), Retrieval. Each
+  collapsible is a native `<details>` with a custom rotating
+  chevron and click-blocked icon-btn affordances (Reset / Refresh
+  / est) so toolbar interactions don't accidentally toggle the
+  fold.
+- **Model picker / HF download / metadata inspector / quantize /
+  mmproj projector pin moved out of the right tab** into a new
+  **Models** left-nav-rail sidebar-view. `#modelsTabHost` →
+  `#modelsPaneHost`. `models-tab.js` retained as the
+  implementation; it just mounts into a different container now.
+  The sidebar-view's `onShow` hook re-runs `models-tab.refresh()`
+  so a freshly downloaded / quantized / dropped GGUF surfaces
+  without manual reload.
+- The existing presets module's mount target switched from the
+  Sampling section to the new Preset section, with a fallback to
+  Sampling so a future layout change can drop the dedicated
+  header without breaking the bar.
+- Two Playwright specs updated: the "Models right-tab" test
+  becomes "Parameters right-tab renders LMStudio-style sections"
+  (asserts the open-by-default System Prompt + Sampling and the
+  collapsed-by-default Speculative). New "Models sidebar-view
+  absorbs the model picker + tools" spec covers the new left-nav
+  destination.
+
 ### Added (extra read-only model directories)
 - **Preferences -> Model directories** in the General tab. The
   primary `<userData>/models/` (read-only label "primary") plus any

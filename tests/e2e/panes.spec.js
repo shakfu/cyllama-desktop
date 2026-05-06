@@ -111,17 +111,59 @@ test("Batch pane renders prompts textarea + import + run", async () => {
   await expect(window.locator("#bt-run")).toBeVisible();
 });
 
-test("Models right-tab loads the cached models slot", async () => {
+test("Parameters right-tab renders LMStudio-style sections", async () => {
   ctx = await launchApp();
   const { window } = ctx;
+  // Tab label is "Parameters" now; the data-tab="models" identifier
+  // stays for backwards-compatibility with the persisted JS, hence
+  // openRightTab(window, "models") still hits this pane.
+  await expect(window.locator('.rt-tab[data-tab="models"]')).toContainText("Parameters");
   await openRightTab(window, "models");
-  // The static System Prompt + Sampling sections live next to the
-  // dynamic models slot; the slot itself should populate from the
-  // sidecar's empty cached list.
-  await expect(window.locator("#modelsTabHost")).toBeVisible();
-  // System-prompt textarea is part of this tab and one of the
-  // chat-side bindings depends on it; assert it surfaced.
+  // System Prompt + Sampling stay open by default; the rest are
+  // collapsed. Asserting on a known-open one and a known-closed
+  // one keeps the test pinned to the LMStudio-style accordion IA.
   await expect(window.locator("#p-system_prompt")).toBeVisible();
+  await expect(window.locator("#p-temperature")).toBeVisible();
+  // Speculative section is collapsed; its draft-model picker is
+  // inside <details> so it shouldn't be in the accessibility tree
+  // until the user expands.
+  await expect(window.locator("#p-spec_draft_model")).toBeHidden();
+});
+
+test("Models pane: full-area layout with subnav + table + detail", async () => {
+  ctx = await launchApp();
+  const { window } = ctx;
+  // Click the Models nav-rail button to switch panes.
+  await window.click('.nav-btn[data-pane-jump="models"]');
+  // .app picks up the pane mode; chat layout is hidden, Models pane
+  // takes the work area.
+  await expect(window.locator("#app")).toHaveAttribute("data-pane", "models");
+  await expect(window.locator("#modelsPane")).toBeVisible();
+  // The chat children should be display:none under data-pane="models".
+  await expect(window.locator(".main-col")).toBeHidden();
+  await expect(window.locator(".params-panel")).toBeHidden();
+  // 3-column layout: subnav + main + detail rail.
+  await expect(window.locator("#modelsPaneSubnav")).toBeVisible();
+  await expect(window.locator("#modelsPaneMain")).toBeVisible();
+  await expect(window.locator("#modelsPaneDetail")).toBeVisible();
+  // Subnav category list is populated.
+  await expect(window.locator(".mp-subnav-row").first()).toContainText(/View All/i);
+  // Detail rail is empty (no model selected).
+  await expect(window.locator("#modelsPaneDetail")).toContainText(/Select a model/i);
+});
+
+test("Models pane: switching back to Chats restores the chat layout", async () => {
+  ctx = await launchApp();
+  const { window } = ctx;
+  await window.click('.nav-btn[data-pane-jump="models"]');
+  await expect(window.locator("#app")).toHaveAttribute("data-pane", "models");
+  await window.click('.nav-btn[data-pane-jump="chats"]');
+  await expect(window.locator("#app")).toHaveAttribute("data-pane", "chats");
+  // Chat composer + send button reappear.
+  await expect(window.locator("#prompt")).toBeVisible();
+  await expect(window.locator("#send")).toBeVisible();
+  // Models pane hidden again.
+  await expect(window.locator("#modelsPane")).toBeHidden();
 });
 
 test("Agents right-tab renders the Run section", async () => {
@@ -134,14 +176,32 @@ test("Agents right-tab renders the Run section", async () => {
   await expect(window.locator("#ag-run")).toBeVisible();
 });
 
-test("General right-tab shows About + Devices", async () => {
+test("right-sidebar tabs are Parameters + Agents only", async () => {
   ctx = await launchApp();
   const { window } = ctx;
-  await openRightTab(window, "general");
-  await expect(window.locator("#generalTabHost")).toContainText(/About/i, { timeout: 10_000 });
-  await expect(window.locator("#generalTabHost")).toContainText(/Devices/i);
-  // cyllama version shows "0.0.0-test" because conftest's stub sets
-  // ``__version__`` to that. Doubles as a check that /info is being
-  // consumed end-to-end through the bridge.
-  await expect(window.locator("[data-bind='version']")).toContainText("0.0.0-test");
+  // The General tab moved to the standalone Preferences window
+  // (Cmd+, / cog nav-rail). Right sidebar should show only the two
+  // chat-side tabs now.
+  const tabs = window.locator(".rt-tab");
+  await expect(tabs).toHaveCount(2);
+  await expect(tabs.nth(0)).toContainText("Parameters");
+  await expect(tabs.nth(1)).toContainText("Agents");
+  await expect(window.locator('[data-tab="general"]')).toHaveCount(0);
+});
+
+test("cog nav-rail opens the Preferences window", async () => {
+  ctx = await launchApp();
+  const { window, electron } = ctx;
+  // Click the cog and wait for the IPC to spawn the second
+  // BrowserWindow. Playwright's _electron API exposes the new
+  // window via the ``window`` event.
+  const newWindowP = electron.waitForEvent("window", { timeout: 5_000 });
+  await window.click("#navPrefs");
+  const prefs = await newWindowP;
+  await prefs.waitForLoadState("domcontentloaded");
+  // Sidebar carries the four category tabs; default-selected is
+  // General. The presence of all four data-prefs-tab buttons is the
+  // load-bearing check.
+  await expect(prefs.locator(".prefs-nav-item")).toHaveCount(4);
+  await expect(prefs.locator(".prefs-nav-item.active")).toContainText("General");
 });

@@ -11,9 +11,14 @@ import * as cyllamaJobs from "./lib/jobs.js";
 import * as cyllamaModels from "./lib/models.js";
 import * as cyllamaRag from "./lib/rag.js";
 import * as rightTabs from "./features/right-tabs.js";
-import * as modelsTab from "./features/models-tab.js";
+// modelsTab (the right-tab implementation) is superseded by
+// models-pane.js (the full-area pane). The file lives on temporarily
+// for the quantize / multimodal-projector-pin tools that still need
+// to be migrated; nothing imports it from main.js any more.
 import * as agentsTab from "./features/agents-tab.js";
-import * as generalTab from "./features/general-tab.js";
+// general-tab.js superseded by the Preferences window. Module
+// retained for now in case a follow-up wants to mount Preferences-
+// shaped controls inline somewhere.
 import * as modelPicker from "./features/model-picker.js";
 import * as presets from "./features/presets.js";
 import * as documentsDialog from "./features/documents-pane.js";
@@ -21,6 +26,7 @@ import * as transcribePane from "./features/transcribe-pane.js";
 import * as imagePane from "./features/image-pane.js";
 import * as serverPane from "./features/server-pane.js";
 import * as batchPane from "./features/batch-pane.js";
+import * as modelsPane from "./features/models-pane.js";
 
 // Expose the libs on a single namespace so feature modules added later --
 // or ad-hoc devtools sessions -- can reach them without re-importing.
@@ -76,6 +82,38 @@ const statusDot   = document.querySelector(".status-dot");
 const statusText  = document.querySelector(".status-text");
 const toggleLeft  = document.getElementById("toggleLeft");
 const toggleRight = document.getElementById("toggleRight");
+
+// Pane switcher: nav-rail buttons tagged ``data-pane-jump`` swap the
+// entire work-area layout. Default ``chats`` keeps the original
+// sidebar | conversation | params-panel grid; other panes (Models
+// today; Documents / Image / etc. eligible for promotion later) hide
+// those children and render a full-area pane in their place.
+const PANE_HOOKS = {
+  models: {
+    onShow: () => modelsPane.show && modelsPane.show(),
+    onHide: () => modelsPane.hide && modelsPane.hide(),
+  },
+};
+let activePane = "chats";
+function setPane(name) {
+  if (!name || name === activePane) return;
+  const prev = PANE_HOOKS[activePane];
+  if (prev?.onHide) try { prev.onHide(); } catch (e) { console.error(e); }
+  activePane = name;
+  appEl.dataset.pane = name;
+  for (const b of document.querySelectorAll(".nav-btn[data-pane-jump]")) {
+    b.classList.toggle("active", b.dataset.paneJump === name);
+  }
+  // Show / hide the matching pane element so the grid can clean up.
+  for (const p of document.querySelectorAll(".app-pane")) {
+    p.hidden = p.dataset.paneView !== name;
+  }
+  const next = PANE_HOOKS[name];
+  if (next?.onShow) try { next.onShow(); } catch (e) { console.error(e); }
+}
+for (const b of document.querySelectorAll(".nav-btn[data-pane-jump]")) {
+  b.addEventListener("click", () => setPane(b.dataset.paneJump));
+}
 
 let sidecar = null;
 let modelPath = "";
@@ -1511,12 +1549,18 @@ async function init() {
   // Right-sidebar tabs: Models | Agents | General. Cog nav-rail button
   // jumps to General via the tab router's data-tab-jump wiring.
   rightTabs.bind();
-  modelsTab.mount({
+  modelsPane.mount({
     onPick: (p) => { if (p) setModel(p); },
     reveal: (p) => window.cyllama.revealItem && window.cyllama.revealItem(p),
   });
   agentsTab.mount();
-  generalTab.mount();
+  // Cog nav-rail button opens the Preferences window instead of
+  // jumping to the (now-removed) General right-tab. Cmd+, also
+  // works via the application menu.
+  const navPrefs = document.getElementById("navPrefs");
+  if (navPrefs && window.cyllama && typeof window.cyllama.openPreferences === "function") {
+    navPrefs.addEventListener("click", () => window.cyllama.openPreferences());
+  }
   // Presets bar lives at the top of the Sampling section. Bridge gives
   // it access to the existing #p-* inputs and helpers without coupling.
   presets.mount({

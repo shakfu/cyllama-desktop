@@ -79,7 +79,10 @@ or move them to `CHANGELOG.md` under `[Unreleased]`.
       (Phase 1).
 - [x] Per-model GGUF metadata side panel (Phase 1).
 - [x] Quantize tool: source picker + ftype dropdown + dest filename
-      (Phase 9).
+      (Phase 9). The endpoint is shipped; the UI surface needs to
+      be re-attached to the new full-area Models pane (the old
+      right-sidebar Models tab implementation lives in
+      models-tab.js but is no longer mounted).
 - [x] Eject releases the `LLM` and frees GPU memory via `/unload`.
 - [ ] HF browse / search inside the app (currently URL-paste only).
       Needs HF API surface + rate-limit handling.

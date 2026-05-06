@@ -10,6 +10,7 @@ contextBridge.exposeInMainWorld("cyllama", {
     set: (patch) => ipcRenderer.invoke("settings:set", patch),
   },
   restartSidecar: () => ipcRenderer.invoke("sidecar:restart"),
+  openPreferences: () => ipcRenderer.invoke("prefs:open"),
   fileExists: (path) => ipcRenderer.invoke("fs:exists", path),
   revealItem: (path) => ipcRenderer.invoke("shell:revealItem", path),
   chats: {
