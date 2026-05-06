@@ -59,6 +59,12 @@ _ALLOWED_PARAMS = {
     "split_mode":        int,
     "n_ctx":             int,
     "n_batch":           int,
+    # Phase 2 grammar / GBNF. Passed as a raw GBNF string. Forward-
+    # looking: cyllama 0.2.15's GenerationConfig doesn't accept it, so
+    # the _GC_ACCEPTED gate drops it on the floor for now and the UI
+    # hides the row. When cyllama exposes the field this becomes live
+    # without further changes.
+    "grammar":           str,
 }
 
 # Fields whose value affects model construction (and therefore VRAM
@@ -108,6 +114,68 @@ def _supported_gc_params() -> set[str]:
 
 _GC_ACCEPTED: set[str] = _supported_gc_params()
 _SUPPORTED_PARAMS: list[str] = sorted(set(_ALLOWED_PARAMS) & _GC_ACCEPTED) + ["stop_sequences"]
+
+
+def _resolve_attr(paths: tuple[tuple[str, str], ...]):
+    """Walk ``(module, attr)`` pairs, return the first attribute that imports.
+
+    Used for the Phase 2 capability probes -- ``Speculative``, ``NgramCache``,
+    ``json_schema_to_grammar`` live at different paths across cyllama
+    versions, and the renderer needs to know which are present so it can
+    hide rows whose backing API isn't available.
+    """
+    for mod_name, attr in paths:
+        try:
+            mod = importlib.import_module(mod_name)
+        except Exception:
+            continue
+        obj = getattr(mod, attr, None)
+        if obj is not None:
+            return obj
+    return None
+
+
+_JSON_SCHEMA_TO_GRAMMAR = _resolve_attr((
+    ("cyllama.utils.json_schema_to_grammar", "json_schema_to_grammar"),
+    ("cyllama.utils", "json_schema_to_grammar"),
+    ("cyllama", "json_schema_to_grammar"),
+))
+_SPECULATIVE_CLS = _resolve_attr((
+    ("cyllama.llama.llama_cpp", "Speculative"),
+    ("cyllama", "Speculative"),
+))
+_SPECULATIVE_PARAMS_CLS = _resolve_attr((
+    ("cyllama.llama.llama_cpp", "SpeculativeParams"),
+    ("cyllama", "SpeculativeParams"),
+))
+_NGRAM_CACHE_CLS = _resolve_attr((
+    ("cyllama.llama.llama_cpp", "NgramCache"),
+    ("cyllama", "NgramCache"),
+))
+
+
+# Capability flags surfaced via /info. ``grammar`` reflects whether
+# GenerationConfig actually accepts a ``grammar`` field AND whether the
+# json-schema helper is present -- the UI uses the former to decide
+# whether grammar-constrained chat is functional, and the latter to
+# enable "From JSON Schema" generation. ``speculative`` / ``ngram``
+# are end-to-end: both the helper class and the GC field have to exist
+# for the chat path to actually use them. Until cyllama threads these
+# through ``LLM.chat()``, the flags are False even when the classes
+# exist, which is correct -- the UI hides rows that wouldn't take effect.
+_FEATURE_FLAGS: dict[str, bool] = {
+    "grammar": ("grammar" in _GC_ACCEPTED),
+    "json_schema_to_grammar": _JSON_SCHEMA_TO_GRAMMAR is not None,
+    "speculative": (
+        _SPECULATIVE_CLS is not None
+        and _SPECULATIVE_PARAMS_CLS is not None
+        and "speculative" in _GC_ACCEPTED
+    ),
+    "ngram": (
+        _NGRAM_CACHE_CLS is not None
+        and "ngram" in _GC_ACCEPTED
+    ),
+}
 # stop_sequences is whitelisted via _coerce_stop_sequences rather than
 # _ALLOWED_PARAMS, so it's appended explicitly. Renderer uses this list
 # to decide which UI rows to show.
@@ -165,7 +233,50 @@ def _build_config(params: dict | None) -> GenerationConfig | None:
     if ts is not None and "tensor_split" in _GC_ACCEPTED:
         kwargs["tensor_split"] = ts
 
+    # Phase 2 advanced fields. Each only flows into ``GenerationConfig``
+    # when the installed cyllama actually accepts the matching kwarg --
+    # otherwise the wire field is silently dropped, which keeps the UI
+    # forward-compatible without crashing on older builds.
+    spec = _coerce_speculative(params.get("speculative"))
+    if spec is not None and "speculative" in _GC_ACCEPTED:
+        kwargs["speculative"] = spec
+
+    ngram = params.get("ngram")
+    if ngram is not None and "ngram" in _GC_ACCEPTED:
+        # Accept either a bool toggle or a dict of helper kwargs. The
+        # caster is intentionally lax: cyllama hasn't pinned the shape
+        # of this field yet, so we pass through whatever the renderer
+        # sent rather than guessing.
+        kwargs["ngram"] = bool(ngram) if isinstance(ngram, bool) else ngram
+
     return GenerationConfig(**kwargs) if kwargs else None
+
+
+def _coerce_speculative(v):
+    """Convert a renderer ``speculative`` dict into a ``SpeculativeParams``.
+
+    Body shape (renderer): ``{draft_model_path?, n_max?, n_min?,
+    p_split?, p_min?}``. Returns the constructed params object, or a
+    dict (passed through unchanged) if the helper class isn't present in
+    this cyllama. Returns ``None`` if the input is empty / unusable.
+    """
+    if not v or not isinstance(v, dict):
+        return None
+    # Drop the draft-model field before constructing -- it isn't part of
+    # the params class. The chat path would consume it separately when
+    # cyllama wires speculative through ``LLM.chat()``.
+    fields = {k: v[k] for k in ("n_max", "n_min", "p_split", "p_min") if k in v}
+    if _SPECULATIVE_PARAMS_CLS is None:
+        return fields or None
+    try:
+        kwargs = {}
+        if "n_max" in fields: kwargs["n_max"] = int(fields["n_max"])
+        if "n_min" in fields: kwargs["n_min"] = int(fields["n_min"])
+        if "p_split" in fields: kwargs["p_split"] = float(fields["p_split"])
+        if "p_min" in fields: kwargs["p_min"] = float(fields["p_min"])
+        return _SPECULATIVE_PARAMS_CLS(**kwargs) if kwargs else _SPECULATIVE_PARAMS_CLS()
+    except (TypeError, ValueError):
+        return None
 
 
 def _hw_signature(params: dict | None) -> tuple:
@@ -347,7 +458,46 @@ _INFO_CACHE: dict = {
     # installed cyllama actually accepts. Renderer hides UI rows whose
     # key is not in this list. Probed once at module load.
     "supported_params": _SUPPORTED_PARAMS,
+    # Phase 2 capability flags. Renderer hides UI rows whose backing
+    # cyllama API isn't present in this build. ``grammar`` /
+    # ``speculative`` / ``ngram`` reflect end-to-end usability; the
+    # ``json_schema_to_grammar`` flag is independent (the helper can
+    # produce GBNF text even if chat can't apply it yet).
+    "features": dict(_FEATURE_FLAGS),
 }
+
+
+@app.post("/grammar/from-schema")
+async def grammar_from_schema(req: Request):
+    """Convert a JSON schema to a GBNF grammar string.
+
+    Body: ``{"schema": <object|string>, "force_gbnf"?: bool}``. ``schema``
+    is either a parsed object or a JSON-encoded string. Returns
+    ``{grammar: "..."}``. 501 if the helper is missing in this cyllama.
+    """
+    if _JSON_SCHEMA_TO_GRAMMAR is None:
+        raise HTTPException(501, "json_schema_to_grammar not available in this cyllama")
+    body = await req.json()
+    schema = body.get("schema")
+    if isinstance(schema, str):
+        try:
+            schema = json.loads(schema)
+        except ValueError as exc:
+            raise HTTPException(400, f"schema is not valid JSON: {exc}")
+    if not isinstance(schema, dict):
+        raise HTTPException(400, "schema must be a JSON object")
+    force_gbnf = bool(body.get("force_gbnf", False))
+    try:
+        grammar = _JSON_SCHEMA_TO_GRAMMAR(schema, force_gbnf=force_gbnf)
+    except TypeError:
+        # Older signatures may not accept the kwarg.
+        try:
+            grammar = _JSON_SCHEMA_TO_GRAMMAR(schema)
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(400, f"schema rejected: {exc}")
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(400, f"schema rejected: {exc}")
+    return {"grammar": grammar}
 
 
 @app.get("/info")

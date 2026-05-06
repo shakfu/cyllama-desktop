@@ -905,6 +905,47 @@ svg circle, svg rect, svg polygon { fill: none; }
   color: var(--fg-faint);
 }
 
+/* Advanced disclosure inside a rt-section. <details> body inherits the
+   .param spacing so rows look identical to the rest of Sampling. */
+.rt-advanced {
+  margin-top: 10px;
+  border-top: 1px dashed var(--border);
+  padding-top: 8px;
+}
+.rt-advanced > summary {
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--fg-faint);
+  padding: 4px 0 8px;
+  user-select: none;
+}
+.rt-advanced > summary:hover { color: var(--fg); }
+.rt-advanced textarea {
+  width: 100%;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  resize: vertical;
+}
+.rt-advanced .check-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+}
+.rt-advanced .check-row input { margin: 0; }
+.link-btn {
+  background: transparent;
+  border: 0;
+  color: var(--accent, #4a9eff);
+  font-size: 11px;
+  cursor: pointer;
+  padding: 0;
+}
+.link-btn:hover { text-decoration: underline; }
+
 .rt-placeholder {
   font-size: 12px;
   color: var(--fg-faint);

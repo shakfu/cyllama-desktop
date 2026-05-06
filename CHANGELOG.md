@@ -6,6 +6,42 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added (Phase 2 - chat parity with cyllama sampler surface)
+- **`POST /grammar/from-schema`** wraps
+  `cyllama.utils.json_schema_to_grammar.json_schema_to_grammar`. Accepts
+  either a parsed object or a JSON-encoded string in `schema`;
+  optional `force_gbnf` flag. Returns `{grammar: "..."}`. 501 when the
+  helper is missing, 400 on bad JSON / non-object / helper rejection.
+- **`/info.features`** capability flags: `grammar`,
+  `json_schema_to_grammar`, `speculative`, `ngram`. Reflect end-to-end
+  usability — `grammar` requires both the helper *and* a matching
+  `GenerationConfig` field; `speculative` and `ngram` require both
+  helper class and matching GC field. The renderer hides Advanced
+  rows whose flag is false. `json_schema_to_grammar` is independent
+  so the Grammar field stays usable for copy/paste GBNF generation
+  even when chat-side grammar isn't wired yet.
+- **Advanced disclosure** in the Sampling section: collapsed
+  `<details>` block with Grammar (GBNF textarea + "From JSON
+  Schema..." button), Speculative decoding (draft-model picker reusing
+  cached models, `n_max` / `n_min` / `p_split` / `p_min`), and an
+  n-gram cache toggle. Sub-rows that depend on a draft-model
+  selection (`data-spec-only`) collapse when no draft model is set.
+- **`params.grammar` / `params.speculative` / `params.ngram`** wire
+  shape on `/chat`. `_build_config` threads them into
+  `GenerationConfig` only when the installed cyllama accepts the
+  matching kwargs (same `_GC_ACCEPTED` gate as existing fields).
+  `_coerce_speculative` builds a `SpeculativeParams` when the class
+  is available, otherwise passes the raw dict through.
+  `draft_model_path` is a chat-time parameter, stripped before params
+  construction.
+- Capability probes (`_resolve_attr`) walk known cross-version paths
+  for `Speculative`, `SpeculativeParams`, `NgramCache`, and
+  `json_schema_to_grammar` so the sidecar can advertise capabilities
+  without crashing on older cyllama builds.
+- Tests in `tests/test_phase2.py` cover the grammar endpoint, info
+  features, chat tolerating new params without 500, and
+  `_build_config` dropping `grammar` when unsupported.
+
 ### Added (Phase 4 - RAG, slice 4d: chat integration)
 - **`POST /rag/retrieve`** — retrieve-only endpoint. Body
   `{collection_id, query, top_k?, similarity_threshold?}`, returns

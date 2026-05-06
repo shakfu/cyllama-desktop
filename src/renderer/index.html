@@ -252,6 +252,57 @@
                   <div class="param-hint">Generation halts when any sequence appears.</div>
                 </div>
               </div>
+
+              <details class="rt-advanced" id="samplingAdvanced">
+                <summary>Advanced</summary>
+
+                <div class="param" data-feature="grammar">
+                  <label for="p-grammar">
+                    <span>Grammar (GBNF)</span>
+                    <button type="button" class="link-btn" id="grammarFromSchemaBtn"
+                            title="Generate GBNF from a JSON schema">From JSON Schema...</button>
+                  </label>
+                  <textarea id="p-grammar" rows="4" placeholder="root ::= ..." spellcheck="false"></textarea>
+                  <div class="param-hint">Constrain output to this grammar. Empty = unconstrained.</div>
+                </div>
+
+                <div class="param" data-feature="speculative">
+                  <label for="p-spec_draft_model"><span>Speculative draft model</span></label>
+                  <select id="p-spec_draft_model" class="dp-select">
+                    <option value="">— off —</option>
+                  </select>
+                  <div class="param-hint">A small fast model proposes tokens; the main model verifies.</div>
+                </div>
+                <div class="param" data-feature="speculative" data-spec-only>
+                  <label for="p-spec_n_max"><span>Draft n_max</span><output id="p-spec_n_max-out">16</output></label>
+                  <input id="p-spec_n_max" type="range" min="1" max="64" step="1" value="16" />
+                  <div class="param-hint">Max tokens drafted per step.</div>
+                </div>
+                <div class="param" data-feature="speculative" data-spec-only>
+                  <label for="p-spec_n_min"><span>Draft n_min</span><output id="p-spec_n_min-out">0</output></label>
+                  <input id="p-spec_n_min" type="range" min="0" max="32" step="1" value="0" />
+                </div>
+                <div class="param" data-feature="speculative" data-spec-only>
+                  <label for="p-spec_p_split"><span>Split prob</span><output id="p-spec_p_split-out">0.10</output></label>
+                  <input id="p-spec_p_split" type="range" min="0" max="1" step="0.01" value="0.1" />
+                </div>
+                <div class="param" data-feature="speculative" data-spec-only>
+                  <label for="p-spec_p_min"><span>Min accept prob</span><output id="p-spec_p_min-out">0.75</output></label>
+                  <input id="p-spec_p_min" type="range" min="0" max="1" step="0.01" value="0.75" />
+                </div>
+
+                <div class="param" data-feature="ngram">
+                  <label for="p-ngram_enabled" class="check-row">
+                    <input id="p-ngram_enabled" type="checkbox" />
+                    <span>Enable n-gram cache</span>
+                  </label>
+                  <div class="param-hint">Speeds up repetitive completions by drafting from prior text.</div>
+                </div>
+
+                <div class="param" id="advUnavailableNote" hidden>
+                  <div class="param-hint">No advanced features available in this cyllama build.</div>
+                </div>
+              </details>
             </div>
 
             <div class="rt-section">

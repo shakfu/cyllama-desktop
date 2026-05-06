@@ -327,6 +327,14 @@ def _fake_load_directory(path, glob: str = "**/*", **kwargs):  # noqa: ARG001
     return out
 
 
+def _fake_json_schema_to_grammar(schema, force_gbnf: bool = False):  # noqa: ARG001
+    # Just enough to assert the wire shape end-to-end. Doesn't pretend
+    # to produce a real GBNF for arbitrary schemas.
+    if not isinstance(schema, dict):
+        raise ValueError("schema must be a dict")
+    return f'root ::= "stub" # keys={sorted(schema.keys())}\n'
+
+
 def _install_cyllama_stub() -> None:
     if "cyllama" in sys.modules:
         return
@@ -337,6 +345,17 @@ def _install_cyllama_stub() -> None:
     mod._backend = _FakeBackend
     mod.GGUFContext = _FakeGGUFContext
     sys.modules["cyllama"] = mod
+
+    # cyllama.utils.json_schema_to_grammar -- the sidecar resolves this
+    # via importlib.import_module so it has to exist as a real module
+    # entry, not just an attribute on the package.
+    utils = types.ModuleType("cyllama.utils")
+    js2g = types.ModuleType("cyllama.utils.json_schema_to_grammar")
+    js2g.json_schema_to_grammar = _fake_json_schema_to_grammar
+    utils.json_schema_to_grammar = _fake_json_schema_to_grammar
+    sys.modules["cyllama.utils"] = utils
+    sys.modules["cyllama.utils.json_schema_to_grammar"] = js2g
+    mod.utils = utils
 
     rag = types.ModuleType("cyllama.rag")
     rag.Document = _FakeDocument

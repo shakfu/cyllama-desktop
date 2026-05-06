@@ -589,13 +589,33 @@ const PARAM_DEFAULTS = {
   main_gpu:          0,
   split_mode:        1,
   tensor_split:      "",   // CSV; parsed to list[float] server-side
+  // Phase 2 advanced. Grammar is raw GBNF text; speculative + ngram
+  // are sent through ``params.speculative`` / ``params.ngram`` in
+  // ``getCurrentParams`` rather than as flat keys, but the source-of-
+  // truth values are kept here so the same persist / reset path covers
+  // them. Speculative is "off" until a draft model is picked.
+  grammar:           "",
+  spec_draft_model:  "",
+  spec_n_max:        16,
+  spec_n_min:        0,
+  spec_p_split:      0.1,
+  spec_p_min:        0.75,
+  ngram_enabled:     false,
 };
 const PARAM_KEYS = Object.keys(PARAM_DEFAULTS);
 const PARAM_INT_KEYS = new Set([
   "top_k", "max_tokens", "seed", "mirostat",
   "n_gpu_layers", "n_ctx", "n_batch", "main_gpu", "split_mode",
+  "spec_n_max", "spec_n_min",
 ]);
 const PARAM_CSV_KEYS = new Set(["stop_sequences", "tensor_split"]);
+// Free-form text fields that bypass numeric coercion entirely (grammar
+// is multi-line GBNF; spec_draft_model is a path). Listed here so
+// ``getCurrentParams`` doesn't drop them via ``Number(raw)`` checks.
+const PARAM_TEXT_KEYS = new Set(["grammar", "spec_draft_model"]);
+// Boolean checkbox-backed fields. Persisted as "0"/"1" strings via
+// localStorage and round-tripped to bool at send time.
+const PARAM_BOOL_KEYS = new Set(["ngram_enabled"]);
 
 // Default system prompt used when a brand-new chat starts. Per-chat
 // overrides live inside the chat's JSON file; this localStorage key
@@ -610,6 +630,8 @@ function paramOut(key) { return document.getElementById(`p-${key}-out`); }
 function formatParamValue(key, value) {
   if (PARAM_INT_KEYS.has(key)) return String(value);
   if (PARAM_CSV_KEYS.has(key)) return String(value);
+  if (PARAM_TEXT_KEYS.has(key)) return String(value ?? "");
+  if (PARAM_BOOL_KEYS.has(key)) return value ? "1" : "0";
   // Float: 2 decimals is enough for the UI display.
   const n = Number(value);
   return Number.isFinite(n) ? n.toFixed(2) : String(value);
@@ -622,9 +644,13 @@ function loadParams() {
     const el = paramEl(key);
     if (!el) continue;
     const v = saved[key] ?? PARAM_DEFAULTS[key];
-    el.value = String(v);
+    if (PARAM_BOOL_KEYS.has(key)) {
+      el.checked = (v === true || v === "1" || v === 1);
+    } else {
+      el.value = String(v ?? "");
+    }
     const out = paramOut(key);
-    if (out) out.textContent = formatParamValue(key, v);
+    if (out) out.textContent = formatParamValue(key, PARAM_BOOL_KEYS.has(key) ? el.checked : v);
   }
 }
 
@@ -633,16 +659,28 @@ function saveParams() {
   for (const key of PARAM_KEYS) {
     const el = paramEl(key);
     if (!el) continue;
-    out[key] = el.value;
+    out[key] = PARAM_BOOL_KEYS.has(key) ? (el.checked ? "1" : "0") : el.value;
   }
   try { localStorage.setItem("params", JSON.stringify(out)); } catch {}
 }
 
 function getCurrentParams() {
   const out = {};
+  // Speculative is collected separately into a nested object since the
+  // sidecar accepts ``params.speculative = {n_max, n_min, p_split, p_min,
+  // draft_model_path}`` rather than flat keys.
+  const spec = {};
   for (const key of PARAM_KEYS) {
     const el = paramEl(key);
     if (!el) continue;
+    if (PARAM_BOOL_KEYS.has(key)) {
+      // Only emit when checked; sidecar treats missing-key as "off".
+      if (el.checked) {
+        if (key === "ngram_enabled") out.ngram = true;
+        else out[key] = true;
+      }
+      continue;
+    }
     const raw = el.value;
     if (raw === "" || raw == null) continue;     // omit blank seed etc.
     if (PARAM_CSV_KEYS.has(key)) {
@@ -650,10 +688,26 @@ function getCurrentParams() {
       if (list.length) out[key] = list;
       continue;
     }
+    if (PARAM_TEXT_KEYS.has(key)) {
+      const trimmed = raw.trim();
+      if (!trimmed) continue;
+      if (key === "spec_draft_model") spec.draft_model_path = trimmed;
+      else out[key] = trimmed;
+      continue;
+    }
+    if (key.startsWith("spec_") && key !== "spec_draft_model") {
+      const n = Number(raw);
+      if (!Number.isFinite(n)) continue;
+      spec[key.slice(5)] = PARAM_INT_KEYS.has(key) ? Math.round(n) : n;
+      continue;
+    }
     const n = Number(raw);
     if (!Number.isFinite(n)) continue;
     out[key] = PARAM_INT_KEYS.has(key) ? Math.round(n) : n;
   }
+  // Only attach speculative if the user actually picked a draft model;
+  // sliders alone are inert without one.
+  if (spec.draft_model_path) out.speculative = spec;
   return out;
 }
 
@@ -697,9 +751,11 @@ function resetParams() {
   for (const key of PARAM_KEYS) {
     const el = paramEl(key);
     if (!el) continue;
-    el.value = String(PARAM_DEFAULTS[key]);
+    const def = PARAM_DEFAULTS[key];
+    if (PARAM_BOOL_KEYS.has(key)) el.checked = !!def;
+    else el.value = String(def ?? "");
     const out = paramOut(key);
-    if (out) out.textContent = formatParamValue(key, PARAM_DEFAULTS[key]);
+    if (out) out.textContent = formatParamValue(key, PARAM_BOOL_KEYS.has(key) ? el.checked : def);
   }
   saveParams();
 }
@@ -770,26 +826,75 @@ async function estimateGpuLayers() {
 }
 
 // Hide rows for sampling fields the installed cyllama doesn't accept.
-// Sourced from /info.supported_params (see sidecar). Forward-looking
-// presets that set values for unsupported fields are still safe -- the
-// sidecar's _build_config drops them before constructing GenerationConfig.
+// Sourced from /info.supported_params + /info.features (see sidecar).
+// Forward-looking presets that set values for unsupported fields are
+// still safe -- the sidecar's _build_config drops them before
+// constructing GenerationConfig.
 async function applySupportedParams() {
-  let supported = null;
-  try {
-    const info = await cyllamaSidecar.getInfo();
-    supported = info && Array.isArray(info.supported_params)
-      ? new Set(info.supported_params)
-      : null;
-  } catch { /* /info unreachable -> leave UI as-is */ }
-  if (!supported) return;
-  for (const key of PARAM_KEYS) {
-    const el = paramEl(key);
-    if (!el) continue;
-    const row = el.closest(".param");
-    if (!row) continue;
-    row.hidden = !supported.has(key);
+  let info = null;
+  try { info = await cyllamaSidecar.getInfo(); }
+  catch { return; /* /info unreachable -> leave UI as-is */ }
+  const supported = info && Array.isArray(info.supported_params)
+    ? new Set(info.supported_params) : null;
+  const features = (info && info.features) || {};
+  if (supported) {
+    for (const key of PARAM_KEYS) {
+      // Advanced-section keys are gated by ``data-feature`` instead of
+      // the supported_params list -- their wire shape is nested or
+      // boolean and doesn't appear in supported_params.
+      if (key.startsWith("spec_") || key === "ngram_enabled" || key === "grammar") continue;
+      const el = paramEl(key);
+      if (!el) continue;
+      const row = el.closest(".param");
+      if (!row) continue;
+      row.hidden = !supported.has(key);
+    }
   }
+
+  // Advanced section: hide each ``data-feature`` row based on /info.features.
+  // The ``grammar`` row stays visible if ``json_schema_to_grammar`` is
+  // available even when chat-side grammar isn't wired -- the user can
+  // still generate GBNF for copy/paste use.
+  const featRowHidden = {
+    grammar: !(features.grammar || features.json_schema_to_grammar),
+    speculative: !features.speculative,
+    ngram: !features.ngram,
+  };
+  for (const row of document.querySelectorAll("[data-feature]")) {
+    const f = row.dataset.feature;
+    row.hidden = !!featRowHidden[f];
+  }
+  // Hide the "From JSON Schema" button when the helper isn't present
+  // (chat-side grammar might still be wired without it in future).
+  const fromSchemaBtn = document.getElementById("grammarFromSchemaBtn");
+  if (fromSchemaBtn) fromSchemaBtn.hidden = !features.json_schema_to_grammar;
+
+  // If every advanced row is hidden, show the "no advanced features" note.
+  const adv = document.getElementById("samplingAdvanced");
+  if (adv) {
+    const anyVisible = Array.from(adv.querySelectorAll("[data-feature]")).some(
+      (r) => !r.hidden
+    );
+    const note = document.getElementById("advUnavailableNote");
+    if (note) note.hidden = anyVisible;
+  }
+
   applyMirostatVisibility();
+  applySpeculativeVisibility();
+}
+
+// Sub-rows that only matter when a draft model is selected (n_max,
+// n_min, p_split, p_min) collapse otherwise. The toggle uses the same
+// ``hidden`` mechanism as Mirostat tau/eta.
+function applySpeculativeVisibility() {
+  const sel = paramEl("spec_draft_model");
+  const off = !sel || !sel.value;
+  for (const e of document.querySelectorAll("[data-spec-only]")) {
+    // Keep hidden if the speculative feature row itself is hidden --
+    // the parent's data-feature row is the source of truth.
+    const featHidden = e.hidden && !e.dataset.specOnly;
+    e.hidden = off || featHidden;
+  }
 }
 
 /* ----------------------------------------------------------------
@@ -914,11 +1019,14 @@ function bindParams() {
   for (const key of PARAM_KEYS) {
     const el = paramEl(key);
     if (!el) continue;
-    el.addEventListener("input", () => {
+    const evt = (PARAM_BOOL_KEYS.has(key) || el.tagName === "SELECT") ? "change" : "input";
+    el.addEventListener(evt, () => {
+      const v = PARAM_BOOL_KEYS.has(key) ? el.checked : el.value;
       const out = paramOut(key);
-      if (out) out.textContent = formatParamValue(key, el.value);
+      if (out) out.textContent = formatParamValue(key, v);
       saveParams();
       if (key === "mirostat") applyMirostatVisibility();
+      if (key === "spec_draft_model") applySpeculativeVisibility();
     });
   }
   const sysEl = document.getElementById("p-system_prompt");
@@ -927,10 +1035,74 @@ function bindParams() {
   if (resetBtn) resetBtn.addEventListener("click", () => {
     resetParams();
     applyMirostatVisibility();
+    applySpeculativeVisibility();
   });
   applyMirostatVisibility();
   const estBtn = document.getElementById("estimateLayersBtn");
   if (estBtn) estBtn.addEventListener("click", estimateGpuLayers);
+
+  const fromSchemaBtn = document.getElementById("grammarFromSchemaBtn");
+  if (fromSchemaBtn) fromSchemaBtn.addEventListener("click", grammarFromSchema);
+
+  // Populate the draft-model select once at mount, and again whenever
+  // the Models tab signals a change (drag-drop import, HF download).
+  refreshDraftModels();
+  window.addEventListener("models:cache-changed", refreshDraftModels);
+}
+
+async function refreshDraftModels() {
+  const sel = paramEl("spec_draft_model");
+  if (!sel) return;
+  const saved = sel.value;
+  let models = [];
+  try {
+    const r = await cyllamaModels.listModels();
+    models = (r && r.models) || [];
+  } catch { /* leave the select with just "off" */ }
+  // Preserve the "off" option, replace the rest.
+  while (sel.options.length > 1) sel.remove(1);
+  for (const m of models) {
+    const o = document.createElement("option");
+    o.value = m.path;
+    o.textContent = m.name;
+    sel.appendChild(o);
+  }
+  // Restore prior selection if still valid.
+  if (saved && Array.from(sel.options).some((o) => o.value === saved)) {
+    sel.value = saved;
+  }
+  applySpeculativeVisibility();
+}
+
+// Generate a GBNF grammar from a JSON schema the user pastes in. Drops
+// the result into the grammar textarea and fires its input event so
+// the same persist / reset path covers it.
+async function grammarFromSchema() {
+  const raw = window.prompt(
+    "Paste a JSON schema (object). Output GBNF goes into the Grammar field.",
+    '{"type":"object","properties":{"name":{"type":"string"}},"required":["name"]}'
+  );
+  if (raw == null) return;
+  let schema;
+  try {
+    schema = JSON.parse(raw);
+  } catch (e) {
+    errorLine(`Schema parse failed: ${e.message}`);
+    return;
+  }
+  let grammar = "";
+  try {
+    const j = await cyllamaSidecar.sidecarJson("/grammar/from-schema", { schema });
+    grammar = (j && j.grammar) || "";
+  } catch (e) {
+    errorLine(`Grammar generation failed: ${e.message}`);
+    return;
+  }
+  const el = paramEl("grammar");
+  if (!el) return;
+  el.value = grammar;
+  el.dispatchEvent(new Event("input", { bubbles: true }));
+  systemLine("Grammar generated from schema.");
 }
 
 /* ----------------------------------------------------------------
