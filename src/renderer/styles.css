@@ -1403,6 +1403,41 @@ svg circle, svg rect, svg polygon { fill: none; }
   word-break: break-word; line-height: 1.5; white-space: pre-wrap;
 }
 
+/* General tab -> Preferences -> Model directories. */
+.gen-pref-list { display: flex; flex-direction: column; gap: 4px; margin-bottom: 8px; }
+.gen-pref-row {
+  display: grid;
+  grid-template-columns: max-content 1fr max-content;
+  gap: 8px;
+  align-items: center;
+  padding: 6px 8px;
+  background: var(--bg-sunken);
+  border-radius: 4px;
+}
+.gen-pref-row-label {
+  font-size: 10px; color: var(--fg-faint);
+  text-transform: uppercase; letter-spacing: 0.04em;
+}
+.gen-pref-row-path {
+  font-size: 11px; word-break: break-all;
+}
+.gen-pref-empty {
+  font-size: 11px; color: var(--fg-faint);
+  padding: 6px 8px;
+}
+.gen-pref-actions { display: flex; gap: 6px; margin-bottom: 6px; }
+.gen-pref-actions .btn { flex: 1; }
+.gen-pref-status {
+  font-size: 11px; color: var(--fg-faint);
+  margin-bottom: 6px; min-height: 14px;
+}
+.gen-pref-status[data-kind="ok"]  { color: #6ab04c; }
+.gen-pref-status[data-kind="err"] { color: #c33; }
+.gen-pref-hint {
+  font-size: 11px; color: var(--fg-faint);
+  line-height: 1.4;
+}
+
 /* Composer attachments strip + paperclip. */
 .composer-attachments {
   display: flex; flex-wrap: wrap; gap: 6px;

@@ -306,7 +306,7 @@ async function build() {
 let mounted = false;
 export async function show() {
   if (!mounted) {
-    try { state.models = (await listModels()).models || []; }
+    try { state.models = (await listModels({ kinds: ["chat"] })).models || []; }
     catch { state.models = []; }
     mounted = true;
     await build();

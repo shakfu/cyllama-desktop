@@ -5,6 +5,11 @@ contextBridge.exposeInMainWorld("cyllama", {
   pickModel: () => ipcRenderer.invoke("dialog:pickModel"),
   pickAudio: () => ipcRenderer.invoke("dialog:pickAudio"),
   pickFolder: () => ipcRenderer.invoke("dialog:pickFolder"),
+  settings: {
+    get: () => ipcRenderer.invoke("settings:get"),
+    set: (patch) => ipcRenderer.invoke("settings:set", patch),
+  },
+  restartSidecar: () => ipcRenderer.invoke("sidecar:restart"),
   fileExists: (path) => ipcRenderer.invoke("fs:exists", path),
   revealItem: (path) => ipcRenderer.invoke("shell:revealItem", path),
   chats: {

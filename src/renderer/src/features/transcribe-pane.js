@@ -91,7 +91,7 @@ function setStatus(s, kind = "info") {
 
 async function modelSelect() {
   let models = [];
-  try { const r = await listModels(); models = r.models || []; } catch {}
+  try { const r = await listModels({ kinds: ["whisper"] }); models = r.models || []; } catch {}
   // Whisper GGML files conventionally have "whisper" in the name and
   // live as `.bin` rather than `.gguf`. Don't filter -- the user might
   // have placed a whisper file under MODELS_DIR with any name.

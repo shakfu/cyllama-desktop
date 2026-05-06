@@ -4,8 +4,19 @@
 import { sidecarFetch, sidecarJson, getInfo } from "./sidecar.js";
 import { startJob } from "./jobs.js";
 
-export async function listModels() {
-  const res = await sidecarFetch("/models/cached");
+// Pickers narrow the catalog by capability. Pass ``kinds: ["chat"]``
+// to a chat-side picker, ``kinds: ["mmproj"]`` for the projector, etc.
+// ``unknown`` always passes the filter server-side -- a misclassified
+// model still shows up so the user isn't locked out by a heuristic
+// failure (we keep the "Show all" sentinel as the explicit override).
+export async function listModels(opts = {}) {
+  let q = "";
+  if (Array.isArray(opts.kinds) && opts.kinds.length) {
+    q = `?kinds=${encodeURIComponent(opts.kinds.join(","))}`;
+  } else if (opts.kinds === "all") {
+    q = "?kinds=all";
+  }
+  const res = await sidecarFetch(`/models/cached${q}`);
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return res.json();
 }

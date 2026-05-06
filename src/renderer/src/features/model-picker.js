@@ -40,7 +40,10 @@ async function render() {
   menu.innerHTML = `<div class="mp-loading">Loading...</div>`;
   let models = [];
   try {
-    const r = await listModels();
+    // Chat-side picker: only surface text-generation models. Whisper
+    // / SD / mmproj projectors aren't loadable as a chat LLM and used
+    // to clutter the dropdown.
+    const r = await listModels({ kinds: ["chat"] });
     models = r.models || [];
   } catch (e) {
     menu.innerHTML = `<div class="mp-error">Error: ${e.message}</div>`;

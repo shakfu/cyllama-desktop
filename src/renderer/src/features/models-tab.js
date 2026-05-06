@@ -67,8 +67,12 @@ function renderDropdown() {
       select.appendChild(el("option", { value: "", disabled: true, selected: true }, "Select a model..."));
     }
     for (const m of state.models) {
+      // The catalog itself doesn't filter; surface the inferred kind
+      // alongside size + source so users can see at a glance which
+      // pickers a given file is eligible for.
+      const kindLabel = m.kind && m.kind !== "unknown" ? `  ·  ${m.kind}` : "";
       const opt = el("option", { value: m.path, title: m.path },
-        `${m.name}  ·  ${fmtBytes(m.size)}  ·  ${m.source}`);
+        `${m.name}  ·  ${fmtBytes(m.size)}  ·  ${m.source}${kindLabel}`);
       if (state.selected && state.selected.path === m.path) opt.selected = true;
       select.appendChild(opt);
     }
@@ -319,27 +323,46 @@ function renderMultimodalSection() {
   const subhead = el("div", { class: "mt-subhead" }, "Vision projector (mmproj)");
   const current = el("div", { class: "mt-mmproj-path mono" },
     getMmprojPath() ? basenameLike(getMmprojPath()) : "(not set)");
-  const browse = el("button", {
-    type: "button", class: "btn",
-    onclick: async () => {
+
+  // Catalog-driven dropdown of mmproj-classified models. ``unknown``
+  // models pass through (heuristic safety) so a misclassified mmproj
+  // is still pickable. Browse... remains the escape hatch for files
+  // outside MODELS_DIR.
+  const mmprojModels = state.models.filter(
+    (m) => m.kind === "mmproj" || m.kind === "unknown",
+  );
+  const sel = el("select", { class: "mt-select" });
+  sel.appendChild(el("option", { value: "" }, "(not set)"));
+  for (const m of mmprojModels) {
+    const opt = el("option", { value: m.path, title: m.path },
+      `${m.name} · ${fmtBytes(m.size)}`);
+    if (m.path === getMmprojPath()) opt.selected = true;
+    sel.appendChild(opt);
+  }
+  sel.appendChild(el("option", { value: "__browse__" }, "Browse..."));
+  sel.addEventListener("change", async () => {
+    if (sel.value === "__browse__") {
       const p = await window.cyllama.pickModel();
       if (p) {
         setMmprojPath(p);
         current.textContent = basenameLike(p);
       }
-    },
-  }, "Browse...");
-  const clear = el("button", {
-    type: "button", class: "btn",
-    onclick: () => { setMmprojPath(""); current.textContent = "(not set)"; },
-  }, "Clear");
+      sel.value = getMmprojPath() || "";
+    } else {
+      setMmprojPath(sel.value);
+      current.textContent = sel.value ? basenameLike(sel.value) : "(not set)";
+    }
+  });
+
   return el("div", { class: "rt-section" },
     head, subhead,
-    el("div", { class: "mt-mmproj-row" }, browse, clear),
+    sel,
     current,
     el("div", { class: "mt-mmproj-hint" },
       "Pinned mmproj enables the paperclip in the chat composer. Pair it ",
-      "with a vision-capable main model (LLaVA, Qwen-VL, ...) for image Q&A."),
+      "with a vision-capable main model (LLaVA, Qwen-VL, ...) for image Q&A. ",
+      "The dropdown shows files classified as mmproj; use Browse... for ",
+      "files outside the models directory."),
   );
 }
 
@@ -356,7 +379,12 @@ function renderQuantizeSection() {
 
   const srcSel = el("select", { class: "mt-select" });
   srcSel.appendChild(el("option", { value: "" }, "Pick source model..."));
+  // Quantize is a GGUF tensor-conversion pass; only .gguf files
+  // (chat / mmproj / embedding) are valid sources. Whisper .bin and
+  // SD .safetensors aren't quantizable through this path.
   for (const m of state.models) {
+    if (m.kind === "whisper" || m.kind === "sd") continue;
+    if (!m.path.toLowerCase().endsWith(".gguf")) continue;
     srcSel.appendChild(el("option", { value: m.path }, `${m.name} · ${fmtBytes(m.size)}`));
   }
   srcSel.value = state.quantize.src || "";

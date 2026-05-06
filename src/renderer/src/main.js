@@ -1242,7 +1242,9 @@ async function refreshDraftModels() {
   const saved = sel.value;
   let models = [];
   try {
-    const r = await cyllamaModels.listModels();
+    // Speculative draft model: must be a chat model. Whisper / SD /
+    // mmproj projectors won't satisfy the speculative-decoding contract.
+    const r = await cyllamaModels.listModels({ kinds: ["chat"] });
     models = (r && r.models) || [];
   } catch { /* leave the select with just "off" */ }
   // Preserve the "off" option, replace the rest.
@@ -1570,6 +1572,21 @@ async function init() {
     errorLine(`init error: ${err.message}`);
   }
   updateSendEnabled();
+
+  // After a Preferences-driven sidecar restart the {port, token}
+  // change. The cached lib-side info is reset by the General tab's
+  // ``resetSidecarInfo()``, but the chat hot-path holds its own
+  // reference (``sidecar`` above) so it has to be refreshed too.
+  window.addEventListener("sidecar:restarted", async () => {
+    try {
+      sidecar = await window.cyllama.getSidecarInfo();
+      setStatus("ready", `ready :${sidecar.port}`);
+      updateSendEnabled();
+    } catch (err) {
+      setStatus("error", "no sidecar");
+      errorLine(`reconnect error: ${err.message}`);
+    }
+  });
 }
 
 // ModelPicker dropdown takes over the pill click. The OS file dialog is

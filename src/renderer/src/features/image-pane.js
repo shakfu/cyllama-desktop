@@ -60,7 +60,7 @@ function updateRunEnabled() {
 
 async function modelSelect() {
   let models = [];
-  try { const r = await listModels(); models = r.models || []; } catch {}
+  try { const r = await listModels({ kinds: ["sd"] }); models = r.models || []; } catch {}
   const sel = el("select", { class: "dp-select" });
   sel.appendChild(el("option", { value: "" }, "Pick an SD model..."));
   for (const m of models) sel.appendChild(el("option", { value: m.path }, m.name));

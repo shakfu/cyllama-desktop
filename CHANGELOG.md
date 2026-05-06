@@ -6,6 +6,84 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added (extra read-only model directories)
+- **Preferences -> Model directories** in the General tab. The
+  primary `<userData>/models/` (read-only label "primary") plus any
+  number of user-added extras (Add directory... opens a folder
+  picker; per-row Remove). Apply persists the list to
+  `<userData>/settings.json` and restarts the sidecar so the new
+  scan roots take effect immediately.
+- **`<userData>/settings.json`**, schema
+  `{ version: 1, models_extra: [string, ...] }`. Atomic
+  tmp+rename writes; defensively filtered to absolute paths only so
+  a hand-edited file can't smuggle relative or non-string entries
+  into the launcher's env splice.
+- **`settings:get` / `settings:set` / `sidecar:restart` IPC**
+  exposed on `window.cyllama.settings.{get,set}` and
+  `window.cyllama.restartSidecar`. The renderer fires a
+  `sidecar:restarted` event after restart so the chat hot path
+  refreshes its cached `{port, token}` (those rotate on each
+  spawn).
+- **`CYLLAMA_SIDECAR_MODELS_EXTRA`** env var, pathsep-joined
+  (`:` on Unix, `;` on Windows). The sidecar's `_resolve_models_extra`
+  parses it forgivingly: empty entries from leading/trailing
+  delimiters, repeated paths, and the primary `MODELS_DIR` itself
+  are all stripped.
+- **Catalog scan widened** to include each extra root with
+  `source: "external"`. Precedence on path collision (mostly via
+  symlinks) is `local > external > hf` so a file accessible from
+  multiple roots surfaces once with the most-authoritative tag.
+  `_scan_gguf` now `Path.resolve()`s before keying the dedup map
+  so a symlinked file dedups regardless of which root it was
+  walked from.
+- **`/info.sidecar.models_extra`** advertises the resolved roots so
+  the Preferences UI can display the live state without re-reading
+  `settings.json`.
+- 5 new pytest cases in `tests/test_classification.py` cover the
+  external source tag, the local-wins symlink dedup, the `/info`
+  surface, and `_resolve_models_extra`'s blank/dup/primary
+  filtering.
+
+### Added (capability-aware model catalog)
+- **`/models/cached` items gain a `kind` field**: `"chat"`, `"mmproj"`,
+  `"embedding"`, `"whisper"`, `"sd"`, or `"unknown"`. Classification
+  layers cheap signals first (filename `mmproj-*` → mmproj; `.bin`
+  extension → whisper; `.safetensors` → sd) and falls back to
+  `cyllama.GGUFContext` metadata (`general.architecture` against a
+  list of embedding-family hints, plus a secondary
+  `*.pooling_type`-key heuristic). Per-path cache keyed on
+  `(path, mtime)` so dropdown opens don't re-inspect.
+- **`?kinds=` query param** on `/models/cached`. Each picker passes
+  the kinds it actually supports; the server filters server-side.
+  `unknown` always passes the filter (a misclassified model
+  shouldn't lock the user out of a picker), and `?kinds=all` is the
+  explicit no-op for the catalog view itself.
+- **Scan widened** from `*.gguf` only to `*.gguf` + `*.bin`. Whisper
+  models in their conventional `.bin` form now show up in the
+  Transcribe picker without manual conversion.
+- **Every picker narrows by kind**:
+  - Chat top-bar pill, Speculative draft, Server, Batch, Agents,
+    RAG generation: `["chat"]`.
+  - Multimodal projector pin (Models tab): `["mmproj"]`.
+  - RAG embedding (collection create): `["embedding"]`.
+  - Transcribe: `["whisper"]`.
+  - Image: `["sd"]`.
+  - Quantize source (Models tab): `.gguf` files only, excluding
+    whisper/sd kinds (the C-side quantize path doesn't accept them).
+  - Models tab catalog: no filter; the kind label is shown in the
+    dropdown alongside size + source.
+- **Multimodal projector picker rebuilt** as a catalog dropdown
+  (mmproj-classified models from the cached list) instead of OS
+  dialog only. Browse... stays as the escape hatch for files
+  outside MODELS_DIR.
+- 13 new pytest cases in `tests/test_classification.py` cover the
+  classification heuristics (mmproj filename, whisper `.bin`,
+  bert-family embedding arch, pooling_type meta hint, unknown
+  fallback), the per-(path, mtime) cache invalidation on rewrite,
+  and the `/models/cached?kinds=` server-side filter (single
+  kind, multi-kind, unknown-passes-through, `kinds=all`,
+  scan-includes-bin-files).
+
 ### Added (multimodal chat — LLAVA / MTMD)
 - **Composer attach button**. A paperclip lives next to the send
   button in the chat composer; clicking it opens a hidden

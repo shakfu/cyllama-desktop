@@ -110,7 +110,13 @@ function activeCollection() {
 
 async function refresh() {
   try {
-    const [r, m] = await Promise.all([listCollections(), listModels()]);
+    // Fetch the union of chat + embedding kinds. The embedding picker
+    // (create form) and the generation picker (query form) each narrow
+    // further via modelDropdown's ``kinds`` filter.
+    const [r, m] = await Promise.all([
+      listCollections(),
+      listModels({ kinds: ["chat", "embedding"] }),
+    ]);
     state.collections = r.collections || [];
     state.models = m.models || [];
   } catch (e) {
@@ -130,12 +136,18 @@ function emitCollectionsChanged() {
   catch (_) { /* no DOM in tests */ }
 }
 
-function modelDropdown({ value, placeholder }) {
+function modelDropdown({ value, placeholder, kinds }) {
   const sel = el("select", { class: "dp-select" });
   sel.appendChild(el("option", { value: "", disabled: true, selected: !value }, placeholder));
+  // ``kinds`` is the picker-level filter; ``unknown`` always passes
+  // through so a heuristic miss doesn't lock the user out.
+  const wanted = Array.isArray(kinds) && kinds.length ? new Set(kinds) : null;
   for (const m of state.models) {
-    const opt = el("option", { value: m.path, title: m.path },
-      `${m.name} · ${fmtBytes(m.size)}`);
+    if (wanted && m.kind && m.kind !== "unknown" && !wanted.has(m.kind)) continue;
+    const label = m.kind && m.kind !== "unknown"
+      ? `${m.name} · ${fmtBytes(m.size)} · ${m.kind}`
+      : `${m.name} · ${fmtBytes(m.size)}`;
+    const opt = el("option", { value: m.path, title: m.path }, label);
     if (value && m.path === value) opt.selected = true;
     sel.appendChild(opt);
   }
@@ -196,7 +208,10 @@ function renderHeader() {
 
 function renderCreateForm() {
   const nameInput = el("input", { type: "text", class: "dp-input", placeholder: "Collection name" });
-  const embedSel = modelDropdown({ value: "", placeholder: "Pick embedding model..." });
+  const embedSel = modelDropdown({
+    value: "", placeholder: "Pick embedding model...",
+    kinds: ["embedding"],
+  });
   const cancelBtn = el("button", { type: "button", class: "btn" }, "Cancel");
   const createBtn = el("button", { type: "button", class: "btn primary" }, "Create");
 
@@ -299,7 +314,10 @@ function renderIngest(coll) {
 
 function renderQuery(coll) {
   const lastGen = localStorage.getItem("rag_last_gen_model") || "";
-  const genSel = modelDropdown({ value: lastGen, placeholder: "Pick generation model..." });
+  const genSel = modelDropdown({
+    value: lastGen, placeholder: "Pick generation model...",
+    kinds: ["chat"],
+  });
   const qInput = el("textarea", {
     class: "dp-textarea",
     rows: 3,

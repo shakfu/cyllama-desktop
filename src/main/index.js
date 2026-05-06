@@ -47,6 +47,41 @@ function workspaceDir(id = DEFAULT_WORKSPACE_ID) {
   return path.join(userDataDir(), "workspaces", id);
 }
 
+// ---------------------------------------------------------------------------
+// Global settings (Preferences). Lives at <userData>/settings.json. Today
+// the only field is ``models_extra`` -- additional read-only model search
+// roots the sidecar scans alongside MODELS_DIR. Schema is versioned + the
+// IPC handlers validate so a hand-edited file can't crash the launcher.
+// ---------------------------------------------------------------------------
+const SETTINGS_FILE = () => path.join(userDataDir(), "settings.json");
+const DEFAULT_SETTINGS = { version: 1, models_extra: [] };
+
+function loadSettings() {
+  try {
+    const raw = fs.readFileSync(SETTINGS_FILE(), "utf8");
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === "object") {
+      const extra = Array.isArray(parsed.models_extra) ? parsed.models_extra : [];
+      // Defensive: drop anything that isn't a plain absolute string. A
+      // malformed entry would surface as a confusing CYLLAMA_SIDECAR_
+      // MODELS_EXTRA splice and is easier to silently filter than
+      // refuse-to-launch over.
+      const cleaned = extra.filter((p) => typeof p === "string" && path.isAbsolute(p));
+      return { ...DEFAULT_SETTINGS, ...parsed, models_extra: cleaned };
+    }
+  } catch (_) { /* missing / unreadable -> defaults */ }
+  return { ...DEFAULT_SETTINGS };
+}
+
+function saveSettings(settings) {
+  const merged = { ...DEFAULT_SETTINGS, ...(settings || {}) };
+  // Same atomic-write pattern the chat / RAG manifests use elsewhere.
+  const tmp = SETTINGS_FILE() + ".tmp";
+  fs.writeFileSync(tmp, JSON.stringify(merged, null, 2), "utf8");
+  fs.renameSync(tmp, SETTINGS_FILE());
+  return merged;
+}
+
 function migrateLayoutIfNeeded() {
   const stamp = path.join(userDataDir(), ".layout_version");
   let v = 0;
@@ -199,6 +234,12 @@ async function startSidecar() {
       CYLLAMA_SIDECAR_MODELS: modelsDir,
       CYLLAMA_SIDECAR_RAG: ragDir,
       CYLLAMA_SIDECAR_UPLOADS: uploadsDir,
+      // Additional read-only model search roots from Preferences.
+      // Joined with the OS path delimiter (':' on Unix, ';' on Windows).
+      // Empty when the user hasn't added any extras.
+      CYLLAMA_SIDECAR_MODELS_EXTRA: (loadSettings().models_extra || [])
+        .filter((p) => p && typeof p === "string")
+        .join(path.delimiter),
       PYTHONUNBUFFERED: "1",
     },
     stdio: ["ignore", "pipe", "pipe"],
@@ -451,6 +492,39 @@ ipcMain.handle("dialog:pickAudio", async () => {
   });
   if (r.canceled || r.filePaths.length === 0) return null;
   return r.filePaths[0];
+});
+
+ipcMain.handle("settings:get", async () => {
+  return loadSettings();
+});
+
+ipcMain.handle("settings:set", async (_e, patch) => {
+  if (!patch || typeof patch !== "object") {
+    throw new Error("settings:set expects an object");
+  }
+  // Patch shape: ``{ models_extra: [string, ...] }``. Anything else is
+  // ignored for now -- explicit allowlist so a renderer bug can't
+  // smuggle arbitrary keys into the on-disk shape.
+  const current = loadSettings();
+  const next = { ...current };
+  if (Array.isArray(patch.models_extra)) {
+    next.models_extra = patch.models_extra
+      .filter((p) => typeof p === "string" && path.isAbsolute(p));
+  }
+  return saveSettings(next);
+});
+
+ipcMain.handle("sidecar:restart", async () => {
+  // The renderer calls this after editing settings that change
+  // sidecar boot env (only ``models_extra`` today). We tear down the
+  // current sidecar and bring up a fresh one against the new env.
+  if (sidecarProc) {
+    try { sidecarProc.kill("SIGTERM"); } catch (_) {}
+    sidecarProc = null;
+  }
+  sidecarInfo = null;
+  await startSidecar();
+  return sidecarInfo;
 });
 
 ipcMain.handle("dialog:pickFolder", async () => {

@@ -257,7 +257,7 @@ function redraw() {
 
 async function refreshAll() {
   const [m, info] = await Promise.all([
-    listModels().catch(() => ({ models: [] })),
+    listModels({ kinds: ["chat"] }).catch(() => ({ models: [] })),
     getInfo().catch(() => ({})),
   ]);
   state.models = m.models || [];

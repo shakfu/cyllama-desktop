@@ -280,7 +280,7 @@ function toggleStop(running) {
 async function refresh() {
   try {
     const [m, c, info] = await Promise.all([
-      listModels().catch(() => ({ models: [] })),
+      listModels({ kinds: ["chat"] }).catch(() => ({ models: [] })),
       listCollections().catch(() => ({ collections: [] })),
       getInfo().catch(() => ({})),
     ]);

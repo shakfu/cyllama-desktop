@@ -487,6 +487,35 @@ MODELS_DIR = Path(
 ).resolve()
 MODELS_DIR.mkdir(parents=True, exist_ok=True)
 
+# Additional read-only model search roots. The user pins these in the
+# General -> Preferences pane (or via env for direct smoke tests). The
+# desktop-managed MODELS_DIR stays primary -- drag-drop import + HF
+# download write there -- and these are scanned alongside it as
+# read-only sources, items tagged ``source: "external"``.
+def _resolve_models_extra(raw: str) -> tuple[Path, ...]:
+    if not raw:
+        return ()
+    out: list[Path] = []
+    for part in raw.split(os.pathsep):
+        s = part.strip()
+        if not s:
+            continue
+        try:
+            p = Path(s).resolve()
+        except OSError:
+            continue
+        if p == MODELS_DIR:
+            # Don't scan the primary as an extra too -- would double
+            # the dedup work and surface every file twice in the cache.
+            continue
+        out.append(p)
+    return tuple(out)
+
+
+MODELS_EXTRA: tuple[Path, ...] = _resolve_models_extra(
+    os.environ.get("CYLLAMA_SIDECAR_MODELS_EXTRA", "")
+)
+
 # Per-workspace RAG state. Each collection gets a sqlite vector store at
 # RAG_DIR/<id>.sqlite; the registry of collections (id, name, embedding
 # model, counts) lives in RAG_DIR/collections.json.
@@ -623,6 +652,9 @@ _INFO_CACHE: dict = {
     "sidecar": {
         "artifacts_dir": str(ARTIFACTS_DIR),
         "models_dir": str(MODELS_DIR),
+        # Extra read-only scan roots the user added in Preferences.
+        # Empty when only the primary models dir is configured.
+        "models_extra": [str(p) for p in MODELS_EXTRA],
         "rag_dir": str(RAG_DIR),
         "uploads_dir": str(UPLOADS_DIR),
     },
@@ -1449,45 +1481,228 @@ def _slug_repo(repo: str) -> str:
     return re.sub(r"[^A-Za-z0-9._-]+", "_", repo).strip("_")
 
 
+_MODEL_EXTS: tuple[str, ...] = (".gguf", ".bin")
+
+
 def _scan_gguf(root: Path, source: str) -> list[dict]:
+    """Scan a directory for cyllama-compatible model files.
+
+    Returns ``[{path, name, size, source, dir, kind}]`` items. Each
+    file is classified by ``_classify_model`` so the renderer's
+    pickers can filter to the kinds they actually support (a chat
+    picker shouldn't surface an mmproj projector, etc.).
+
+    .gguf is the dominant format; .bin is the conventional whisper
+    suffix and rarely anything else, so we widen the scan to it for
+    the Transcribe pane to reach unconverted whisper models. Other
+    extensions (.safetensors) aren't enumerated yet -- cyllama-side
+    SD models in the desktop are .gguf in 0.2.x.
+    """
     out: list[dict] = []
     if not root.exists():
         return out
     try:
-        for p in root.rglob("*.gguf"):
+        for p in root.rglob("*"):
             if not p.is_file():
                 continue
+            if p.suffix.lower() not in _MODEL_EXTS:
+                continue
             try:
-                size = p.stat().st_size
+                st = p.stat()
             except OSError:
                 continue
+            # Resolve symlinks so the same file accessible via two
+            # roots (primary + an extra symlinked into it) dedups on
+            # absolute path. Without this the user sees the same
+            # model listed twice with conflicting ``source`` tags.
+            try:
+                resolved = p.resolve()
+            except OSError:
+                resolved = p
+            kind = _classify_model_cached(p, st.st_size, st.st_mtime)
             out.append({
-                "path": str(p),
+                "path": str(resolved),
                 "name": p.name,
-                "size": size,
+                "size": st.st_size,
                 "source": source,
-                "dir": str(p.parent),
+                "dir": str(resolved.parent),
+                "kind": kind,
             })
     except OSError:
         pass
     return out
 
 
+# ---------------------------------------------------------------------------
+# Model classification.
+#
+# The renderer surfaces ~12 model pickers (chat, mmproj, whisper, SD,
+# embedding, etc.) and used to dump every .gguf/.bin into each one.
+# Capability gating works in two passes:
+#
+#   1. cheap signals (filename, extension) -- catches the conventional
+#      names without paying for GGUF inspection;
+#   2. ``GGUFContext`` metadata -- definitive when (1) is ambiguous;
+#      cached per (path, mtime) so a directory full of files isn't
+#      re-inspected on every dropdown open.
+#
+# Returns one of:
+#   "chat"      -- text generation (default for unrecognised LLM archs)
+#   "mmproj"    -- vision projector for LLAVA-style multimodal
+#   "embedding" -- embedding model (BERT-family + similar)
+#   "whisper"   -- whisper.cpp model
+#   "sd"        -- stable-diffusion (rare in .gguf; mostly safetensors)
+#   "unknown"   -- classification failed (e.g. unreadable GGUF)
+# ---------------------------------------------------------------------------
+
+
+# Embedding-family architectures that GGUFs commonly advertise. Anything
+# in this set (case-insensitive substring) gets classified as embedding;
+# everything else under ``general.architecture`` falls through to chat.
+_EMBEDDING_ARCH_HINTS: tuple[str, ...] = (
+    "bert", "nomic", "jina", "xlm-roberta", "gte", "e5", "mxbai",
+    "stella", "snowflake-arctic", "arctic-embed",
+)
+
+# GGUF metadata key prefixes that signal an embedding-shaped model
+# even when ``general.architecture`` is unhelpful.
+_EMBEDDING_META_HINTS: tuple[str, ...] = (
+    ".pooling_type",  # e.g. ``bert.pooling_type``
+)
+
+# Per-path classification cache: ``path -> (mtime, kind)``. Bypassed
+# (and refreshed) when the file's mtime changes, so a quantize that
+# rewrites the destination is reclassified next scan.
+_KIND_CACHE: dict[str, tuple[float, str]] = {}
+
+
+def _classify_model_cached(path: Path, size: int, mtime: float) -> str:
+    spath = str(path)
+    cached = _KIND_CACHE.get(spath)
+    if cached is not None and cached[0] == mtime:
+        return cached[1]
+    kind = _classify_model(path, size)
+    _KIND_CACHE[spath] = (mtime, kind)
+    return kind
+
+
+def _classify_model(path: Path, size: int) -> str:  # noqa: ARG001
+    name = path.name.lower()
+    ext = path.suffix.lower()
+
+    # Cheap filename signals first -- mmproj projectors are conventionally
+    # named ``mmproj-*.gguf`` and shipping that pattern is so widespread
+    # we treat it as authoritative without inspecting the file.
+    if "mmproj" in name:
+        return "mmproj"
+
+    # Whisper models in the wild are nearly always ``.bin`` (the
+    # whisper.cpp convention). cyllama supports them at this extension.
+    # If a user converted to ``.gguf`` it'll be re-checked via metadata.
+    if ext == ".bin":
+        return "whisper"
+
+    if ext == ".gguf":
+        # Inspect via GGUF metadata. ``_resolve_gguf_context`` already
+        # caches the class lookup; the open itself is fast (memory-maps
+        # the header). Failure -> "unknown" so the picker still surfaces
+        # the file behind a "Show all" / unknown bucket and the user
+        # can opt to use it anyway.
+        GGUFContext = _resolve_gguf_context()
+        if GGUFContext is None:
+            return "chat"  # presume chat in the absence of better data
+        try:
+            ctx = None
+            for ctor in (
+                lambda: GGUFContext.from_file(str(path)),
+                lambda: GGUFContext(str(path)),
+            ):
+                try:
+                    ctx = ctor()
+                    break
+                except (TypeError, AttributeError):
+                    continue
+            if ctx is None:
+                return "unknown"
+            meta = None
+            for getter_name in ("get_all_metadata", "metadata", "all_metadata"):
+                getter = getattr(ctx, getter_name, None)
+                if getter is None:
+                    continue
+                try:
+                    meta = getter() if callable(getter) else getter
+                    break
+                except Exception:  # noqa: BLE001
+                    continue
+            if not isinstance(meta, dict):
+                return "unknown"
+            arch = str(meta.get("general.architecture") or "").lower()
+
+            # Architecture-led classification. The order matters: the
+            # mmproj architecture is sometimes ``clip`` standalone, but
+            # the filename heuristic above usually catches it first.
+            if "clip" in arch and "llama" not in arch:
+                return "mmproj"
+            if "whisper" in arch:
+                return "whisper"
+            if "stable-diffusion" in arch or arch in ("sdxl", "sd3", "flux"):
+                return "sd"
+            if any(h in arch for h in _EMBEDDING_ARCH_HINTS):
+                return "embedding"
+
+            # Secondary embedding signal: a pooling_type key under the
+            # arch namespace (BERT-style models often advertise this).
+            if any(any(s in str(k) for s in _EMBEDDING_META_HINTS) for k in meta):
+                return "embedding"
+
+            # Default: any GGUF with a recognisable architecture and no
+            # embedding/multimodal markers is assumed to be a chat model.
+            return "chat" if arch else "unknown"
+        except Exception:  # noqa: BLE001
+            return "unknown"
+
+    return "unknown"
+
+
 @app.get("/models/cached")
-def models_cached():
-    """List GGUF files we know about.
+def models_cached(kinds: Optional[str] = None):
+    """List cyllama-compatible model files we know about.
 
     Items from MODELS_DIR are flagged ``source: "local"``; items from the
     HF cache(s) are ``source: "hf"``. Same path appearing in multiple
     sources is deduped on absolute path with local taking precedence.
+    Each item carries a ``kind`` field (see ``_classify_model``).
+
+    Optional ``kinds`` query param: a comma-separated subset of
+    ``{"chat","mmproj","embedding","whisper","sd","unknown"}``. When
+    set, the response only includes items whose kind is in the set.
+    ``unknown`` always passes the filter regardless of whether it
+    was explicitly listed -- a misclassified model shouldn't lock
+    the user out of a picker. Pass ``kinds=all`` (or omit) to return
+    everything as-is.
     """
     seen: dict[str, dict] = {}
+    # Precedence: local > external > hf. ``setdefault`` skips a
+    # later source when the same absolute path already showed up
+    # under an earlier (more authoritative) source.
     for item in _scan_gguf(MODELS_DIR, "local"):
         seen[item["path"]] = item
+    for extra in MODELS_EXTRA:
+        for item in _scan_gguf(extra, "external"):
+            seen.setdefault(item["path"], item)
     for cache in _HF_CACHE_DIRS:
         for item in _scan_gguf(cache, "hf"):
             seen.setdefault(item["path"], item)
-    items = sorted(seen.values(), key=lambda m: (m["source"] != "local", m["name"].lower()))
+    # Sort: local first, then external, then hf; alphabetic within.
+    _SOURCE_ORDER = {"local": 0, "external": 1, "hf": 2}
+    items = sorted(
+        seen.values(),
+        key=lambda m: (_SOURCE_ORDER.get(m["source"], 9), m["name"].lower()),
+    )
+
+    if kinds and kinds != "all":
+        wanted = {k.strip().lower() for k in kinds.split(",") if k.strip()}
+        items = [m for m in items if m.get("kind") == "unknown" or m.get("kind") in wanted]
     return {"models": items, "models_dir": str(MODELS_DIR)}
 
 
