@@ -41,6 +41,69 @@ function el(tag, attrs = {}, ...children) {
   return node;
 }
 
+// Pull the most useful filesystem-ish path out of a source's metadata.
+// cyllama's loaders write the source path under varying keys depending
+// on which loader fired; cover the obvious ones.
+function sourcePath(s) {
+  const md = (s && s.metadata) || {};
+  for (const k of ["source", "path", "file", "filename"]) {
+    const v = md[k];
+    if (typeof v === "string" && v) return v;
+  }
+  return "";
+}
+
+function makeSourceRow(s, i) {
+  const path = sourcePath(s);
+  const fileName = path ? path.split(/[\\/]/).pop() : "";
+  const text = s.text || "";
+
+  // Click anywhere on the row toggles expand. Reveal button stops
+  // propagation so it doesn't accidentally collapse on click.
+  const row = el("div", {
+    class: "dp-source",
+    role: "button",
+    tabindex: "0",
+    "aria-expanded": "false",
+    title: "Click to expand",
+  });
+
+  const head = el("div", { class: "dp-source-head" },
+    el("span", { class: "dp-source-idx" }, `[${i + 1}]`),
+    el("span", { class: "dp-source-score" }, `score ${Number(s.score || 0).toFixed(3)}`),
+    fileName ? el("span", { class: "dp-source-file mono" }, fileName) : null,
+  );
+  const textEl = el("div", { class: "dp-source-text dp-source-collapsed" }, text);
+  row.appendChild(head);
+  row.appendChild(textEl);
+
+  if (path && window.cyllama && typeof window.cyllama.revealItem === "function") {
+    const reveal = el("button", {
+      type: "button",
+      class: "btn-mini",
+      title: `Reveal ${path}`,
+      onclick: (e) => {
+        e.stopPropagation();
+        window.cyllama.revealItem(path);
+      },
+    }, "Reveal");
+    head.appendChild(reveal);
+  }
+
+  function toggle() {
+    const expanded = row.getAttribute("aria-expanded") === "true";
+    row.setAttribute("aria-expanded", expanded ? "false" : "true");
+    textEl.classList.toggle("dp-source-collapsed", expanded);
+    row.title = expanded ? "Click to expand" : "Click to collapse";
+  }
+  row.addEventListener("click", toggle);
+  row.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggle(); }
+  });
+
+  return row;
+}
+
 function activeCollection() {
   return state.collections.find((c) => c.id === state.activeId) || null;
 }
@@ -274,13 +337,7 @@ function renderQuery(coll) {
         onSources: ({ sources }) => {
           sourcesBlock.replaceChildren(
             el("h4", {}, `Sources (${sources.length})`),
-            ...sources.map((s, i) => el("div", { class: "dp-source" },
-              el("div", { class: "dp-source-head" },
-                el("span", { class: "dp-source-idx" }, `[${i + 1}]`),
-                el("span", { class: "dp-source-score" }, `score ${s.score.toFixed(3)}`),
-              ),
-              el("div", { class: "dp-source-text" }, s.text),
-            )),
+            ...sources.map((s, i) => makeSourceRow(s, i)),
           );
         },
         onToken: (t) => {

@@ -6,6 +6,20 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added (Phase 4 - clickable sources)
+- **Expandable source rows** in the Documents query view. Each source
+  collapses to 3 lines by default; click (or Enter / Space when
+  focused) toggles the full chunk text. Border-left + cursor cue
+  signal that the row is interactive.
+- **Reveal button** on rows whose metadata carries a filesystem path
+  (`source` / `path` / `file` / `filename` keys, covering the variants
+  cyllama loaders emit). Calls `window.cyllama.revealItem(path)`,
+  which opens the source in the OS file manager. `stopPropagation`
+  so a Reveal click doesn't also toggle the row.
+- The source filename (basename of the path) is shown in the row head
+  alongside the index and score so users can see at a glance which
+  document a chunk came from without having to expand it.
+
 ### Added (Phase 3 - hardware controls)
 - **`/info.devices`** lists ggml backend devices as
   `[{name, description, type}, ...]`. Probed once at module load via
