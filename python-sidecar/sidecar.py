@@ -153,6 +153,26 @@ _NGRAM_CACHE_CLS = _resolve_attr((
     ("cyllama", "NgramCache"),
 ))
 
+# Phase 5 -- Whisper transcription. Both the C-level context class and
+# the WAV-loader helper from cyllama's CLI module are needed; if either
+# is missing the /info.features.whisper flag stays False and the
+# Transcribe pane hides itself.
+_WHISPER_CTX_CLS = _resolve_attr((
+    ("cyllama.whisper.whisper_cpp", "WhisperContext"),
+))
+_WHISPER_CTX_PARAMS_CLS = _resolve_attr((
+    ("cyllama.whisper.whisper_cpp", "WhisperContextParams"),
+))
+_WHISPER_FULL_PARAMS_CLS = _resolve_attr((
+    ("cyllama.whisper.whisper_cpp", "WhisperFullParams"),
+))
+_WHISPER_LOAD_WAV = _resolve_attr((
+    ("cyllama.whisper.cli", "load_wav_file"),
+))
+_WHISPER_RESAMPLE = _resolve_attr((
+    ("cyllama.whisper.cli", "resample_audio"),
+))
+
 
 # Capability flags surfaced via /info. ``grammar`` reflects whether
 # GenerationConfig actually accepts a ``grammar`` field AND whether the
@@ -212,6 +232,14 @@ _FEATURE_FLAGS: dict[str, bool] = {
     "ngram": (
         _NGRAM_CACHE_CLS is not None
         and "ngram" in _GC_ACCEPTED
+    ),
+    # Whisper requires both the context class and the WAV loader -- the
+    # context alone can't ingest a file from disk without a way to
+    # produce 16 kHz mono float32 samples.
+    "whisper": (
+        _WHISPER_CTX_CLS is not None
+        and _WHISPER_FULL_PARAMS_CLS is not None
+        and _WHISPER_LOAD_WAV is not None
     ),
 }
 # stop_sequences is whitelisted via _coerce_stop_sequences rather than
@@ -1869,6 +1897,149 @@ async def jobs_rag_ingest(req: Request):
         })
 
     job = await run_job("rag.ingest", producer)
+    return {"job_id": job.id}
+
+
+# ---------------------------------------------------------------------------
+# Transcribe: WAV -> Whisper segments. Long-running, so funnels through the
+# /jobs machinery; per-segment events arrive on /jobs/<id>/events as
+# ``{type:"segment", index, t0_ms, t1_ms, text}`` interleaved with the
+# usual progress / log frames. Final ``result`` carries the full segment
+# list so a late subscriber can reconstruct without replaying the stream.
+# ---------------------------------------------------------------------------
+
+
+register_job_kind("transcribe")
+
+
+@app.post("/jobs/transcribe")
+async def jobs_transcribe(req: Request):
+    if not _FEATURE_FLAGS.get("whisper"):
+        raise HTTPException(501, "whisper not available in this cyllama build")
+    body = await req.json()
+    audio_path = body.get("audio_path") or ""
+    model_path = body.get("model_path") or ""
+    if not audio_path or not os.path.isfile(audio_path):
+        raise HTTPException(400, "audio_path required and must exist")
+    if not model_path or not os.path.isfile(model_path):
+        raise HTTPException(400, "model_path required and must exist")
+    # Optional fields. Empty / None means "let whisper auto-detect".
+    language = (body.get("language") or "").strip() or None
+    translate = bool(body.get("translate", False))
+    n_threads = body.get("n_threads")
+    try:
+        n_threads = int(n_threads) if n_threads not in (None, "") else None
+    except (TypeError, ValueError):
+        n_threads = None
+
+    async def producer(job: Job) -> None:
+        loop = asyncio.get_running_loop()
+
+        # 1. Load + resample audio. The cyllama CLI helper is wave-only;
+        # non-WAV inputs are surfaced with a typed error so the renderer
+        # can suggest re-encoding rather than crashing.
+        suffix = Path(audio_path).suffix.lower()
+        if suffix not in (".wav", ".wave"):
+            raise RuntimeError(
+                f"only WAV input supported in this build; got '{suffix}'. "
+                f"Re-encode with ffmpeg: ffmpeg -i in -ar 16000 -ac 1 out.wav"
+            )
+        await _emit(job, {"type": "log", "message": "loading audio..."})
+        samples, sr = _WHISPER_LOAD_WAV(audio_path)
+        if _WHISPER_RESAMPLE is not None and sr != 16000:
+            await _emit(job, {
+                "type": "log",
+                "message": f"resampling {sr} -> 16000 Hz",
+            })
+            samples = _WHISPER_RESAMPLE(samples, sr, 16000)
+
+        # 2. Build whisper params + context. ``no_timestamps`` stays
+        # False so per-segment t0/t1 are populated; ``print_*`` flags
+        # are off so the C library doesn't spam stdout (the Electron
+        # host pipes the sidecar's stdout into the Console panel, and
+        # noisy output drowns useful log lines).
+        ctx_params = _WHISPER_CTX_PARAMS_CLS() if _WHISPER_CTX_PARAMS_CLS else None
+        full_params = _WHISPER_FULL_PARAMS_CLS()
+        for attr, val in (
+            ("print_progress", False),
+            ("print_realtime", False),
+            ("print_timestamps", False),
+            ("print_special", False),
+            ("translate", translate),
+            ("no_timestamps", False),
+        ):
+            if hasattr(full_params, attr):
+                try:
+                    setattr(full_params, attr, val)
+                except (AttributeError, TypeError):
+                    pass
+        if language and hasattr(full_params, "language"):
+            try:
+                full_params.language = language
+            except (AttributeError, TypeError):
+                pass
+        if n_threads and hasattr(full_params, "n_threads"):
+            try:
+                full_params.n_threads = n_threads
+            except (AttributeError, TypeError):
+                pass
+
+        # 3. Run transcription on a worker thread so the event loop stays
+        # responsive for SSE consumers. Segments are extracted after
+        # full() returns -- whisper.cpp's progress callback fires from
+        # the C side, but cross-thread SSE emission from there gets
+        # complicated; one bulk emit at the end is enough for typical
+        # short-clip use, with periodic progress logged from this side.
+        await _emit(job, {"type": "log", "message": "transcribing..."})
+        ctx_args = (model_path,) if ctx_params is None else (model_path, ctx_params)
+        ctx = _WHISPER_CTX_CLS(*ctx_args)
+        try:
+            await loop.run_in_executor(None, ctx.full, samples, full_params)
+
+            # 4. Emit per-segment events + accumulate into a final result.
+            n = ctx.full_n_segments()
+            segments: list[dict] = []
+            for i in range(n):
+                t0 = ctx.full_get_segment_t0(i)  # 10 ms units
+                t1 = ctx.full_get_segment_t1(i)
+                text = ctx.full_get_segment_text(i)
+                seg = {
+                    "index": i,
+                    # Convert whisper's 10 ms units to absolute milliseconds
+                    # so the renderer doesn't have to know the unit.
+                    "t0_ms": int(t0) * 10,
+                    "t1_ms": int(t1) * 10,
+                    "text": (text or "").strip(),
+                }
+                segments.append(seg)
+                await _emit(job, {"type": "segment", **seg})
+                if n:
+                    await _emit(job, {
+                        "type": "progress",
+                        "value": (i + 1) / n,
+                    })
+            detected_lang = None
+            try:
+                lid = ctx.full_lang_id()
+                if hasattr(ctx, "lang_str"):
+                    detected_lang = ctx.lang_str(lid)
+            except Exception:  # noqa: BLE001
+                pass
+            await _emit(job, {
+                "type": "result",
+                "result": {
+                    "segments": segments,
+                    "n_segments": len(segments),
+                    "language": detected_lang,
+                },
+            })
+        finally:
+            try:
+                ctx.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+    job = await run_job("transcribe", producer)
     return {"job_id": job.id}
 
 

@@ -411,6 +411,23 @@ ipcMain.handle("dialog:pickModel", async () => {
   return r.filePaths[0];
 });
 
+ipcMain.handle("dialog:pickAudio", async () => {
+  const r = await dialog.showOpenDialog(mainWindow, {
+    title: "Select audio file",
+    // WAV-only for now (matches the sidecar's load_wav_file capability).
+    // Other extensions surface a typed error from the job rather than
+    // appearing as silent failures, so we still allow them through the
+    // file dialog -- the user gets a clearer error than "file rejected".
+    filters: [
+      { name: "Audio", extensions: ["wav", "mp3", "m4a", "flac", "ogg"] },
+      { name: "All Files", extensions: ["*"] },
+    ],
+    properties: ["openFile"],
+  });
+  if (r.canceled || r.filePaths.length === 0) return null;
+  return r.filePaths[0];
+});
+
 app.whenReady().then(async () => {
   buildApplicationMenu();
   try {

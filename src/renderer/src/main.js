@@ -17,6 +17,7 @@ import * as generalTab from "./features/general-tab.js";
 import * as modelPicker from "./features/model-picker.js";
 import * as presets from "./features/presets.js";
 import * as documentsDialog from "./features/documents-pane.js";
+import * as transcribePane from "./features/transcribe-pane.js";
 
 // Expose the libs on a single namespace so feature modules added later --
 // or ad-hoc devtools sessions -- can reach them without re-importing.
@@ -34,6 +35,7 @@ window.cyllamaLib = {
 // so feature modules (e.g. Documents) can refresh / cleanup.
 const SIDEBAR_VIEW_HOOKS = {
   documents: { onShow: () => documentsDialog.show(), onHide: () => documentsDialog.hide() },
+  transcribe: { onShow: () => transcribePane.show(), onHide: () => transcribePane.hide() },
 };
 let activeSidebarView = "chats";
 function setSidebarView(name) {
@@ -882,6 +884,7 @@ async function applySupportedParams() {
   applyMirostatVisibility();
   applySpeculativeVisibility();
   applyMultiGpuVisibility(info);
+  transcribePane.applyVisibility(features);
 }
 
 // Hide main_gpu / split_mode / tensor_split rows when the machine has

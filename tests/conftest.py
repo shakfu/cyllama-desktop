@@ -327,6 +327,68 @@ def _fake_load_directory(path, glob: str = "**/*", **kwargs):  # noqa: ARG001
     return out
 
 
+class _FakeWhisperFullParams:
+    """Mirror the subset of WhisperFullParams the sidecar sets."""
+    def __init__(self):
+        self.print_progress = True
+        self.print_realtime = True
+        self.print_timestamps = True
+        self.print_special = True
+        self.translate = False
+        self.no_timestamps = False
+        self.language = ""
+        self.n_threads = 0
+
+
+class _FakeWhisperContextParams:
+    pass
+
+
+class _FakeWhisperContext:
+    """Tiny stand-in for cyllama.whisper.whisper_cpp.WhisperContext.
+
+    ``full`` records the call and pretends three short segments were
+    decoded; the segment accessors then read those out one at a time.
+    Tests assert on the per-segment SSE events the sidecar emits.
+    """
+    instances: list["_FakeWhisperContext"] = []
+    _segments = [
+        (0, 100, " hello"),         # 0.0s - 1.0s, leading space mimics whisper
+        (100, 200, " world"),       # 1.0s - 2.0s
+        (200, 320, " again"),       # 2.0s - 3.2s
+    ]
+
+    def __init__(self, model_path: str, ctx_params=None) -> None:
+        self.model_path = model_path
+        self.ctx_params = ctx_params
+        self.full_called_with = None
+        self.closed = False
+        type(self).instances.append(self)
+
+    def full(self, samples, params):
+        self.full_called_with = (samples, params)
+
+    def full_n_segments(self) -> int:
+        return len(self._segments)
+
+    def full_get_segment_t0(self, i): return self._segments[i][0]
+    def full_get_segment_t1(self, i): return self._segments[i][1]
+    def full_get_segment_text(self, i): return self._segments[i][2]
+    def full_lang_id(self): return 0
+    def lang_str(self, _id): return "en"
+
+    def close(self): self.closed = True
+
+
+def _fake_load_wav_file(path):
+    # Return a sentinel "samples" + 16 kHz so the resampler short-circuits.
+    return ([0.0, 0.0, 0.0], 16000)
+
+
+def _fake_resample_audio(samples, src_sr, dst_sr=16000):  # noqa: ARG001
+    return samples
+
+
 def _fake_json_schema_to_grammar(schema, force_gbnf: bool = False):  # noqa: ARG001
     # Just enough to assert the wire shape end-to-end. Doesn't pretend
     # to produce a real GBNF for arbitrary schemas.
@@ -356,6 +418,24 @@ def _install_cyllama_stub() -> None:
     sys.modules["cyllama.utils"] = utils
     sys.modules["cyllama.utils.json_schema_to_grammar"] = js2g
     mod.utils = utils
+
+    # Whisper stub: cyllama.whisper.{whisper_cpp,cli}. Same pattern --
+    # the sidecar's _resolve_attr does importlib.import_module so each
+    # path needs a real entry in sys.modules.
+    whisper = types.ModuleType("cyllama.whisper")
+    whisper_cpp = types.ModuleType("cyllama.whisper.whisper_cpp")
+    whisper_cpp.WhisperContext = _FakeWhisperContext
+    whisper_cpp.WhisperContextParams = _FakeWhisperContextParams
+    whisper_cpp.WhisperFullParams = _FakeWhisperFullParams
+    whisper_cli = types.ModuleType("cyllama.whisper.cli")
+    whisper_cli.load_wav_file = _fake_load_wav_file
+    whisper_cli.resample_audio = _fake_resample_audio
+    sys.modules["cyllama.whisper"] = whisper
+    sys.modules["cyllama.whisper.whisper_cpp"] = whisper_cpp
+    sys.modules["cyllama.whisper.cli"] = whisper_cli
+    whisper.whisper_cpp = whisper_cpp
+    whisper.cli = whisper_cli
+    mod.whisper = whisper
 
     rag = types.ModuleType("cyllama.rag")
     rag.Document = _FakeDocument
@@ -413,6 +493,7 @@ def sidecar_app(tmp_path, monkeypatch):
     _FakeRAG._chunks = ["hello", " ", "world"]
     _FakeRAG._sources = []
     _FakeRAG.closed_count = 0
+    _FakeWhisperContext.instances.clear()
 
 
 @pytest.fixture()
@@ -431,4 +512,12 @@ def fake_model(tmp_path):
     """A path that exists on disk so ``_get_llm`` accepts it."""
     p = tmp_path / "fake.gguf"
     p.write_bytes(b"GGUF\x00")
+    return str(p)
+
+
+@pytest.fixture()
+def fake_wav(tmp_path):
+    """A path with .wav suffix for the transcribe job's suffix check."""
+    p = tmp_path / "audio.wav"
+    p.write_bytes(b"RIFF\x00")
     return str(p)

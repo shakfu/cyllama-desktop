@@ -3,6 +3,7 @@ const { contextBridge, ipcRenderer } = require("electron");
 contextBridge.exposeInMainWorld("cyllama", {
   getSidecarInfo: () => ipcRenderer.invoke("sidecar:info"),
   pickModel: () => ipcRenderer.invoke("dialog:pickModel"),
+  pickAudio: () => ipcRenderer.invoke("dialog:pickAudio"),
   fileExists: (path) => ipcRenderer.invoke("fs:exists", path),
   revealItem: (path) => ipcRenderer.invoke("shell:revealItem", path),
   chats: {

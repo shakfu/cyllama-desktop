@@ -6,6 +6,42 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added (Phase 5 - transcribe)
+- **`POST /jobs/transcribe`** runs whisper transcription as a /jobs
+  job. Body `{audio_path, model_path, language?, translate?,
+  n_threads?}`. Producer loads the WAV via
+  `cyllama.whisper.cli.load_wav_file`, resamples to 16 kHz, runs
+  `WhisperContext.full` on a worker thread (releases the GIL so the
+  event loop stays responsive), then emits one
+  `{type: "segment", index, t0_ms, t1_ms, text}` event per segment
+  with absolute-millisecond timestamps. Final `result` event carries
+  the full segment list plus the detected language so a late
+  subscriber can reconstruct without replaying the stream.
+- **`/info.features.whisper`** flag. True only when the context class
+  *and* the WAV loader are present in this cyllama build; the loader
+  alone can't produce audio samples and the context alone can't ingest
+  a file.
+- **Transcribe sidebar view** (`features/transcribe-pane.js`). Pick a
+  whisper model (cached models dropdown + Browse... fallback) and
+  audio file via the new `dialog:pickAudio` IPC. Common-language
+  selector with auto-detect default; translate-to-English toggle.
+  Run button spawns the job and streams segments into a timestamped
+  table; Stop cancels via `JobHandle.cancel`. Three copy buttons
+  produce TXT / SRT / VTT to the clipboard.
+- The Transcribe nav-rail button is hidden when
+  `/info.features.whisper` is false, so users on cyllama builds
+  without whisper don't see a dead pane.
+- WAV-only first cut: non-WAV inputs surface a typed error in the
+  job stream pointing at `ffmpeg -ar 16000 -ac 1` rather than
+  silently failing. `dialog:pickAudio` still allows mp3/m4a/flac/ogg
+  through the file picker so the error message is visible.
+- Tests in `tests/test_transcribe.py` cover the feature flag,
+  validation 400s, the 501 path, segment + result event shape,
+  non-WAV rejection, and option pass-through to `WhisperFullParams`.
+  Conftest grows `_FakeWhisperContext` / `_FakeWhisperFullParams`
+  / `_FakeWhisperContextParams` plus `_fake_load_wav_file` /
+  `_fake_resample_audio`, and a `fake_wav` fixture.
+
 ### Added (Phase 4 - clickable sources)
 - **Expandable source rows** in the Documents query view. Each source
   collapses to 3 lines by default; click (or Enter / Space when
