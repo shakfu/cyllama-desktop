@@ -37,9 +37,12 @@ function el(tag, attrs = {}, ...children) {
   return node;
 }
 
-function setStatus(s) {
-  const el = document.getElementById("img-status");
-  if (el) el.textContent = s || "";
+function setStatus(s, kind = "info") {
+  const node = document.getElementById("img-status");
+  if (node) {
+    node.textContent = s || "";
+    node.dataset.kind = kind;
+  }
 }
 
 function updateRunEnabled() {
@@ -51,7 +54,7 @@ function updateRunEnabled() {
 async function modelSelect() {
   let models = [];
   try { const r = await listModels(); models = r.models || []; } catch {}
-  const sel = el("select", { class: "img-select" });
+  const sel = el("select", { class: "dp-select" });
   sel.appendChild(el("option", { value: "" }, "Pick an SD model..."));
   for (const m of models) sel.appendChild(el("option", { value: m.path }, m.name));
   sel.appendChild(el("option", { value: "__browse__" }, "Browse..."));
@@ -163,48 +166,77 @@ async function build() {
   if (!host) return;
   host.replaceChildren();
 
-  const modelRow = el("div", { class: "img-row" },
-    el("label", { class: "img-label" }, "Model"),
-    await modelSelect(),
-  );
+  const promptInput = el("textarea", {
+    class: "dp-textarea", rows: 3, placeholder: "Describe the image...",
+  });
+  promptInput.addEventListener("input", () => {
+    state.prompt = promptInput.value; updateRunEnabled();
+  });
 
-  const promptInput = el("textarea", { class: "img-textarea", rows: 3, placeholder: "Describe the image..." });
-  promptInput.addEventListener("input", () => { state.prompt = promptInput.value; updateRunEnabled(); });
-
-  const negInput = el("textarea", { class: "img-textarea", rows: 2, placeholder: "What to avoid..." });
+  const negInput = el("textarea", {
+    class: "dp-textarea", rows: 2, placeholder: "What to avoid...",
+  });
   negInput.addEventListener("input", () => { state.negative = negInput.value; });
 
-  const wInput = el("input", { type: "number", class: "img-num", min: 64, max: 2048, step: 64, value: state.width });
-  const hInput = el("input", { type: "number", class: "img-num", min: 64, max: 2048, step: 64, value: state.height });
-  const stepsInput = el("input", { type: "number", class: "img-num", min: 1, max: 200, step: 1, value: state.steps });
-  const cfgInput = el("input", { type: "number", class: "img-num", min: 0, max: 30, step: 0.1, value: state.cfg });
-  const seedInput = el("input", { type: "number", class: "img-num", step: 1, value: state.seed });
-  bindNumeric(wInput, "width", true);
-  bindNumeric(hInput, "height", true);
-  bindNumeric(stepsInput, "steps", true);
-  bindNumeric(cfgInput, "cfg", false);
-  bindNumeric(seedInput, "seed", true);
+  // Param grid: each cell is itself a .dp-row so the label sits above
+  // the input the same way the rest of the section does. The grid
+  // override drops .dp-row's bottom margin so the cells sit flush.
+  function numCell(labelText, key, isInt, opts) {
+    const input = el("input", {
+      type: "number", class: "dp-input",
+      ...opts, value: state[key],
+    });
+    bindNumeric(input, key, isInt);
+    return el("div", { class: "dp-row" },
+      el("label", { class: "dp-label" }, labelText),
+      input,
+    );
+  }
 
-  const runBtn = el("button", { type: "button", id: "img-run", class: "btn primary",
-    onclick: run, disabled: true }, "Generate");
-  const stopBtn = el("button", { type: "button", id: "img-stop", class: "btn", hidden: true,
-    onclick: () => { if (state.job) state.job.cancel(); } }, "Stop");
+  // Width/Height + Steps/CFG sit naturally as paired rows; Seed is a
+  // singleton so it gets its own full-width row beneath the grid
+  // (otherwise it leaves an empty grid cell on the right).
+  const params = el("div", { class: "img-grid" },
+    numCell("Width",  "width",  true,  { min: 64, max: 2048, step: 64 }),
+    numCell("Height", "height", true,  { min: 64, max: 2048, step: 64 }),
+    numCell("Steps",  "steps",  true,  { min: 1, max: 200, step: 1 }),
+    numCell("CFG",    "cfg",    false, { min: 0, max: 30, step: 0.1 }),
+  );
+  const seedRow = numCell("Seed", "seed", true, { step: 1 });
 
-  host.appendChild(modelRow);
-  host.appendChild(el("div", { class: "img-row" },
-    el("label", { class: "img-label" }, "Prompt"), promptInput));
-  host.appendChild(el("div", { class: "img-row" },
-    el("label", { class: "img-label" }, "Negative prompt"), negInput));
-  host.appendChild(el("div", { class: "img-grid" },
-    el("label", { class: "img-mini-label" }, "W", wInput),
-    el("label", { class: "img-mini-label" }, "H", hInput),
-    el("label", { class: "img-mini-label" }, "Steps", stepsInput),
-    el("label", { class: "img-mini-label" }, "CFG", cfgInput),
-    el("label", { class: "img-mini-label" }, "Seed", seedInput),
-  ));
-  host.appendChild(el("div", { class: "img-row img-actions" }, runBtn, stopBtn));
-  host.appendChild(el("div", { id: "img-status", class: "img-status" }));
-  host.appendChild(el("div", { id: "img-result", class: "img-result" }));
+  const inputs = el("div", { class: "dp-section" },
+    el("h3", {}, "Generate"),
+
+    el("div", { class: "dp-row" },
+      el("label", { class: "dp-label" }, "Model"),
+      await modelSelect(),
+    ),
+    el("div", { class: "dp-row" },
+      el("label", { class: "dp-label" }, "Prompt"),
+      promptInput,
+    ),
+    el("div", { class: "dp-row" },
+      el("label", { class: "dp-label" }, "Negative prompt"),
+      negInput,
+    ),
+    params,
+    seedRow,
+    el("div", { class: "dp-row dp-actions" },
+      el("button", { type: "button", id: "img-run", class: "btn primary",
+        onclick: run, disabled: true }, "Generate"),
+      el("button", { type: "button", id: "img-stop", class: "btn", hidden: true,
+        onclick: () => { if (state.job) state.job.cancel(); } }, "Stop"),
+    ),
+    el("div", { id: "img-status", class: "dp-status" }),
+  );
+
+  const result = el("div", { class: "dp-section" },
+    el("h3", {}, "Result"),
+    el("div", { id: "img-result", class: "img-result" }),
+  );
+
+  host.appendChild(inputs);
+  host.appendChild(result);
 
   updateRunEnabled();
 }

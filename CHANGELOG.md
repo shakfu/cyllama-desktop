@@ -6,6 +6,24 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed (sidebar-pane UI consistency)
+- The Transcribe and Image panes now reuse the same base primitives
+  the Documents pane defines (`.dp-section`, `.dp-row`, `.dp-label`,
+  `.dp-input`, `.dp-textarea`, `.dp-select`, `.dp-status`,
+  `.dp-check-row`, `.btn` / `.btn.primary`). Bespoke `.tx-*` /
+  `.img-*` layout/control classes are gone; only genuinely
+  domain-specific bits remain (`.tx-segment` row + copy bar,
+  `.img-grid` parameter grid, `.img-result-img` preview).
+  Inputs now sit inside bordered cards with consistent label
+  typography and form-control borders, matching Documents.
+- `.btn` / `.btn.primary` promoted out of `.params-panel` scope so
+  every sidebar view shares the same button look. `:disabled` style
+  added so disabled actions read as inactive.
+- Narrow-sidebar overrides (`.sv-transcribe-body`,
+  `.sv-image-body`) mirror `.sv-documents-body`: `.dp-row` switches
+  to column flow, `.dp-actions` stays row-aligned, `.dp-section`
+  padding tightens for the ~268px column.
+
 ### Added (Phase 6 - image txt2img)
 - **`POST /jobs/image/txt2img`** runs stable-diffusion text-to-image
   via `cyllama.sd.text_to_image` as a /jobs job. Body

@@ -1062,8 +1062,10 @@ svg circle, svg rect, svg polygon { fill: none; }
 .mt-kv .k { color: var(--fg-faint); font-size: 10px; word-break: break-all; }
 .mt-kv .v { color: var(--fg); word-break: break-all; overflow-wrap: anywhere; }
 
-/* Buttons (right-pane scoped) */
-.params-panel .btn {
+/* Buttons. Originally scoped under .params-panel; promoted to global
+   so the sidebar panes (Documents, Transcribe, Image) share the same
+   look without each declaring its own primary/secondary variants. */
+.btn {
   appearance: none;
   border: 1px solid var(--border);
   background: var(--bg-elev);
@@ -1074,8 +1076,10 @@ svg circle, svg rect, svg polygon { fill: none; }
   font-size: 12px;
   cursor: pointer;
 }
-.params-panel .btn:hover { background: var(--bg-sunken); }
-.params-panel .btn.primary { border-color: var(--border-strong); }
+.btn:hover { background: var(--bg-sunken); }
+.btn.primary { border-color: var(--border-strong); }
+.btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.btn:disabled:hover { background: var(--bg-elev); }
 
 /* ModelPicker dropdown -- same as before, kept under mp- prefix. */
 .mp-menu {
@@ -1232,6 +1236,12 @@ svg circle, svg rect, svg polygon { fill: none; }
 .dp-input:focus, .dp-textarea:focus, .dp-select:focus { outline: none; border-color: var(--border-strong); }
 .dp-select { cursor: pointer; }
 
+.dp-check-row {
+  display: flex; align-items: center; gap: 8px;
+  cursor: pointer; font-size: 12px;
+}
+.dp-check-row input { margin: 0; }
+
 .dp-create-form {
   margin-top: 12px;
   padding: 16px;
@@ -1268,37 +1278,77 @@ svg circle, svg rect, svg polygon { fill: none; }
   overflow: hidden;
 }
 .dp-source-file { margin-left: auto; font-size: 10px; color: var(--fg-faint); }
-/* Image sidebar view */
-.sv-image-body { padding: 12px 14px; overflow-y: auto; }
-.img-row { margin-bottom: 12px; }
-.img-label { display: block; font-size: 11px; font-weight: 600; color: var(--fg-faint); text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 4px; }
-.img-mini-label { display: flex; flex-direction: column; gap: 3px; font-size: 10px; color: var(--fg-faint); text-transform: uppercase; letter-spacing: 0.04em; }
-.img-select, .img-textarea { width: 100%; }
-.img-textarea { resize: vertical; min-height: 48px; font-size: 12px; }
-.img-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; margin-bottom: 12px; }
-.img-num { width: 100%; }
-.img-actions { display: flex; gap: 8px; }
-.img-status { font-size: 11px; color: var(--fg-faint); margin: 8px 0 12px; min-height: 14px; }
+/* Transcribe + Image sidebar views reuse the .dp-* primitives that the
+   Documents pane defines; only the narrow-sidebar overrides + truly
+   domain-specific elements (segment row, image preview, W/H grid) are
+   declared here. */
+.sv-transcribe-body, .sv-image-body { padding: 8px 14px 12px; overflow-y: auto; }
+.sv-transcribe-body .dp-row,
+.sv-image-body .dp-row { flex-direction: column; gap: 4px; align-items: stretch; }
+.sv-transcribe-body .dp-row.dp-actions,
+.sv-image-body .dp-row.dp-actions { flex-direction: row; gap: 6px; margin-top: 8px; }
+.sv-transcribe-body .dp-label,
+.sv-image-body .dp-label { width: auto; padding-top: 0; }
+.sv-transcribe-body .dp-section,
+.sv-image-body .dp-section { padding: 10px 12px; }
+/* The first card in the body would otherwise stack a 16px section
+   margin on top of the 8px body padding, leaving the header floating
+   far above the content. Reset it so the body padding alone controls
+   the gap. */
+.sv-transcribe-body .dp-section:first-child,
+.sv-image-body .dp-section:first-child { margin-top: 0; }
+/* In these panes the action row's primary button is the dominant
+   action (Transcribe / Generate). Stretch buttons full-width so a
+   sole visible button doesn't sit lonely in the corner; when Stop is
+   shown alongside, both share the row equally. */
+.sv-transcribe-body .dp-actions .btn,
+.sv-image-body .dp-actions .btn { flex: 1; }
+
+/* Domain-specific bits below. */
+
+/* Image: parameter grid + result preview. */
+.img-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.img-grid .dp-row { margin-bottom: 0; }
 .img-result { margin-top: 8px; }
-.img-result-img { max-width: 100%; height: auto; border-radius: 4px; display: block; background: var(--bg-sunken); }
+.img-result-img {
+  max-width: 100%;
+  height: auto;
+  border-radius: 6px;
+  display: block;
+  background: var(--bg-sunken);
+}
 .img-result-meta { font-size: 11px; color: var(--fg-faint); margin-top: 6px; }
 
-/* Transcribe sidebar view */
-.sv-transcribe-body { padding: 12px 14px; overflow-y: auto; }
-.tx-row { margin-bottom: 12px; }
-.tx-label { display: block; font-size: 11px; font-weight: 600; color: var(--fg-faint); text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 4px; }
-.tx-select { width: 100%; }
+/* Transcribe: file picker row + segment table. */
 .tx-audio-row { display: flex; gap: 8px; align-items: center; }
-.tx-audio-label { font-size: 11px; color: var(--fg-faint); flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.tx-check-row { display: flex; align-items: center; gap: 8px; cursor: pointer; font-size: 12px; }
-.tx-actions { display: flex; gap: 8px; }
-.tx-status { font-size: 11px; color: var(--fg-faint); margin: 8px 0 12px; min-height: 14px; }
-.tx-seg-head { display: flex; align-items: center; justify-content: space-between; margin: 12px 0 8px; }
-.tx-seg-head h3 { font-size: 11px; font-weight: 600; color: var(--fg-faint); margin: 0; text-transform: uppercase; letter-spacing: 0.04em; }
+.tx-audio-label {
+  font-size: 11px; color: var(--fg-faint);
+  flex: 1; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.tx-seg-head {
+  display: flex; align-items: center; justify-content: space-between;
+  margin: 12px 0 8px;
+}
+.tx-seg-head h3 {
+  font-size: 11px; font-weight: 600; color: var(--fg-faint);
+  margin: 0; text-transform: uppercase; letter-spacing: 0.04em;
+}
 .tx-copy-row { display: flex; gap: 4px; }
 .tx-segments { display: flex; flex-direction: column; gap: 4px; }
 .tx-empty { font-size: 11px; color: var(--fg-faint); padding: 8px; }
-.tx-segment { display: flex; gap: 8px; padding: 6px 8px; background: var(--bg-sunken); border-radius: 4px; font-size: 12px; }
+.tx-segment {
+  display: flex; gap: 8px;
+  padding: 6px 8px;
+  background: var(--bg-sunken);
+  border-radius: 4px;
+  font-size: 12px;
+}
 .tx-ts { font-size: 10px; color: var(--fg-faint); flex: 0 0 auto; padding-top: 1px; }
 .tx-text { flex: 1; line-height: 1.45; word-break: break-word; }
 

@@ -80,10 +80,13 @@ async function copyText(getText, btn) {
   }
 }
 
-function setStatus(s) {
+function setStatus(s, kind = "info") {
   state.status = s;
-  const el = document.getElementById("tx-status");
-  if (el) el.textContent = s || "";
+  const node = document.getElementById("tx-status");
+  if (node) {
+    node.textContent = s || "";
+    node.dataset.kind = kind;
+  }
 }
 
 async function modelSelect() {
@@ -92,7 +95,7 @@ async function modelSelect() {
   // Whisper GGML files conventionally have "whisper" in the name and
   // live as `.bin` rather than `.gguf`. Don't filter -- the user might
   // have placed a whisper file under MODELS_DIR with any name.
-  const sel = el("select", { class: "tx-select" });
+  const sel = el("select", { class: "dp-select" });
   sel.appendChild(el("option", { value: "" }, "Pick a whisper model..."));
   for (const m of models) {
     const opt = el("option", { value: m.path }, m.name);
@@ -116,7 +119,7 @@ async function modelSelect() {
 }
 
 function languageSelect() {
-  const sel = el("select", { class: "tx-select" });
+  const sel = el("select", { class: "dp-select" });
   for (const [code, label] of COMMON_LANGS) {
     sel.appendChild(el("option", { value: code }, label));
   }
@@ -225,60 +228,65 @@ async function build() {
   if (!host) return;
   host.replaceChildren();
 
-  const modelRow = el("div", { class: "tx-row" },
-    el("label", { class: "tx-label" }, "Model"),
-    await modelSelect(),
-  );
+  // Inputs section -- model + audio + language + translate.
+  const inputs = el("div", { class: "dp-section" },
+    el("h3", {}, "Input"),
 
-  const audioRow = el("div", { class: "tx-row" },
-    el("label", { class: "tx-label" }, "Audio (WAV)"),
-    el("div", { class: "tx-audio-row" },
-      el("button", { type: "button", class: "btn", onclick: pickAudio }, "Choose..."),
-      el("span", { id: "tx-audio-label", class: "tx-audio-label mono" },
-        state.audioPath ? basename(state.audioPath) : "(none)"),
+    el("div", { class: "dp-row" },
+      el("label", { class: "dp-label" }, "Model"),
+      await modelSelect(),
     ),
-  );
 
-  const langRow = el("div", { class: "tx-row" },
-    el("label", { class: "tx-label" }, "Language"),
-    languageSelect(),
-  );
-
-  const translateRow = el("div", { class: "tx-row" },
-    el("label", { class: "tx-check-row" },
-      el("input", { type: "checkbox", id: "tx-translate", onchange: (e) => { state.translate = e.target.checked; } }),
-      el("span", {}, "Translate to English"),
+    el("div", { class: "dp-row" },
+      el("label", { class: "dp-label" }, "Audio (WAV)"),
+      el("div", { class: "tx-audio-row" },
+        el("button", { type: "button", class: "btn", onclick: pickAudio }, "Choose..."),
+        el("span", { id: "tx-audio-label", class: "tx-audio-label mono" },
+          state.audioPath ? basename(state.audioPath) : "(none)"),
+      ),
     ),
-  );
 
-  const runBtn = el("button", { type: "button", id: "tx-run", class: "btn primary", onclick: run, disabled: true }, "Transcribe");
-  const stopBtn = el("button", { type: "button", id: "tx-stop", class: "btn", hidden: true,
-    onclick: () => { if (state.job) state.job.cancel(); } }, "Stop");
-  const actionsRow = el("div", { class: "tx-row tx-actions" }, runBtn, stopBtn);
-
-  const statusEl = el("div", { id: "tx-status", class: "tx-status" }, state.status);
-
-  const segHeader = el("div", { class: "tx-seg-head" },
-    el("h3", {}, "Segments"),
-    el("div", { class: "tx-copy-row" },
-      el("button", { type: "button", class: "btn-mini",
-        onclick: (e) => copyText(asTxt, e.target) }, "TXT"),
-      el("button", { type: "button", class: "btn-mini",
-        onclick: (e) => copyText(asSrt, e.target) }, "SRT"),
-      el("button", { type: "button", class: "btn-mini",
-        onclick: (e) => copyText(asVtt, e.target) }, "VTT"),
+    el("div", { class: "dp-row" },
+      el("label", { class: "dp-label" }, "Language"),
+      languageSelect(),
     ),
-  );
-  const segHost = el("div", { id: "tx-segments", class: "tx-segments" });
 
-  host.appendChild(modelRow);
-  host.appendChild(audioRow);
-  host.appendChild(langRow);
-  host.appendChild(translateRow);
-  host.appendChild(actionsRow);
-  host.appendChild(statusEl);
-  host.appendChild(segHeader);
-  host.appendChild(segHost);
+    el("div", { class: "dp-row" },
+      el("label", { class: "dp-check-row" },
+        el("input", { type: "checkbox", id: "tx-translate",
+          onchange: (e) => { state.translate = e.target.checked; } }),
+        el("span", {}, "Translate to English"),
+      ),
+    ),
+
+    el("div", { class: "dp-row dp-actions" },
+      el("button", { type: "button", id: "tx-run", class: "btn primary",
+        onclick: run, disabled: true }, "Transcribe"),
+      el("button", { type: "button", id: "tx-stop", class: "btn", hidden: true,
+        onclick: () => { if (state.job) state.job.cancel(); } }, "Stop"),
+    ),
+
+    el("div", { id: "tx-status", class: "dp-status" }, state.status),
+  );
+
+  // Segments section -- timestamped table + copy-as buttons.
+  const segments = el("div", { class: "dp-section" },
+    el("div", { class: "tx-seg-head" },
+      el("h3", {}, "Segments"),
+      el("div", { class: "tx-copy-row" },
+        el("button", { type: "button", class: "btn-mini",
+          onclick: (e) => copyText(asTxt, e.target) }, "TXT"),
+        el("button", { type: "button", class: "btn-mini",
+          onclick: (e) => copyText(asSrt, e.target) }, "SRT"),
+        el("button", { type: "button", class: "btn-mini",
+          onclick: (e) => copyText(asVtt, e.target) }, "VTT"),
+      ),
+    ),
+    el("div", { id: "tx-segments", class: "tx-segments" }),
+  );
+
+  host.appendChild(inputs);
+  host.appendChild(segments);
 
   redrawSegments();
   updateRunEnabled();
