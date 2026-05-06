@@ -10,6 +10,11 @@ src/renderer/vendor/
 __pycache__/
 *.py[oc]
 
+# Playwright e2e artifacts
+playwright-report/
+test-results/
+.playwright/
+
 # Logs
 logs
 *.log

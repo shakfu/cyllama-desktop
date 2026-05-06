@@ -6,6 +6,33 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added (Playwright per-pane smoke suite)
+- **`tests/e2e/`** with `@playwright/test`. Nine smoke tests, one per
+  surface (Chat, Documents, Transcribe, Image, Server, Batch,
+  Models tab, Agents tab, General tab). Each boots Electron via
+  `_electron.launch`, switches into the pane, and asserts the
+  primary content rendered (header / form fields / load-bearing
+  buttons). Catches the layer pytest can't reach: the IPC bridge,
+  the sidecar handshake, the `/info.features` → nav-button visibility
+  wiring, and per-pane lifecycle hooks.
+- **Stubbed sidecar via existing pytest stubs.** Two main-process
+  env hooks: `CYLLAMA_E2E_PYTHON` selects the python binary and
+  `CYLLAMA_E2E_LAUNCHER` swaps the sidecar entry script. The
+  Playwright harness (`tests/e2e/_harness.js`) sets both to point
+  at `tests/e2e/sidecar_launcher.py`, which imports
+  `tests/conftest.py` (running its `_install_cyllama_stub()` side
+  effect) before importing the real `python-sidecar/sidecar.py`.
+  Net effect: the renderer talks to the same FastAPI app the pytest
+  suite drives, against the same stubbed `cyllama` module. No real
+  cyllama, no GGUFs, no `make python` required.
+- **`ELECTRON_USER_DATA_DIR` env hook** in `src/main/index.js` so
+  each test gets an isolated `userData` (chats / artifacts /
+  workspaces / models cache) -- mirrors `tmp_path` for Electron.
+- **`make e2e`** + **`npm run test:e2e`** scripts. The e2e suite is
+  a separate target; `make test` keeps stubbing pytest only and
+  excludes `tests/e2e/` from collection. Suite finishes in ~10 s on
+  a warm cache (Electron cold-start dominates).
+
 ### Added (Phase 9 - batch + quantize tooling)
 - **`POST /jobs/batch`** wraps `cyllama.batch_generate`. Body
   `{model_path, prompts, params?, batch_size?, n_seq_max?}` where

@@ -11,6 +11,14 @@ const net = require("net");
 // setName() must run before app.whenReady() to take effect on macOS.
 app.setName("Cyllama Desktop");
 
+// E2E hook: redirect userData so the Playwright harness gets an
+// isolated workspace per test rather than blowing away the user's
+// real chats / artifacts / models cache. Must run *before* any
+// app.getPath("userData") read.
+if (process.env.ELECTRON_USER_DATA_DIR) {
+  app.setPath("userData", process.env.ELECTRON_USER_DATA_DIR);
+}
+
 let mainWindow = null;
 let sidecarProc = null;
 let sidecarInfo = null; // { port, token }
@@ -95,6 +103,12 @@ pushLog._carryOut = "";
 pushLog._carryErr = "";
 
 function resolvePythonBin() {
+  // E2E hook: tests can point at a system python (no need for the
+  // bundled python-build-standalone env) so the suite runs without
+  // ``make python``. The same env var is consumed below to swap the
+  // sidecar script for a stub-loading launcher.
+  if (process.env.CYLLAMA_E2E_PYTHON) return process.env.CYLLAMA_E2E_PYTHON;
+
   // In packaged app: extraResources copied to <Resources>/python
   // In dev: build/python-<arch>-<platform>/ next to package.json
   const isPackaged = app.isPackaged;
@@ -114,6 +128,12 @@ function resolvePythonBin() {
 }
 
 function resolveSidecarScript() {
+  // E2E hook: when set, Electron launches this script instead of the
+  // real sidecar entry. The launcher installs the conftest cyllama
+  // stub before importing sidecar.py, so the renderer talks to a
+  // deterministic FastAPI app without any real cyllama backend.
+  if (process.env.CYLLAMA_E2E_LAUNCHER) return process.env.CYLLAMA_E2E_LAUNCHER;
+
   // sidecar.py ships under extraResources too, via electron-builder files config?
   // Simpler: bundle it inside src/ so it ends up in app.asar — but Python can't
   // import from asar, so we keep it in python-sidecar/ and copy to resources.

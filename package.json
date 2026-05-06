@@ -10,6 +10,7 @@
     "vendor": "bash scripts/copy-vendor.sh",
     "build:renderer": "esbuild src/renderer/src/main.js --bundle --outfile=src/renderer/dist/renderer.js --format=iife --target=chrome120 --sourcemap=inline",
     "watch:renderer": "esbuild src/renderer/src/main.js --bundle --outfile=src/renderer/dist/renderer.js --format=iife --target=chrome120 --sourcemap=inline --watch",
+    "test:e2e": "npm run build:renderer && playwright test",
     "build:python": "bash scripts/build-python-env.sh",
     "build:mac-arm64": "npm run build:renderer && electron-builder --mac --arm64",
     "build:mac-x64": "npm run build:renderer && electron-builder --mac --x64",
@@ -21,6 +22,7 @@
   "license": "MIT",
   "devDependencies": {
     "@electron/notarize": "^2.5.0",
+    "@playwright/test": "^1.59.1",
     "electron": "^33.0.0",
     "electron-builder": "^25.1.8",
     "esbuild": "^0.24.0",
