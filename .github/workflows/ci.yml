@@ -1,0 +1,102 @@
+# CI for cyllama-desktop. Runs the two test suites in parallel:
+#
+#   pytest -- tests/, against the conftest cyllama stub. Doesn't need
+#             a real cyllama install or any GGUF files.
+#   e2e    -- Playwright per-pane smoke. Boots Electron under xvfb
+#             against the same stubbed sidecar.
+#
+# Both jobs run on ubuntu-latest because Electron under xvfb is the
+# cheapest path to a headless e2e run; the bundled python-build-
+# standalone env isn't needed (the test sidecar launcher only needs
+# fastapi + uvicorn + httpx, installed via pip).
+
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Cancel in-flight runs on the same branch when a new push lands.
+# Saves CI minutes on rapid rebases.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: pytest (sidecar)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install Python test deps
+        run: pip install --quiet pytest "fastapi>=0.115" "httpx>=0.27"
+
+      - name: Run pytest
+        run: pytest tests/ --ignore=tests/e2e -v
+
+  e2e:
+    name: playwright (per-pane smoke)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install Python deps for the stub sidecar
+        # The launcher imports tests/conftest.py (whose ``_install_
+        # cyllama_stub()`` runs as a side effect), and conftest itself
+        # imports pytest at module level -- so pytest is needed in the
+        # e2e env too. uvicorn[standard] pulls in the things asyncio
+        # servers expect; httpx is used by the sidecar's HF download
+        # tool import path.
+        run: pip install --quiet pytest "fastapi>=0.115" "uvicorn[standard]>=0.32" "httpx>=0.27"
+
+      - name: Install Node deps
+        # ``--ignore-scripts`` skips the postinstall vendor copy for the
+        # KaTeX / marked assets -- the build:renderer step below runs
+        # ``npm run vendor`` indirectly via the postinstall hook on a
+        # second pass, but if that's flaky we run it explicitly. For
+        # CI we want both the playwright + electron bins.
+        run: npm ci
+
+      - name: Install xvfb (Electron needs a display)
+        run: sudo apt-get update && sudo apt-get install -y xvfb
+
+      - name: Build renderer bundle
+        run: npm run build:renderer
+
+      - name: Run Playwright e2e under xvfb
+        # ``xvfb-run -a`` picks an unused display number automatically;
+        # ``--server-args`` bumps the screen size so layout tests don't
+        # collapse onto a tiny virtual display.
+        run: xvfb-run -a --server-args="-screen 0 1280x900x24" npx playwright test
+        env:
+          # Forces deterministic Chromium decisions (cf. Playwright docs).
+          CI: "1"
+
+      - name: Upload Playwright report on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: |
+            playwright-report/
+            test-results/
+          retention-days: 7

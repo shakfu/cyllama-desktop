@@ -1,7 +1,11 @@
-// Image sidebar view (Phase 6, txt2img slice). Pick an SD model, type a
-// prompt, generate. The PNG result is fetched from the sidecar with
-// bearer auth into a blob URL so it can satisfy the CSP without us
-// having to widen ``img-src`` to allow loopback HTTP.
+// Image sidebar view (Phase 6, txt2img slice + gallery). Pick an SD
+// model, type a prompt, generate. The PNG result is fetched from the
+// sidecar with bearer auth into a blob URL so it can satisfy the CSP
+// without us having to widen ``img-src`` to allow loopback HTTP.
+//
+// The Gallery section reads ``/artifacts/image`` -- a filesystem-only
+// listing distinct from the job registry, so it survives sidecar
+// restarts and finished-job GC.
 
 import { startJob } from "../lib/jobs.js";
 import { listModels } from "../lib/models.js";
@@ -20,6 +24,9 @@ const state = {
   // Track the last generated blob URL so we can revoke() it before
   // overwriting -- otherwise we leak an image-sized buffer per gen.
   lastBlobUrl: null,
+  // Gallery state. ``thumbs`` is a {url -> blob-url} cache so the
+  // grid doesn't re-fetch every time the pane redraws.
+  gallery: { items: [], thumbs: new Map() },
 };
 
 function el(tag, attrs = {}, ...children) {
@@ -123,6 +130,8 @@ async function run() {
     const url = await fetchArtifactBlob(result.artifact_url);
     showImage(url, result);
     setStatus(`done · ${result.width}x${result.height} · seed ${result.seed}`);
+    // Surface the new render in the gallery without a manual reload.
+    refreshGallery();
   } catch (e) {
     setStatus(`failed: ${e.message}`);
   } finally {
@@ -159,6 +168,113 @@ function bindNumeric(input, key, isInt) {
     const n = isInt ? parseInt(input.value, 10) : parseFloat(input.value);
     if (Number.isFinite(n)) state[key] = n;
   });
+}
+
+// Fetch + cache a thumbnail blob URL for a gallery artifact. Cached
+// keyed on the artifact URL so re-renders don't re-fetch.
+async function getThumbBlobUrl(artifactUrl) {
+  const cache = state.gallery.thumbs;
+  if (cache.has(artifactUrl)) return cache.get(artifactUrl);
+  try {
+    const res = await sidecarFetch(artifactUrl);
+    if (!res.ok) return "";
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    cache.set(artifactUrl, url);
+    return url;
+  } catch {
+    return "";
+  }
+}
+
+// Drop blob URLs that no longer correspond to a listed artifact. Called
+// after a refresh so we don't leak image-sized buffers when the user
+// deletes artifacts on disk between sessions.
+function gcThumbs() {
+  const live = new Set(state.gallery.items.map((it) => it.url));
+  for (const [k, v] of state.gallery.thumbs) {
+    if (!live.has(k)) {
+      try { URL.revokeObjectURL(v); } catch {}
+      state.gallery.thumbs.delete(k);
+    }
+  }
+}
+
+async function refreshGallery() {
+  try {
+    const r = await sidecarFetch("/artifacts/image");
+    if (!r.ok) return;
+    const j = await r.json();
+    state.gallery.items = j.items || [];
+  } catch {
+    state.gallery.items = [];
+  }
+  gcThumbs();
+  await renderGallery();
+}
+
+async function renderGallery() {
+  const host = document.getElementById("img-gallery");
+  if (!host) return;
+  host.replaceChildren();
+  if (!state.gallery.items.length) {
+    host.appendChild(el("div", { class: "img-gallery-empty" },
+      "No past renders. Generate something above to populate the gallery."));
+    return;
+  }
+  // Render placeholders synchronously so the layout settles, then
+  // resolve the blob URLs in parallel.
+  const cards = state.gallery.items.map((it) => {
+    const img = el("img", {
+      class: "img-gallery-thumb",
+      alt: `${it.job_id}`,
+      title: new Date(it.mtime * 1000).toLocaleString(),
+    });
+    const card = el("button", {
+      type: "button",
+      class: "img-gallery-card",
+      onclick: () => loadFromGallery(it),
+    }, img);
+    return { it, card, img };
+  });
+  for (const { card } of cards) host.appendChild(card);
+  await Promise.all(cards.map(async ({ it, img }) => {
+    const url = await getThumbBlobUrl(it.url);
+    if (url) img.src = url;
+  }));
+}
+
+async function loadFromGallery(item) {
+  // Drop the previous main-image blob URL before swapping; the gallery
+  // thumbnail cache keeps its own reference so we don't double-revoke.
+  if (state.lastBlobUrl) {
+    try { URL.revokeObjectURL(state.lastBlobUrl); } catch {}
+    state.lastBlobUrl = null;
+  }
+  try {
+    const url = await getThumbBlobUrl(item.url);
+    if (!url) {
+      setStatus("failed to load artifact", "err");
+      return;
+    }
+    // Reuse the same blob URL for the main viewer; clone the URL so
+    // revoking the main view's URL doesn't kill the cached thumbnail.
+    const res = await sidecarFetch(item.url);
+    const blob = await res.blob();
+    const fresh = URL.createObjectURL(blob);
+    state.lastBlobUrl = fresh;
+    const host = document.getElementById("img-result");
+    if (host) {
+      host.replaceChildren(
+        el("img", { class: "img-result-img", src: fresh, alt: item.job_id }),
+        el("div", { class: "img-result-meta" },
+          `${item.job_id.slice(0, 8)} · ${(item.size / 1024).toFixed(1)} KB`),
+      );
+    }
+    setStatus(`loaded ${item.job_id.slice(0, 8)} from gallery`);
+  } catch (e) {
+    setStatus(`load failed: ${e.message}`, "err");
+  }
 }
 
 async function build() {
@@ -235,10 +351,17 @@ async function build() {
     el("div", { id: "img-result", class: "img-result" }),
   );
 
+  const gallery = el("div", { class: "dp-section" },
+    el("h3", {}, "Gallery"),
+    el("div", { id: "img-gallery", class: "img-gallery" }),
+  );
+
   host.appendChild(inputs);
   host.appendChild(result);
+  host.appendChild(gallery);
 
   updateRunEnabled();
+  refreshGallery();
 }
 
 let mounted = false;

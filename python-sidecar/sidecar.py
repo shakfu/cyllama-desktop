@@ -896,6 +896,68 @@ def jobs_result(job_id: str):
     return {"result": job.result}
 
 
+@app.get("/artifacts/image")
+def artifacts_image_list():
+    """List past image txt2img artifacts on disk.
+
+    Each image job writes ``<ARTIFACTS_DIR>/<job_id>/output.png`` (see
+    the txt2img producer). We enumerate those rather than reading the
+    job registry because finished jobs get GC'd after an hour, while
+    artifacts persist on disk and the user expects the gallery to
+    survive sidecar restarts.
+
+    Returns ``{items: [{job_id, name, size, mtime, url}]}`` sorted by
+    most-recent first. ``url`` is the ``/artifacts/...`` path for
+    serving the file (does not require the job registry).
+    """
+    items: list[dict] = []
+    if ARTIFACTS_DIR.is_dir():
+        for sub in ARTIFACTS_DIR.iterdir():
+            if not sub.is_dir():
+                continue
+            png = sub / "output.png"
+            if not png.is_file():
+                continue
+            try:
+                st = png.stat()
+            except OSError:
+                continue
+            items.append({
+                "job_id": sub.name,
+                "name": png.name,
+                "size": st.st_size,
+                "mtime": st.st_mtime,
+                "url": f"/artifacts/{sub.name}/{png.name}",
+            })
+    items.sort(key=lambda r: r["mtime"], reverse=True)
+    return {"items": items}
+
+
+@app.get("/artifacts/{job_id}/{name}")
+def artifacts_serve(job_id: str, name: str):
+    """Serve a job artifact file directly, bypassing the job registry.
+
+    The /jobs/<id>/artifact/<name> endpoint requires the job to still
+    be in the registry (so it 404s on GC'd jobs). This route serves
+    purely off the filesystem so the gallery can show artifacts from
+    long-finished jobs. Path traversal is locked down via the same
+    name regex + ``relative_to`` check.
+    """
+    if not _ARTIFACT_NAME_RE.match(job_id):
+        raise HTTPException(400, "invalid job id")
+    if not _ARTIFACT_NAME_RE.match(name):
+        raise HTTPException(400, "invalid artifact name")
+    base = (ARTIFACTS_DIR / job_id).resolve()
+    target = (base / name).resolve()
+    try:
+        target.relative_to(ARTIFACTS_DIR.resolve())
+    except ValueError:
+        raise HTTPException(400, "path escape")
+    if not target.is_file():
+        raise HTTPException(404, "artifact not found")
+    return FileResponse(str(target))
+
+
 @app.get("/jobs/{job_id}/artifact/{name}")
 def jobs_artifact(job_id: str, name: str):
     job = _get_job(job_id)

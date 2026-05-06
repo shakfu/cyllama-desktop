@@ -6,6 +6,37 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added (CI workflow + image gallery)
+- **`.github/workflows/ci.yml`**. Two parallel jobs on `ubuntu-latest`:
+  `test` runs the pytest suite (with `--ignore=tests/e2e`), `e2e`
+  runs the Playwright Electron smoke under `xvfb-run`. Both trigger
+  on push-to-main and pull_request, with concurrency cancelling
+  in-flight runs when a new push lands. The e2e job uploads
+  `playwright-report/` + `test-results/` as a build artifact on
+  failure for offline triage.
+- **`GET /artifacts/image`** lists past txt2img runs as
+  `[{job_id, name, size, mtime, url}]` sorted most-recent first.
+  Reads `<ARTIFACTS_DIR>/<job_id>/output.png` directly off the
+  filesystem rather than the job registry so the gallery survives
+  sidecar restarts and the 1-hour finished-job GC.
+- **`GET /artifacts/{job_id}/{name}`** serves a job artifact file
+  bypassing the job registry. Distinct from
+  `/jobs/{id}/artifact/{name}` for the same reason -- the gallery
+  needs to load PNGs from long-finished jobs. Path traversal is
+  locked down via the existing `_ARTIFACT_NAME_RE` plus a
+  `relative_to(ARTIFACTS_DIR)` check.
+- **Gallery section in the Image pane**. Grid of past-render
+  thumbnails fetched via the existing bearer-auth flow into a blob
+  URL cache (keyed on artifact URL so re-renders don't refetch).
+  Click a thumbnail to load it into the main result viewer. The
+  cache GCs blob URLs whose artifacts disappear on disk between
+  refreshes. Refreshes after every successful new generation so the
+  user sees the new render slot in immediately.
+- Tests in `tests/test_image.py` cover the empty-list, populated-
+  list (with mtime ordering + per-item shape), serve-returns-png,
+  404 on missing artifact, 400 on regex-rejected names, and the
+  auth gate.
+
 ### Added (Playwright per-pane smoke suite)
 - **`tests/e2e/`** with `@playwright/test`. Nine smoke tests, one per
   surface (Chat, Documents, Transcribe, Image, Server, Batch,
