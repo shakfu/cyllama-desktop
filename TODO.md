@@ -88,6 +88,20 @@ or move them to `CHANGELOG.md` under `[Unreleased]`.
 - [ ] Whisper integration (transcribe audio in composer; voice prompts).
 - [ ] Stable Diffusion: separate workspace tab via the nav rail.
 
+## Agents
+
+- [ ] **ContractAgent UI** (Phase 7 follow-up). cyllama exposes
+      `ContractSpec` / `PreCondition` / `PostCondition` /
+      `ContractPolicy` / `ContractViolation`, but the wire shape
+      between the renderer's pre/post text fields, the
+      `CONTRACT_CHECK` / `CONTRACT_VIOLATION` event stream, and the
+      enforcement policy still needs design. Minimum surface: two
+      multi-line text fields (pre, post) on the Agents tab, a
+      sidecar branch in `/jobs/agent/run` that constructs
+      `ContractAgent` instead of `ReActAgent` when either field is
+      non-empty, and renderer styling for the contract-* event
+      types (already mapped in CSS).
+
 ## App shell
 
 - [ ] Wire remaining nav-rail buttons (Models — Chats and Console done).

@@ -1346,27 +1346,70 @@ svg circle, svg rect, svg polygon { fill: none; }
    Documents pane defines; only the narrow-sidebar overrides + truly
    domain-specific elements (segment row, image preview, W/H grid) are
    declared here. */
-.sv-transcribe-body, .sv-image-body { padding: 8px 14px 12px; overflow-y: auto; }
+.sv-transcribe-body, .sv-image-body, .sv-server-body { padding: 8px 14px 12px; overflow-y: auto; }
 .sv-transcribe-body .dp-row,
-.sv-image-body .dp-row { flex-direction: column; gap: 4px; align-items: stretch; }
+.sv-image-body .dp-row,
+.sv-server-body .dp-row { flex-direction: column; gap: 4px; align-items: stretch; }
 .sv-transcribe-body .dp-row.dp-actions,
-.sv-image-body .dp-row.dp-actions { flex-direction: row; gap: 6px; margin-top: 8px; }
+.sv-image-body .dp-row.dp-actions,
+.sv-server-body .dp-row.dp-actions { flex-direction: row; gap: 6px; margin-top: 8px; }
 .sv-transcribe-body .dp-label,
-.sv-image-body .dp-label { width: auto; padding-top: 0; }
+.sv-image-body .dp-label,
+.sv-server-body .dp-label { width: auto; padding-top: 0; }
 .sv-transcribe-body .dp-section,
-.sv-image-body .dp-section { padding: 10px 12px; }
+.sv-image-body .dp-section,
+.sv-server-body .dp-section { padding: 10px 12px; }
 /* The first card in the body would otherwise stack a 16px section
    margin on top of the 8px body padding, leaving the header floating
    far above the content. Reset it so the body padding alone controls
    the gap. */
 .sv-transcribe-body .dp-section:first-child,
-.sv-image-body .dp-section:first-child { margin-top: 0; }
-/* In these panes the action row's primary button is the dominant
-   action (Transcribe / Generate). Stretch buttons full-width so a
-   sole visible button doesn't sit lonely in the corner; when Stop is
-   shown alongside, both share the row equally. */
+.sv-image-body .dp-section:first-child,
+.sv-server-body .dp-section:first-child { margin-top: 0; }
+/* Sidebar-pane primary actions are dominant (Transcribe / Generate /
+   Start) -- stretch full-width so a sole button doesn't sit lonely
+   in a corner. When Stop is shown alongside, both share the row
+   equally. The Server pane's running view shows a single Stop button
+   styled the same way. */
 .sv-transcribe-body .dp-actions .btn,
-.sv-image-body .dp-actions .btn { flex: 1; }
+.sv-image-body .dp-actions .btn,
+.sv-server-body .dp-actions .btn { flex: 1; }
+
+/* Server-specific: URL pill, curl block, hint copy. */
+.sv-server-body .dp-hint {
+  font-size: 11px; color: var(--fg-faint);
+  margin-top: 4px; line-height: 1.4;
+}
+.sv-url-row, .sv-curl-row {
+  display: flex; align-items: flex-start; gap: 6px;
+}
+.sv-url {
+  flex: 1; min-width: 0;
+  background: var(--bg-sunken);
+  padding: 6px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  word-break: break-all;
+  display: inline-block;
+}
+.sv-curl {
+  flex: 1; min-width: 0;
+  background: var(--bg-sunken);
+  padding: 8px 10px;
+  border-radius: 4px;
+  font-size: 10px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-all;
+  margin: 0;
+  overflow-x: auto;
+}
+.sv-model-path {
+  font-size: 11px; color: var(--fg-faint);
+  word-break: break-all; line-height: 1.4;
+}
+.dp-status[data-kind="ok"] { color: #6ab04c; }
+.dp-status[data-kind="err"] { color: #c33; }
 
 /* Domain-specific bits below. */
 

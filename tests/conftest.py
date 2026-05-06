@@ -380,6 +380,46 @@ class _FakeWhisperContext:
     def close(self): self.closed = True
 
 
+class _FakeServerConfig:
+    """Minimal stand-in for cyllama's ServerConfig dataclass."""
+    def __init__(self, model_path, host="127.0.0.1", port=8080, **kwargs):
+        self.model_path = model_path
+        self.host = host
+        self.port = port
+        for k, v in kwargs.items(): setattr(self, k, v)
+
+
+class _FakeServer:
+    """Common base for the embedded + python server stubs.
+
+    ``start_returns`` toggles the start() return value so tests can
+    drive the failure branch without subclassing per-flavour.
+    """
+    instances: list["_FakeServer"] = []
+    start_returns = True
+
+    def __init__(self, config):
+        self.config = config
+        self.started = False
+        self.stopped = False
+        type(self).instances.append(self)
+
+    def start(self):
+        self.started = True
+        return type(self).start_returns
+
+    def stop(self):
+        self.stopped = True
+
+
+class _FakeEmbeddedServer(_FakeServer):
+    instances: list["_FakeEmbeddedServer"] = []
+
+
+class _FakePythonServer(_FakeServer):
+    instances: list["_FakePythonServer"] = []
+
+
 class _FakeAgentEventType:
     """Minimal stand-in for cyllama.agents.EventType.
 
@@ -533,6 +573,24 @@ def _install_cyllama_stub() -> None:
     sys.modules["cyllama.agents"] = agents
     mod.agents = agents
 
+    # Server stubs: cyllama.llama.server.{embedded,python}.
+    llama = types.ModuleType("cyllama.llama")
+    server = types.ModuleType("cyllama.llama.server")
+    embedded = types.ModuleType("cyllama.llama.server.embedded")
+    embedded.EmbeddedServer = _FakeEmbeddedServer
+    embedded.ServerConfig = _FakeServerConfig
+    python_srv = types.ModuleType("cyllama.llama.server.python")
+    python_srv.PythonServer = _FakePythonServer
+    python_srv.ServerConfig = _FakeServerConfig
+    sys.modules["cyllama.llama"] = llama
+    sys.modules["cyllama.llama.server"] = server
+    sys.modules["cyllama.llama.server.embedded"] = embedded
+    sys.modules["cyllama.llama.server.python"] = python_srv
+    llama.server = server
+    server.embedded = embedded
+    server.python = python_srv
+    mod.llama = llama
+
     rag = types.ModuleType("cyllama.rag")
     rag.Document = _FakeDocument
     rag.Chunk = _FakeChunk
@@ -596,6 +654,15 @@ def sidecar_app(tmp_path, monkeypatch):
         ("THOUGHT", "let me think"),
         ("ANSWER", "42"),
     ]
+    for cls in (_FakeServer, _FakeEmbeddedServer, _FakePythonServer):
+        cls.instances.clear()
+        # ``start_returns`` may have been shadowed on the subclass by a
+        # test poking ``EmbeddedServer.start_returns = False``. Drop
+        # the override so the next test sees the base True default
+        # rather than the leaked False.
+        if "start_returns" in cls.__dict__ and cls is not _FakeServer:
+            delattr(cls, "start_returns")
+    _FakeServer.start_returns = True
 
 
 @pytest.fixture()

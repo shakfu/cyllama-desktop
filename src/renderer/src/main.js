@@ -19,6 +19,7 @@ import * as presets from "./features/presets.js";
 import * as documentsDialog from "./features/documents-pane.js";
 import * as transcribePane from "./features/transcribe-pane.js";
 import * as imagePane from "./features/image-pane.js";
+import * as serverPane from "./features/server-pane.js";
 
 // Expose the libs on a single namespace so feature modules added later --
 // or ad-hoc devtools sessions -- can reach them without re-importing.
@@ -38,6 +39,7 @@ const SIDEBAR_VIEW_HOOKS = {
   documents: { onShow: () => documentsDialog.show(), onHide: () => documentsDialog.hide() },
   transcribe: { onShow: () => transcribePane.show(), onHide: () => transcribePane.hide() },
   image: { onShow: () => imagePane.show(), onHide: () => imagePane.hide() },
+  server: { onShow: () => serverPane.show(), onHide: () => serverPane.hide() },
 };
 let activeSidebarView = "chats";
 function setSidebarView(name) {
@@ -889,6 +891,7 @@ async function applySupportedParams() {
   transcribePane.applyVisibility(features);
   imagePane.applyVisibility(features);
   agentsTab.applyVisibility(features);
+  serverPane.applyVisibility(features);
 }
 
 // Hide main_gpu / split_mode / tensor_split rows when the machine has

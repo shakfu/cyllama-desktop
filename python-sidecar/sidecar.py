@@ -203,6 +203,20 @@ _AGENT_EVENT_TYPE = _resolve_attr((
     ("cyllama.agents.types", "EventType"),
 ))
 
+# Phase 8 -- OpenAI-compatible server. Both flavours (embedded C++
+# server vs. pure-Python http.server-based one) are surfaced; the
+# renderer picks. ``ServerConfig`` is shared between them.
+_EMBEDDED_SERVER_CLS = _resolve_attr((
+    ("cyllama.llama.server.embedded", "EmbeddedServer"),
+))
+_PYTHON_SERVER_CLS = _resolve_attr((
+    ("cyllama.llama.server.python", "PythonServer"),
+))
+_SERVER_CONFIG_CLS = _resolve_attr((
+    ("cyllama.llama.server.embedded", "ServerConfig"),
+    ("cyllama.llama.server.python", "ServerConfig"),
+))
+
 
 # Capability flags surfaced via /info. ``grammar`` reflects whether
 # GenerationConfig actually accepts a ``grammar`` field AND whether the
@@ -279,7 +293,23 @@ _FEATURE_FLAGS: dict[str, bool] = {
         _AGENT_REACT_CLS is not None
         and _AGENT_TOOL_CLS is not None
     ),
+    # Either flavour is enough to enable the pane -- the renderer's
+    # kind picker filters per-flavour availability via the granular
+    # ``server_kinds`` field below.
+    "openai_server": (
+        _SERVER_CONFIG_CLS is not None
+        and (_EMBEDDED_SERVER_CLS is not None or _PYTHON_SERVER_CLS is not None)
+    ),
 }
+
+# Granular per-kind availability so the renderer can hide the radio
+# option for a flavour the build doesn't include.
+_SERVER_KINDS_AVAILABLE: list[str] = [
+    k for k, present in (
+        ("embedded", _EMBEDDED_SERVER_CLS is not None),
+        ("python", _PYTHON_SERVER_CLS is not None),
+    ) if present
+]
 # stop_sequences is whitelisted via _coerce_stop_sequences rather than
 # _ALLOWED_PARAMS, so it's appended explicitly. Renderer uses this list
 # to decide which UI rows to show.
@@ -574,6 +604,8 @@ _INFO_CACHE: dict = {
     # in that case the renderer leaves the controls visible (safer
     # than hiding them on a real multi-GPU rig with an old probe).
     "devices": list(_DEVICES),
+    # Phase 8: which OpenAI-server flavours this cyllama build offers.
+    "server_kinds": list(_SERVER_KINDS_AVAILABLE),
 }
 
 
@@ -2504,8 +2536,176 @@ async def jobs_agent_run(req: Request):
     return {"job_id": job.id}
 
 
+# ---------------------------------------------------------------------------
+# Phase 8 -- OpenAI-compatible server pane.
+#
+# A single slot holds the running server instance. Switching kinds or
+# models requires an explicit /server/stop first; we do NOT auto-evict
+# the way /chat does, because the user has consumers attached to the
+# URL who would notice the model swap.
+#
+# Loopback-only by default. Listening on 0.0.0.0 requires
+# ``expose_lan: true`` in the body AND server-side auditing of the
+# decision (loopback check on the resolved host). PLAN.md S.10
+# anticipates this; the path stays narrow on purpose.
+# ---------------------------------------------------------------------------
+
+
+_SERVER_LOCK = threading.Lock()
+_SERVER_STATE: dict = {
+    "running": False,
+    "kind": None,
+    "instance": None,
+    "model_path": None,
+    "host": None,
+    "port": None,
+}
+
+
+def _server_status_payload() -> dict:
+    """Strip the live instance handle out of state for JSON return."""
+    s = dict(_SERVER_STATE)
+    inst = s.pop("instance", None)
+    s["url"] = (
+        f"http://{s['host']}:{s['port']}" if s.get("running") and s.get("host") and s.get("port")
+        else None
+    )
+    s["instance"] = None  # never expose the Python object reference
+    del s["instance"]
+    return s
+
+
+@app.get("/server/status")
+def server_status():
+    return _server_status_payload()
+
+
+@app.post("/server/start")
+async def server_start(req: Request):
+    if not _FEATURE_FLAGS.get("openai_server"):
+        raise HTTPException(501, "openai-compatible server not available in this cyllama build")
+
+    body = await req.json()
+    kind = (body.get("kind") or "").strip().lower()
+    if kind not in _SERVER_KINDS_AVAILABLE:
+        raise HTTPException(400, f"kind must be one of {_SERVER_KINDS_AVAILABLE!r}")
+    model_path = (body.get("model_path") or "").strip()
+    if not model_path or not os.path.isfile(model_path):
+        raise HTTPException(400, "model_path required and must exist")
+
+    # Loopback gate: 0.0.0.0 / :: / external IP needs explicit opt-in.
+    # The renderer's checkbox already prompts for confirmation; this
+    # is the second gate (defence in depth -- a bypassed UI must still
+    # be a deliberate act on the wire).
+    expose_lan = bool(body.get("expose_lan", False))
+    host = (body.get("host") or "").strip() or "127.0.0.1"
+    if host not in ("127.0.0.1", "localhost", "::1") and not expose_lan:
+        raise HTTPException(400, "non-loopback host requires expose_lan=true")
+    if expose_lan and host in ("127.0.0.1", "localhost", "::1"):
+        # User asked to expose but didn't change the host; promote to
+        # all-interfaces so the toggle isn't silently a no-op.
+        host = "0.0.0.0"
+
+    try:
+        port = int(body.get("port") or 8080)
+    except (TypeError, ValueError):
+        port = 8080
+    if not (1 <= port <= 65535):
+        raise HTTPException(400, "port out of range")
+
+    # Optional load-time fields. Same shape as ServerConfig's
+    # constructor; we pass through when the renderer sets them and
+    # rely on the dataclass defaults otherwise.
+    extra: dict = {}
+    for k in ("n_ctx", "n_batch", "n_threads", "n_gpu_layers", "n_parallel", "model_alias"):
+        v = body.get(k)
+        if v in (None, ""):
+            continue
+        try:
+            extra[k] = int(v) if k != "model_alias" else str(v)
+        except (TypeError, ValueError):
+            continue
+
+    with _SERVER_LOCK:
+        if _SERVER_STATE.get("running"):
+            raise HTTPException(409, "server already running; stop it first")
+
+        cls = _EMBEDDED_SERVER_CLS if kind == "embedded" else _PYTHON_SERVER_CLS
+        if cls is None:
+            raise HTTPException(501, f"server kind not available: {kind}")
+
+        try:
+            cfg = _SERVER_CONFIG_CLS(model_path=model_path, host=host, port=port, **extra)
+            inst = cls(cfg)
+            ok = inst.start()
+            # ``start()`` returns bool on EmbeddedServer; PythonServer
+            # variants either return None or True. Treat any non-False
+            # return as "started" but raise if it explicitly returned
+            # False so the renderer sees a 500 with detail.
+            if ok is False:
+                raise RuntimeError("server.start() returned False")
+        except HTTPException:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(500, f"failed to start {kind} server: {exc}")
+
+        _SERVER_STATE.update({
+            "running": True,
+            "kind": kind,
+            "instance": inst,
+            "model_path": model_path,
+            "host": host,
+            "port": port,
+        })
+
+    return _server_status_payload()
+
+
+@app.post("/server/stop")
+def server_stop():
+    with _SERVER_LOCK:
+        inst = _SERVER_STATE.get("instance")
+        if not _SERVER_STATE.get("running") or inst is None:
+            return {"ok": True, "wasRunning": False}
+        try:
+            inst.stop()
+        except Exception as exc:  # noqa: BLE001
+            # Best-effort -- a stop that throws still clears the slot
+            # so the renderer can retry. The exception detail flows back.
+            _SERVER_STATE.update({
+                "running": False, "kind": None, "instance": None,
+                "model_path": None, "host": None, "port": None,
+            })
+            raise HTTPException(500, f"server.stop() raised: {exc}")
+        _SERVER_STATE.update({
+            "running": False, "kind": None, "instance": None,
+            "model_path": None, "host": None, "port": None,
+        })
+    return {"ok": True, "wasRunning": True}
+
+
+def _shutdown_server_silently():
+    """Best-effort stop of any running OpenAI-compat server.
+
+    Called on signal / atexit so the C-side thread doesn't keep the
+    port bound after the sidecar dies. Idempotent; never raises.
+    """
+    try:
+        inst = _SERVER_STATE.get("instance")
+        if inst is not None:
+            try: inst.stop()
+            except Exception: pass  # noqa: BLE001
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def _handle_signal(signum, frame):  # noqa: ARG001
+    _shutdown_server_silently()
     sys.exit(0)
+
+
+import atexit as _atexit  # noqa: E402
+_atexit.register(_shutdown_server_silently)
 
 
 for _sig in (signal.SIGINT, signal.SIGTERM):

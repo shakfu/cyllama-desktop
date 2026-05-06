@@ -6,6 +6,51 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added (Phase 8 - OpenAI-compatible server)
+- **`POST /server/start`**, **`POST /server/stop`**,
+  **`GET /server/status`**. The start endpoint accepts
+  `{kind, model_path, port?, host?, expose_lan?, n_ctx?, n_batch?,
+  n_threads?, n_gpu_layers?, n_parallel?, model_alias?}` and wraps
+  either `cyllama.llama.server.embedded.EmbeddedServer` (C++) or
+  `cyllama.llama.server.python.PythonServer` (pure-Python). Single
+  slot; double-start returns 409 with "stop it first". `/server/stop`
+  is idempotent (`{ok:true, wasRunning:false}` when nothing's
+  running). `/server/status` returns
+  `{running, kind?, url?, model_path?, host?, port?}`.
+- **Loopback by default.** Non-loopback hosts (anything other than
+  `127.0.0.1` / `localhost` / `::1`) require an explicit
+  `expose_lan: true` body field; otherwise 400. Setting
+  `expose_lan: true` while leaving `host` at the loopback default
+  promotes the bind to `0.0.0.0` so the toggle isn't a silent no-op.
+  The renderer's "expose on local network" checkbox prompts for
+  confirmation before flipping; the server-side gate is the
+  defence-in-depth backstop.
+- **`/info.features.openai_server`** flag plus
+  **`/info.server_kinds`** — the latter lists per-flavour
+  availability (`["embedded","python"]`, just one, or empty) so the
+  renderer's kind picker hides options the build doesn't include.
+- **Server sidebar view** (`features/server-pane.js`). Reuses the
+  shared `.dp-*` primitives. Idle: model picker, kind selector,
+  port input, expose-LAN checkbox with hint copy, Start. Running:
+  URL pill + curl example (both with one-tap copy buttons), kind +
+  model display, Stop. Status line color-coded for ok / err. Status
+  refreshes on view show + after each start/stop, so navigating
+  away and back picks up an externally-stopped server. Nav-rail
+  button hidden when `features.openai_server` is false.
+- Server is shut down on sidecar SIGINT/SIGTERM and via `atexit`,
+  so the C-side embedded thread doesn't keep the port bound after
+  the desktop quits unexpectedly.
+- Tests in `tests/test_server.py` cover the feature flag, status
+  default, validation 400s (missing model / missing kind / unknown
+  kind / bad port), embedded + python happy paths, double-start 409,
+  loopback enforcement, expose-LAN promotion to 0.0.0.0, the 500
+  path when the underlying `start()` returns False, idempotent
+  stop, state-clears-on-stop, the 501 path when the feature is
+  unavailable, and auth gating. Conftest grows
+  `_FakeServerConfig` / `_FakeServer` / `_FakeEmbeddedServer` /
+  `_FakePythonServer` and a `cyllama.llama.server.{embedded,python}`
+  module stub.
+
 ### Added (Phase 7 - agents)
 - **`POST /jobs/agent/run`** wraps `cyllama.agents.ReActAgent.stream`.
   Body: `{model_path, task, tools, max_iterations?, system_prompt?,
@@ -56,10 +101,6 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Conftest grows `_FakeReActAgent` / `_FakeAgentTool` /
   `_FakeAgentEvent` / `_FakeAgentEventType` and a `cyllama.agents`
   module stub.
-- Deferred from Phase 7: ContractAgent pre/post conditions UI
-  (cyllama exposes `ContractSpec` / `PreCondition` / `PostCondition`
-  but the wire shape needs more thought; tracked for a follow-up).
-
 ### Changed (sidebar-pane UI consistency)
 - The Transcribe and Image panes now reuse the same base primitives
   the Documents pane defines (`.dp-section`, `.dp-row`, `.dp-label`,
