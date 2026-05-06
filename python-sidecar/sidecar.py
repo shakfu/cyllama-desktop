@@ -173,6 +173,18 @@ _WHISPER_RESAMPLE = _resolve_attr((
     ("cyllama.whisper.cli", "resample_audio"),
 ))
 
+# Phase 6 -- Stable Diffusion text-to-image. The convenience
+# ``text_to_image`` does the SDContext lifecycle internally so a single
+# call hides the multi-stage setup. ``SDImage.save_png`` writes the
+# result to disk; the job records the path on ``job.artifact_path``
+# and the renderer fetches it via the existing artifact endpoint.
+_SD_TEXT_TO_IMAGE = _resolve_attr((
+    ("cyllama.sd", "text_to_image"),
+))
+_SD_IMAGE_CLS = _resolve_attr((
+    ("cyllama.sd", "SDImage"),
+))
+
 
 # Capability flags surfaced via /info. ``grammar`` reflects whether
 # GenerationConfig actually accepts a ``grammar`` field AND whether the
@@ -240,6 +252,10 @@ _FEATURE_FLAGS: dict[str, bool] = {
         _WHISPER_CTX_CLS is not None
         and _WHISPER_FULL_PARAMS_CLS is not None
         and _WHISPER_LOAD_WAV is not None
+    ),
+    "image": (
+        _SD_TEXT_TO_IMAGE is not None
+        and _SD_IMAGE_CLS is not None
     ),
 }
 # stop_sequences is whitelisted via _coerce_stop_sequences rather than
@@ -2040,6 +2056,120 @@ async def jobs_transcribe(req: Request):
                 pass
 
     job = await run_job("transcribe", producer)
+    return {"job_id": job.id}
+
+
+# ---------------------------------------------------------------------------
+# Image: stable-diffusion text-to-image. Long-running so it goes through
+# the /jobs machinery; on success the rendered PNG lives at
+# ``<ARTIFACTS_DIR>/<job_id>/output.png`` and the job's artifact_path
+# points at the parent so the existing /jobs/<id>/artifact/<name>
+# endpoint serves it.
+# ---------------------------------------------------------------------------
+
+
+register_job_kind("image.txt2img")
+
+
+# Bounds clamp client-supplied dimensions before they reach cyllama.
+# The C library will accept arbitrary sizes but a 16k x 16k request will
+# silently OOM the host long before any error surfaces; clamp at a
+# generous-but-finite ceiling here.
+_IMG_MIN_DIM = 64
+_IMG_MAX_DIM = 4096
+_IMG_MIN_STEPS = 1
+_IMG_MAX_STEPS = 200
+
+
+def _clamp_int(v, lo, hi, default):
+    try:
+        n = int(v)
+    except (TypeError, ValueError):
+        return default
+    return max(lo, min(hi, n))
+
+
+@app.post("/jobs/image/txt2img")
+async def jobs_image_txt2img(req: Request):
+    if not _FEATURE_FLAGS.get("image"):
+        raise HTTPException(501, "stable-diffusion not available in this cyllama build")
+    body = await req.json()
+    model_path = (body.get("model_path") or "").strip()
+    prompt = body.get("prompt") or ""
+    if not model_path or not os.path.isfile(model_path):
+        raise HTTPException(400, "model_path required and must exist")
+    if not isinstance(prompt, str) or not prompt.strip():
+        raise HTTPException(400, "prompt required")
+
+    negative = body.get("negative_prompt") or ""
+    width  = _clamp_int(body.get("width"),  _IMG_MIN_DIM, _IMG_MAX_DIM, 512)
+    height = _clamp_int(body.get("height"), _IMG_MIN_DIM, _IMG_MAX_DIM, 512)
+    steps  = _clamp_int(body.get("sample_steps"), _IMG_MIN_STEPS, _IMG_MAX_STEPS, 20)
+    try:
+        cfg_scale = float(body.get("cfg_scale", 7.0))
+    except (TypeError, ValueError):
+        cfg_scale = 7.0
+    try:
+        seed = int(body.get("seed", -1))
+    except (TypeError, ValueError):
+        seed = -1
+
+    async def producer(job: Job) -> None:
+        # Per-job artifact dir; matches the layout expected by
+        # /jobs/<id>/artifact/<name>.
+        out_dir = (ARTIFACTS_DIR / job.id).resolve()
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out_path = out_dir / "output.png"
+
+        await _emit(job, {"type": "log", "message": "loading model + generating..."})
+
+        # cyllama's text_to_image is synchronous and CPU/GPU-bound, but
+        # we keep it on the event loop here for the same reason RAG
+        # ingest does: FastAPI TestClient's portal model cancels the
+        # producer task at request boundaries, so an ``await
+        # loop.run_in_executor(...)`` mid-job races the boundary and
+        # the result event never lands. Production runs are gated by
+        # the /jobs machinery so the synchronous call doesn't block
+        # other endpoints (it'd block the SSE consumer for the same
+        # job, but that's the job we're driving).
+        try:
+            image = _SD_TEXT_TO_IMAGE(
+                model_path=model_path,
+                prompt=prompt,
+                negative_prompt=negative,
+                width=width,
+                height=height,
+                seed=seed,
+                sample_steps=steps,
+                cfg_scale=cfg_scale,
+            )
+        except Exception as exc:
+            raise RuntimeError(f"text_to_image failed: {exc}") from exc
+
+        if image is None or not getattr(image, "is_valid", lambda: True)():
+            raise RuntimeError("generator returned an invalid image")
+
+        image.save_png(str(out_path))
+
+        # Record both the directory (for /jobs/<id>/artifact/<name>) and
+        # the file name in the result so the renderer doesn't need to
+        # guess. ``artifact_url`` is a relative path; the renderer
+        # composes the full URL with the sidecar's host+port+token.
+        job.artifact_path = out_dir
+        await _emit(job, {
+            "type": "result",
+            "result": {
+                "artifact_name": out_path.name,
+                "artifact_url": f"/jobs/{job.id}/artifact/{out_path.name}",
+                "width": width,
+                "height": height,
+                "seed": seed,
+                "sample_steps": steps,
+                "cfg_scale": cfg_scale,
+            },
+        })
+
+    job = await run_job("image.txt2img", producer)
     return {"job_id": job.id}
 
 

@@ -1268,6 +1268,21 @@ svg circle, svg rect, svg polygon { fill: none; }
   overflow: hidden;
 }
 .dp-source-file { margin-left: auto; font-size: 10px; color: var(--fg-faint); }
+/* Image sidebar view */
+.sv-image-body { padding: 12px 14px; overflow-y: auto; }
+.img-row { margin-bottom: 12px; }
+.img-label { display: block; font-size: 11px; font-weight: 600; color: var(--fg-faint); text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 4px; }
+.img-mini-label { display: flex; flex-direction: column; gap: 3px; font-size: 10px; color: var(--fg-faint); text-transform: uppercase; letter-spacing: 0.04em; }
+.img-select, .img-textarea { width: 100%; }
+.img-textarea { resize: vertical; min-height: 48px; font-size: 12px; }
+.img-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; margin-bottom: 12px; }
+.img-num { width: 100%; }
+.img-actions { display: flex; gap: 8px; }
+.img-status { font-size: 11px; color: var(--fg-faint); margin: 8px 0 12px; min-height: 14px; }
+.img-result { margin-top: 8px; }
+.img-result-img { max-width: 100%; height: auto; border-radius: 4px; display: block; background: var(--bg-sunken); }
+.img-result-meta { font-size: 11px; color: var(--fg-faint); margin-top: 6px; }
+
 /* Transcribe sidebar view */
 .sv-transcribe-body { padding: 12px 14px; overflow-y: auto; }
 .tx-row { margin-bottom: 12px; }

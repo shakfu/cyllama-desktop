@@ -380,6 +380,34 @@ class _FakeWhisperContext:
     def close(self): self.closed = True
 
 
+class _FakeSDImage:
+    """Minimal stand-in for cyllama.sd.SDImage.
+
+    Records save_png calls so tests can assert the file lands in the
+    job's artifact directory.
+    """
+    saved_paths: list[str] = []
+
+    def __init__(self, width=512, height=512):
+        self.width = width
+        self.height = height
+        self.channels = 3
+
+    def is_valid(self): return True
+
+    def save_png(self, path: str):
+        # Write a tiny PNG-ish blob so /jobs/<id>/artifact/<name> can
+        # serve a non-empty file when tests fetch it.
+        from pathlib import Path as _P
+        _P(path).write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 32)
+        type(self).saved_paths.append(path)
+
+
+def _fake_text_to_image(model_path, prompt, negative_prompt="", width=512, height=512,
+                        seed=-1, sample_steps=20, cfg_scale=7.0, **kwargs):  # noqa: ARG001
+    return _FakeSDImage(width=width, height=height)
+
+
 def _fake_load_wav_file(path):
     # Return a sentinel "samples" + 16 kHz so the resampler short-circuits.
     return ([0.0, 0.0, 0.0], 16000)
@@ -436,6 +464,13 @@ def _install_cyllama_stub() -> None:
     whisper.whisper_cpp = whisper_cpp
     whisper.cli = whisper_cli
     mod.whisper = whisper
+
+    # Stable-diffusion stub: cyllama.sd.{text_to_image, SDImage}.
+    sd = types.ModuleType("cyllama.sd")
+    sd.text_to_image = _fake_text_to_image
+    sd.SDImage = _FakeSDImage
+    sys.modules["cyllama.sd"] = sd
+    mod.sd = sd
 
     rag = types.ModuleType("cyllama.rag")
     rag.Document = _FakeDocument
@@ -494,6 +529,7 @@ def sidecar_app(tmp_path, monkeypatch):
     _FakeRAG._sources = []
     _FakeRAG.closed_count = 0
     _FakeWhisperContext.instances.clear()
+    _FakeSDImage.saved_paths.clear()
 
 
 @pytest.fixture()

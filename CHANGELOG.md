@@ -6,6 +6,41 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added (Phase 6 - image txt2img)
+- **`POST /jobs/image/txt2img`** runs stable-diffusion text-to-image
+  via `cyllama.sd.text_to_image` as a /jobs job. Body
+  `{model_path, prompt, negative_prompt?, width?, height?,
+  sample_steps?, cfg_scale?, seed?}`. PNG written to
+  `<ARTIFACTS_DIR>/<job_id>/output.png`; result event carries
+  `{artifact_name, artifact_url, width, height, seed, sample_steps,
+  cfg_scale}` so the renderer doesn't have to guess the path.
+  Dimensions clamped to `[64, 4096]` and steps to `[1, 200]` before
+  reaching cyllama -- the C lib will accept arbitrary sizes but a
+  16k×16k request silently OOMs the host.
+- **`/info.features.image`** flag, true when both
+  `cyllama.sd.text_to_image` and `cyllama.sd.SDImage` resolve.
+- **Image sidebar view** (`features/image-pane.js`). Model picker
+  (cached models + Browse... fallback), prompt + negative-prompt
+  textareas, W/H/Steps/CFG/Seed grid, Generate button. Spawns the
+  job; live status updates on log + progress events. On completion
+  the artifact is fetched with bearer auth into a `blob:` URL so it
+  satisfies the existing CSP (`img-src 'self' data:`) without
+  widening to allow loopback HTTP. Stop cancels via `JobHandle`.
+  Nav-rail button hidden when `features.image` is false.
+- The sidecar runs `text_to_image` synchronously inside the producer
+  coroutine (not via `loop.run_in_executor`) for the same reason
+  RAG ingest does -- FastAPI TestClient's portal model cancels the
+  producer task at request boundaries, so an executor-bound call
+  races the boundary and the final result event never lands.
+  Production callers route through the /jobs SSE so the synchronous
+  call only blocks the job's own consumer.
+- Tests in `tests/test_image.py` cover the feature flag, validation
+  (missing model / missing prompt / blank prompt), 501 when
+  cyllama.sd is absent, result event + artifact-on-disk shape, the
+  artifact endpoint serving a PNG, and dimension/step clamping.
+  Conftest grows `_FakeSDImage` + `_fake_text_to_image` and a
+  `cyllama.sd` module stub.
+
 ### Added (Phase 5 - transcribe)
 - **`POST /jobs/transcribe`** runs whisper transcription as a /jobs
   job. Body `{audio_path, model_path, language?, translate?,
