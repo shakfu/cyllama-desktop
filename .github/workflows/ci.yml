@@ -12,10 +12,10 @@
 
 name: ci
 
-on:
-  push:
-    branches: [main]
-  pull_request:
+on [workflow_dispatch]:
+#  push:
+#    branches: [main]
+#  pull_request:
 
 # Cancel in-flight runs on the same branch when a new push lands.
 # Saves CI minutes on rapid rebases.
