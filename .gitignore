@@ -158,3 +158,11 @@ dist
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
 .vite/
+
+# agent
+.claude
+CLAUDE.md
+AGENTS.md
+GEMINI.md
+
+
