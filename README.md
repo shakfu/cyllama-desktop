@@ -6,9 +6,10 @@ Electron desktop app that runs [cyllama](https://github.com/shakfu/cyllama) via 
 
 - **Pane.** A UI surface in the app shell. Sidebar views (left
   nav-rail): Chats, Documents, Transcribe, Image, Server, Batch,
-  Console. Right-sidebar tabs: Models, Agents, General. Panes whose
-  underlying cyllama capability isn't present in the build hide
-  themselves automatically via `/info.features`.
+  Console. Right-sidebar tabs: Parameters and Agents (system-style
+  Settings opens in a separate Preferences window via `Cmd+,`).
+  Panes whose underlying cyllama capability isn't present in the
+  build hide themselves automatically via `/info.features`.
 - **Workspace.** A *project*: a scoped bundle of inputs, outputs,
   chosen models, presets, agent tool sandbox, and config. Today only
   an implicit `default` workspace exists. Multi-workspace support and
@@ -17,6 +18,13 @@ Electron desktop app that runs [cyllama](https://github.com/shakfu/cyllama) via 
   on `127.0.0.1`, gated by a per-launch bearer token. The renderer is
   a thin client; the sidecar is the single source of truth for
   inference, models, and jobs.
+- **Slash commands.** A `/`-prefixed entry in the chat composer
+  routes the prompt to a specific handler instead of `/chat`. Today
+  `/agent <task>` runs a ReAct agent against the loaded chat model
+  with the sidebar's tool config; the trace + answer render inline
+  in the chat stream. Tab autocompletes a unique prefix
+  (`/a<Tab>` -> `/agent `). See `docs/slash-commands.md` for the
+  taxonomy and roadmap.
 
 See `PLAN.md` for the phased rollout and `CHANGELOG.md` for what has
 shipped.

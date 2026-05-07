@@ -16,6 +16,7 @@ import * as rightTabs from "./features/right-tabs.js";
 // for the quantize / multimodal-projector-pin tools that still need
 // to be migrated; nothing imports it from main.js any more.
 import * as agentsTab from "./features/agents-tab.js";
+import * as slash from "./features/slash.js";
 // general-tab.js superseded by the Preferences window. Module
 // retained for now in case a follow-up wants to mount Preferences-
 // shaped controls inline somewhere.
@@ -120,6 +121,7 @@ let modelPath = "";
 let inFlight = false;
 let stickyScroll = true;
 let abortCtl = null;
+let currentAgentJob = null;
 let approxTokens = 0;
 
 // Conversation history for the active chat. Each entry is
@@ -365,6 +367,7 @@ function setModel(path) {
     else localStorage.removeItem(LAST_MODEL_KEY);
   } catch {}
   updateSendEnabled();
+  window.dispatchEvent(new CustomEvent("cyllama:model-changed", { detail: { modelPath } }));
 }
 function bumpTokens(text) {
   // Maintained for streaming-time updates; the persisted total is
@@ -1234,9 +1237,16 @@ async function buildOutgoingMessages() {
     }
   }
 
+  // Strip renderer-only fields (agent trace events, etc.) so the
+  // sidecar sees a clean {role, content[, images]} shape.
+  const stripped = messages.map((m) => {
+    const out = { role: m.role, content: m.content };
+    if (m.images) out.images = m.images;
+    return out;
+  });
   return augmentedSys
-    ? [{ role: "system", content: augmentedSys }, ...messages]
-    : [...messages];
+    ? [{ role: "system", content: augmentedSys }, ...stripped]
+    : stripped;
 }
 
 function bindParams() {
@@ -1470,11 +1480,31 @@ function replayMessages(msgs) {
     wrap.appendChild(ub);
 
     if (a) {
-      const ab = document.createElement("div"); ab.className = "asst-block";
-      const ar = document.createElement("div"); ar.className = "role-label"; ar.textContent = "Assistant";
-      const at = document.createElement("div"); at.className = "asst-text";
+      const isAgent = a.agent && Array.isArray(a.agent.events);
+      const ab = document.createElement("div");
+      ab.className = isAgent ? "asst-block agent-asst" : "asst-block";
+      const ar = document.createElement("div"); ar.className = "role-label";
+      ar.textContent = isAgent ? "Agent" : "Assistant";
+      ab.appendChild(ar);
+
+      if (isAgent) {
+        wrap.dataset.kind = "agent";
+        const trace = document.createElement("details");
+        trace.className = "agent-trace";
+        const summary = document.createElement("summary");
+        summary.textContent = "Trace";
+        trace.appendChild(summary);
+        const eventsHost = document.createElement("div");
+        eventsHost.className = "agent-events";
+        for (const ev of a.agent.events) eventsHost.appendChild(renderAgentEvent(ev));
+        trace.appendChild(eventsHost);
+        ab.appendChild(trace);
+      }
+
+      const at = document.createElement("div");
+      at.className = isAgent ? "asst-text agent-answer" : "asst-text";
       renderStatic(at, a.content);
-      ab.appendChild(ar); ab.appendChild(at);
+      ab.appendChild(at);
       wrap.dataset.asstRaw = a.content;
       attachMessageActions(ab, () => wrap.dataset.asstRaw || "", wrap);
       wrap.appendChild(ab);
@@ -1661,6 +1691,25 @@ ejectBtn.addEventListener("click", async () => {
 const newChatBtn = document.getElementById("newChatBtn");
 if (newChatBtn) newChatBtn.addEventListener("click", newChat);
 
+// Reset chat: wipe the *current* chat's messages in place (without
+// spawning a new entry in history). Useful during development for
+// dropping a turn without losing the chat id / system prompt edits.
+function resetActiveChat() {
+  if (inFlight) return;
+  if (messages.length === 0) return;
+  if (!confirm("Reset chat? This clears all messages in the current chat.")) return;
+  messages = [];
+  approxTokens = 0;
+  clearLog();
+  showEmptyState();
+  // Persist the now-empty state if the chat already had an id; if it
+  // never persisted, just leave it as a fresh unsaved chat.
+  if (activeChat.id) persistActiveChat();
+  promptEl.focus();
+}
+const resetChatBtn = document.getElementById("resetChatBtn");
+if (resetChatBtn) resetChatBtn.addEventListener("click", resetActiveChat);
+
 // Multimodal: paperclip button forwards clicks to a hidden file
 // input. Multi-select; each picked file is uploaded via /chat/upload.
 const attachBtn = document.getElementById("attach");
@@ -1682,10 +1731,38 @@ window.addEventListener("mmproj:changed", () => {
 });
 
 sendBtn.addEventListener("click", () => {
-  if (inFlight) abortCtl?.abort();
-  else send();
+  if (inFlight) {
+    if (currentAgentJob) currentAgentJob.cancel();
+    else abortCtl?.abort();
+  } else send();
 });
 promptEl.addEventListener("keydown", (e) => {
+  if (e.key === "Tab" && !e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey) {
+    const prefix = slash.typingPrefix(promptEl.value);
+    if (prefix !== null) {
+      e.preventDefault();
+      const ms = slash.matches(prefix, SLASH_NAMES);
+      if (ms.length === 1) {
+        // Unique completion: replace and append a space so the user
+        // can start typing the body immediately.
+        promptEl.value = "/" + ms[0] + " ";
+        autoGrow();
+      } else if (ms.length > 1) {
+        // Multiple matches: complete to the longest common prefix and
+        // surface the candidates as a transient hint. (Dropdown UI is
+        // a Phase 1.5 follow-up per docs/slash-commands.md.)
+        const cp = slash.lcp(ms);
+        if (cp.length > prefix.length) {
+          promptEl.value = "/" + cp;
+          autoGrow();
+        }
+        systemLine(ms.map((n) => "/" + n).join("  "));
+      }
+      // ms.length === 0: silently swallow the Tab so it doesn't move
+      // focus out of the composer mid-type.
+      return;
+    }
+  }
   if (e.key === "Enter" && !e.shiftKey) {
     e.preventDefault();
     if (!inFlight && !sendBtn.disabled) send();
@@ -1709,9 +1786,183 @@ function setBusy(busy) {
 /* ----------------------------------------------------------------
    Streaming
    ---------------------------------------------------------------- */
+
+// Runtime slash-command registry. Metadata + parsing live in
+// features/slash.js; handlers stay here so they can touch chat state
+// (messages, persistActiveChat, the composer DOM, etc.) directly.
+// See docs/slash-commands.md for the broader plan.
+const SLASH_COMMANDS = [
+  {
+    name: "agent",
+    kind: "action",
+    hint: "<task>",
+    run: (body, raw) => sendAgent(body, raw),
+  },
+];
+const SLASH_NAMES = SLASH_COMMANDS.map((c) => c.name);
+function getSlashCommand(name) {
+  return SLASH_COMMANDS.find((c) => c.name === name) || null;
+}
+
+// Build an exchange shaped for an agent run: user bubble + agent block
+// containing a collapsible Trace details and an Answer area. Returns
+// the wrap and the live targets the caller fills as events stream in.
+function makeAgentExchange(task, rawPrompt) {
+  dismissEmpty();
+  const wrap = document.createElement("article");
+  wrap.className = "exchange";
+  wrap.dataset.kind = "agent";
+  wrap.dataset.userPrompt = rawPrompt;
+
+  const userBlock = document.createElement("div");
+  userBlock.className = "user-block";
+  const userRole = document.createElement("div");
+  userRole.className = "role-label";
+  userRole.textContent = "You";
+  const userText = document.createElement("div");
+  userText.className = "user-text";
+  renderStatic(userText, task);
+  userBlock.appendChild(userRole);
+  userBlock.appendChild(userText);
+
+  const asstBlock = document.createElement("div");
+  asstBlock.className = "asst-block agent-asst";
+  const asstRole = document.createElement("div");
+  asstRole.className = "role-label";
+  asstRole.textContent = "Agent";
+
+  const trace = document.createElement("details");
+  trace.className = "agent-trace";
+  const summary = document.createElement("summary");
+  summary.textContent = "Trace";
+  trace.appendChild(summary);
+  const eventsHost = document.createElement("div");
+  eventsHost.className = "agent-events";
+  trace.appendChild(eventsHost);
+
+  const answerEl = document.createElement("div");
+  answerEl.className = "asst-text agent-answer";
+
+  asstBlock.appendChild(asstRole);
+  asstBlock.appendChild(trace);
+  asstBlock.appendChild(answerEl);
+  attachMessageActions(asstBlock, () => wrap.dataset.asstRaw || "", wrap);
+
+  wrap.appendChild(userBlock);
+  wrap.appendChild(asstBlock);
+  logEl.appendChild(wrap);
+  if (stickyScroll) logEl.scrollTop = logEl.scrollHeight;
+
+  return { wrap, eventsHost, answerEl, traceEl: trace };
+}
+
+function fmtAgentEventType(t) {
+  return String(t || "").toLowerCase().replace(/_/g, "-");
+}
+
+function renderAgentEvent(ev) {
+  const row = document.createElement("div");
+  row.className = `ag-event ag-ev-${fmtAgentEventType(ev.event_type)}`;
+  const tEl = document.createElement("span");
+  tEl.className = "ag-ev-type";
+  tEl.textContent = ev.event_type || "?";
+  const cEl = document.createElement("span");
+  cEl.className = "ag-ev-content";
+  cEl.textContent = ev.content || "";
+  row.appendChild(tEl);
+  row.appendChild(cEl);
+  return row;
+}
+
+async function sendAgent(task, rawPrompt) {
+  if (!task) { errorLine("Usage: /agent <task>"); return; }
+  if (!modelPath) { errorLine("Load a chat model first"); return; }
+  if (!sidecar)   { errorLine("Sidecar not connected"); return; }
+
+  const cfg = agentsTab.getAgentConfig();
+  const cfgErr = agentsTab.validateAgentConfig();
+  if (cfgErr) { errorLine(cfgErr); return; }
+
+  promptEl.value = "";
+  autoGrow();
+  stickyScroll = true;
+  bumpTokens(task);
+
+  // Persist the user turn as a plain chat-shaped message so reload
+  // replays it correctly. The raw "/agent ..." input is kept on the
+  // DOM dataset for regenerate; the persisted content is just the task.
+  const userMsg = { role: "user", content: task };
+  messages.push(userMsg);
+
+  const { wrap, eventsHost, answerEl } = makeAgentExchange(task, rawPrompt);
+  const events = [];
+  let answer = "";
+
+  setBusy(true);
+
+  let job;
+  try {
+    job = await cyllamaJobs.startJob("agent/run", {
+      model_path: modelPath,
+      task,
+      max_iterations: cfg.maxIterations,
+      tools: cfg.tools,
+    });
+  } catch (e) {
+    errorLine(`agent: ${e.message}`);
+    setBusy(false);
+    messages.pop();
+    return;
+  }
+  currentAgentJob = job;
+
+  const off = job.onEvent((ev) => {
+    if (ev.type === "trace") {
+      const item = { event_type: ev.event_type, content: ev.content, metadata: ev.metadata };
+      events.push(item);
+      eventsHost.appendChild(renderAgentEvent(item));
+      if (ev.event_type === "ANSWER") {
+        answer = ev.content || "";
+        renderStatic(answerEl, answer);
+      }
+      if (stickyScroll) logEl.scrollTop = logEl.scrollHeight;
+    } else if (ev.type === "error") {
+      errorLine(`agent: ${ev.message}`);
+    }
+  });
+
+  try {
+    await job.done;
+  } catch (e) {
+    errorLine(`agent: ${e.message || e}`);
+  } finally {
+    off();
+    currentAgentJob = null;
+
+    if (answer) {
+      wrap.dataset.asstRaw = answer;
+      messages.push({ role: "assistant", content: answer, agent: { events } });
+      persistActiveChat();
+    } else {
+      // No ANSWER event -- drop the user turn so history stays balanced.
+      const last = messages[messages.length - 1];
+      if (last && last.role === "user") messages.pop();
+    }
+    setBusy(false);
+    promptEl.focus();
+  }
+}
+
 async function send() {
   const prompt = promptEl.value.trim();
   if (!prompt) return;
+
+  const cmd = slash.parse(prompt, SLASH_NAMES);
+  if (cmd) {
+    const entry = getSlashCommand(cmd.name);
+    if (entry) return entry.run(cmd.body, cmd.raw);
+  }
+
   if (!modelPath) { errorLine("Pick a model first"); return; }
   if (!sidecar)   { errorLine("Sidecar not connected"); return; }
 

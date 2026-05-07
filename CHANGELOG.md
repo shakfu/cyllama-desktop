@@ -6,6 +6,52 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added (slash commands in the chat composer)
+- **`/agent <task>`** routes the composer through `/jobs/agent/run`
+  instead of `/chat`. The run renders inline in the chat stream as a
+  user bubble + agent block with a collapsible Trace `<details>` and a
+  markdown-rendered Answer area. Stop button cancels the agent job
+  via `JobHandle.cancel()` instead of the `/chat` fetch abort.
+- **Persisted agent turns** carry their full event trace. Replay on
+  chat reload reconstructs the collapsible trace + answer. Renderer
+  strips the `agent` field from outgoing `/chat` messages so the
+  sidecar only sees the `{role, content}` shape.
+- **Slash registry** at `src/renderer/src/features/slash.js` (pure
+  parse / matches / lcp helpers) backs a runtime registry in
+  `main.js`. `send()` delegates to the registry; unknown slashes
+  pass through as plain chat by design.
+- **Tab autocomplete** in the composer: typing `/a<Tab>` expands to
+  `/agent ` when a single command matches, completes to the longest
+  common prefix when several do, surfaces candidates as a transient
+  system line.
+- **Reset chat button** (trash icon, topbar) wipes the active chat's
+  messages in place with a confirm. Persists the now-empty state if
+  the chat already has an id.
+- **`docs/slash-commands.md`** — plan covering taxonomy
+  (action / nav / chat-augmenting), proposed registry, parsing rules,
+  autocomplete behavior, phasing, and open questions.
+
+### Changed (Agents tab is now config-only)
+- Sidebar Agents tab no longer hosts task input, Run / Stop buttons,
+  Status, Trace, or Answer sections. Those moved to the chat
+  composer via `/agent`. The tab now exposes Tools and Max iterations
+  only, plus a hint pointing users at `/agent <task>`.
+- Removed the per-tab model picker. Agent runs inherit the currently
+  loaded chat model via the `last_model_path` localStorage key that
+  `setModel()` already writes.
+- `setModel()` dispatches a window-level `cyllama:model-changed`
+  event so other panes can react without polling.
+- `getAgentConfig()` and `validateAgentConfig()` are exported from
+  `agents-tab.js` so the chat composer can read tool toggles and
+  iteration cap at run time.
+
+### Changed (Settings collapsible polish)
+- **"Estimate GPU Layers"** button moved out of the Settings section
+  summary row into the GPU layers `.param` block (was clipping
+  against the chevron when the section was collapsed). Relabeled
+  from the ambiguous `est` to `Estimate GPU Layers` and switched
+  from `.icon-btn` to `.btn`.
+
 ### Added (system-style Preferences window)
 - **`Settings...` menu item** with the standard `Cmd+,` accelerator,
   available from the application menu on macOS and the File menu on

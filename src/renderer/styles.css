@@ -1178,6 +1178,7 @@ details.rt-collapsible > summary > h3 {
    the inline onclick=preventDefault keeps it from toggling the
    summary; the visual position is between the title and the chevron. */
 details.rt-collapsible > summary > .icon-btn { margin-right: 4px; }
+#estimateLayersBtn { margin-top: 6px; }
 .rt-section-head h3 {
   margin: 0;
   font-size: 11px;
@@ -1622,6 +1623,20 @@ details.rt-collapsible > summary > .icon-btn { margin-right: 4px; }
   border-radius: 6px;
   white-space: pre-wrap; word-break: break-word;
   min-height: 24px;
+}
+
+/* Inline agent exchange in the chat stream. Reuses the .ag-event
+   palette above; the trace is collapsed by default so the answer is
+   the prominent surface. */
+.agent-trace { margin: 4px 0 8px; }
+.agent-trace > summary {
+  cursor: pointer; font-size: 12px; color: var(--fg-faint);
+  padding: 2px 0; user-select: none;
+}
+.agent-trace > summary:hover { color: var(--fg); }
+.agent-events {
+  display: flex; flex-direction: column; gap: 4px;
+  margin-top: 6px;
 }
 
 /* Transcribe + Image sidebar views reuse the .dp-* primitives that the

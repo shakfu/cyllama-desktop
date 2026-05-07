@@ -122,6 +122,7 @@
             <svg class="caret"><use href="#i-chev-down"/></svg>
           </button>
           <button class="icon-btn" id="ejectBtn" title="Unload model"><svg><use href="#i-eject"/></svg></button>
+          <button class="icon-btn" id="resetChatBtn" title="Reset chat (clear messages)"><svg><use href="#i-trash"/></svg></button>
           <div class="topbar-spacer"></div>
           <div class="status" id="status">
             <span class="status-dot" data-state="idle"></span>
@@ -341,13 +342,13 @@
             <details class="rt-section rt-collapsible">
               <summary class="rt-section-head">
                 <h3>Settings</h3>
-                <button class="icon-btn" id="estimateLayersBtn" title="Estimate n_gpu_layers for the loaded model" onclick="event.preventDefault();event.stopPropagation()">est</button>
               </summary>
               <div id="hwForm">
                 <div class="param">
                   <label for="p-n_gpu_layers"><span>GPU layers</span><output id="p-n_gpu_layers-out">-1</output></label>
                   <input id="p-n_gpu_layers" type="number" min="-1" step="1" value="-1" />
                   <div class="param-hint">-1 = all on GPU &middot; 0 = CPU only &middot; positive int = first N on GPU</div>
+                  <button class="btn" id="estimateLayersBtn" title="Estimate n_gpu_layers for the loaded model">Estimate GPU Layers</button>
                 </div>
                 <div class="param">
                   <label for="p-n_ctx"><span>Context</span></label>
