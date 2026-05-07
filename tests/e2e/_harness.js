@@ -35,8 +35,13 @@ async function launchApp() {
   // leak across specs. tmp_path equivalent for Electron.
   const userDataDir = fs.mkdtempSync(path.join(os.tmpdir(), "cyllama-e2e-"));
 
+  // Ubuntu 24.04 (the GH Actions runner) ships an AppArmor profile
+  // that blocks unprivileged user namespaces, which Chromium's setuid
+  // sandbox needs. Without --no-sandbox the renderer process fails to
+  // launch and the status pill never reaches "ready". Local dev on
+  // macOS doesn't need it but the flag is harmless there.
   const electron = await _electron.launch({
-    args: [path.join(ROOT, "src", "main", "index.js")],
+    args: [path.join(ROOT, "src", "main", "index.js"), "--no-sandbox"],
     env: {
       ...process.env,
       ELECTRON_USER_DATA_DIR: userDataDir,
