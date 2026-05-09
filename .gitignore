@@ -9,6 +9,7 @@ src/renderer/vendor/
 
 __pycache__/
 *.py[oc]
+*.egg-info
 
 # Playwright e2e artifacts
 playwright-report/
