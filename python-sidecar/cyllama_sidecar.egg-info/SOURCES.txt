@@ -1,0 +1,7 @@
+pyproject.toml
+sidecar.py
+cyllama_sidecar.egg-info/PKG-INFO
+cyllama_sidecar.egg-info/SOURCES.txt
+cyllama_sidecar.egg-info/dependency_links.txt
+cyllama_sidecar.egg-info/requires.txt
+cyllama_sidecar.egg-info/top_level.txt

@@ -73,10 +73,10 @@ async function launchApp() {
   return { electron, window, userDataDir, cleanup };
 }
 
-// Click a sidebar-view nav button by data-sidebar-view value. Used by
-// every pane spec to switch into the surface under test.
+// Click a sidebar tab by data-sidebar-view value. Used by every pane
+// spec to switch into the surface under test.
 async function openSidebarView(window, name) {
-  await window.click(`.nav-btn[data-sidebar-view="${name}"]`);
+  await window.click(`.lt-tab[data-sidebar-view="${name}"]`);
   // Wait for the matching .sidebar-view to become active rather than
   // racing the click handler.
   await window.waitForSelector(`.sidebar-view[data-view="${name}"].active`,

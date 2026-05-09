@@ -1,6 +1,8 @@
-// Server sidebar view (Phase 8). Start/stop a cyllama OpenAI-compatible
-// server (embedded C++ flavour or pure-Python flavour). Reuses the
-// .dp-* sidebar primitives shared with Documents / Transcribe / Image.
+// Server pane: start/stop a cyllama OpenAI-compatible server (embedded
+// C++ flavour or pure-Python flavour). Mounted into the Sidecar tab of
+// the Preferences window; ``show(host)`` accepts the container element
+// to render into. Reuses the .dp-* primitives shared with Documents /
+// Transcribe / Image.
 
 import { listModels } from "../lib/models.js";
 import { sidecarFetch, sidecarJson, getInfo } from "../lib/sidecar.js";
@@ -243,8 +245,9 @@ function buildStartSection() {
   );
 }
 
+let hostEl = null;
 function redraw() {
-  const host = document.getElementById("serverBody");
+  const host = hostEl;
   if (!host) return;
   host.replaceChildren();
   if (state.status.running) {
@@ -268,16 +271,10 @@ async function refreshAll() {
   await refreshStatus();
 }
 
-let mounted = false;
-export async function show() {
+export async function show(host) {
+  if (host instanceof Element) hostEl = host;
+  if (!hostEl) return;
   await refreshAll();
-  if (!mounted) { mounted = true; }
   redraw();
 }
 export function hide() {}
-
-export function applyVisibility(features) {
-  const btn = document.getElementById("navServer");
-  if (!btn) return;
-  btn.hidden = !(features && features.openai_server);
-}

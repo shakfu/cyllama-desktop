@@ -399,6 +399,39 @@ svg circle, svg rect, svg polygon { fill: none; }
   flex-direction: column;
 }
 .sidebar-view[hidden] { display: none; }
+
+/* Tab strip across the top of the chat sidebar. Mirrors .rt-tabs in
+   the right panel so both sides share one tab vocabulary. Switches
+   between Chats and the chat-scoped tools (Documents, Transcribe,
+   Image, Batch) without leaving the chat pane. */
+.lt-tabs {
+  display: flex;
+  align-items: stretch;
+  border-bottom: 1px solid var(--border);
+  padding: 6px 6px 0;
+  gap: 2px;
+  flex: 0 0 auto;
+}
+.lt-tab {
+  appearance: none;
+  background: transparent;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  color: var(--fg-faint);
+  padding: 8px 10px;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  border-radius: 4px 4px 0 0;
+}
+.lt-tab:hover { color: var(--fg); }
+.lt-tab.active {
+  color: var(--fg);
+  border-bottom-color: var(--border-strong);
+  background: var(--bg-elev);
+}
+.lt-tab[hidden] { display: none; }
+
 .sidebar-header {
   display: flex;
   align-items: center;

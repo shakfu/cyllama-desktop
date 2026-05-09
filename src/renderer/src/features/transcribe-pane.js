@@ -302,10 +302,10 @@ export function hide() {
   // job stays reachable via the Console / future Jobs panel.
 }
 
-// Toggle the nav-rail button visibility based on whether the cyllama
+// Toggle the sidebar tab visibility based on whether the cyllama
 // build supports whisper. Called by main.js with the /info payload.
 export function applyVisibility(features) {
-  const btn = document.getElementById("navTranscribe");
-  if (!btn) return;
-  btn.hidden = !(features && features.whisper);
+  const tab = document.getElementById("tabTranscribe");
+  if (!tab) return;
+  tab.hidden = !(features && features.whisper);
 }

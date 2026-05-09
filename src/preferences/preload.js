@@ -22,6 +22,7 @@ contextBridge.exposeInMainWorld("cyllama", {
   getSidecarInfo: () => ipcRenderer.invoke("sidecar:info"),
   restartSidecar: () => ipcRenderer.invoke("sidecar:restart"),
   pickFolder: () => ipcRenderer.invoke("dialog:pickFolder"),
+  pickModel: () => ipcRenderer.invoke("dialog:pickModel"),
   revealItem: (path) => ipcRenderer.invoke("shell:revealItem", path),
   settings: {
     get: () => ipcRenderer.invoke("settings:get"),

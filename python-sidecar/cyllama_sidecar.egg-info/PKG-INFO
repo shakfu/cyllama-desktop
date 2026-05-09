@@ -1,0 +1,11 @@
+Metadata-Version: 2.4
+Name: cyllama-sidecar
+Version: 0.1.0
+Summary: FastAPI sidecar that exposes cyllama over localhost HTTP/SSE
+Requires-Python: >=3.11
+Requires-Dist: cyllama
+Requires-Dist: fastapi>=0.115
+Requires-Dist: uvicorn[standard]>=0.32
+Requires-Dist: python-multipart>=0.0.9
+Requires-Dist: openai>=1.50
+Requires-Dist: anthropic>=0.40

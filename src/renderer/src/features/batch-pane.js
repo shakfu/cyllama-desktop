@@ -315,7 +315,7 @@ export async function show() {
 export function hide() {}
 
 export function applyVisibility(features) {
-  const btn = document.getElementById("navBatch");
-  if (!btn) return;
-  btn.hidden = !(features && features.batch);
+  const tab = document.getElementById("tabBatch");
+  if (!tab) return;
+  tab.hidden = !(features && features.batch);
 }

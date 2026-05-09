@@ -18,6 +18,8 @@
 // General is intentionally a placeholder for now; theme / default
 // sampling preset / window behavior land here in follow-ups.
 
+import * as serverPane from "../renderer/src/features/server-pane.js";
+
 function el(tag, attrs = {}, ...children) {
   const node = document.createElement(tag);
   for (const [k, v] of Object.entries(attrs)) {
@@ -295,10 +297,28 @@ async function renderLogsTab() {
 
 // --- Wiring ---------------------------------------------------------------
 
+// Mount the server controls into the Sidecar tab. The server-pane
+// module (originally a left-sidebar view in the main renderer) now
+// lives here because starting/stopping a long-running OpenAI-compat
+// server is a configuration concern, not a per-chat tool.
+async function mountServerSection() {
+  const features = prefsCache.fullInfo?.features || {};
+  const host = document.getElementById("prefsServer");
+  if (!host) return;
+  if (!features.openai_server) {
+    host.replaceChildren();
+    host.appendChild(el("div", { class: "prefs-empty-row" },
+      "This sidecar build does not expose the OpenAI-compatible server."));
+    return;
+  }
+  await serverPane.show(host);
+}
+
 (async () => {
   await refreshInfoCache();
   await renderModelsTab();
   renderSidecarTab();
+  await mountServerSection();
 
   // Subscribe to live log lines unconditionally so the tail is
   // current the moment the user clicks Logs (no stale dump on

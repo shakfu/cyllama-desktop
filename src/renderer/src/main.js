@@ -25,9 +25,9 @@ import * as presets from "./features/presets.js";
 import * as documentsDialog from "./features/documents-pane.js";
 import * as transcribePane from "./features/transcribe-pane.js";
 import * as imagePane from "./features/image-pane.js";
-import * as serverPane from "./features/server-pane.js";
 import * as batchPane from "./features/batch-pane.js";
 import * as modelsPane from "./features/models-pane.js";
+// Server-pane lives in Preferences -> Sidecar tab now. Not imported here.
 
 // Expose the libs on a single namespace so feature modules added later --
 // or ad-hoc devtools sessions -- can reach them without re-importing.
@@ -39,15 +39,14 @@ window.cyllamaLib = {
   rightTabs,
 };
 
-// Sidebar-view switcher: nav-rail buttons tagged ``data-sidebar-view``
-// pick which ``.sidebar-view`` is shown. Default = chats. Per-view
-// lifecycle hooks are dispatched as the view becomes active or inactive
-// so feature modules (e.g. Documents) can refresh / cleanup.
+// Sidebar-view switcher: tab buttons in the chat sidebar (``.lt-tab``)
+// pick which ``.sidebar-view`` body is visible. Default = chats.
+// Per-view lifecycle hooks are dispatched as the view becomes active
+// or inactive so feature modules (e.g. Documents) can refresh / cleanup.
 const SIDEBAR_VIEW_HOOKS = {
   documents: { onShow: () => documentsDialog.show(), onHide: () => documentsDialog.hide() },
   transcribe: { onShow: () => transcribePane.show(), onHide: () => transcribePane.hide() },
   image: { onShow: () => imagePane.show(), onHide: () => imagePane.hide() },
-  server: { onShow: () => serverPane.show(), onHide: () => serverPane.hide() },
   batch: { onShow: () => batchPane.show(), onHide: () => batchPane.hide() },
 };
 let activeSidebarView = "chats";
@@ -61,13 +60,15 @@ function setSidebarView(name) {
     v.classList.toggle("active", match);
     v.hidden = !match;
   }
-  for (const b of document.querySelectorAll(".nav-btn[data-sidebar-view]")) {
-    b.classList.toggle("active", b.dataset.sidebarView === name);
+  for (const b of document.querySelectorAll(".lt-tab[data-sidebar-view]")) {
+    const active = b.dataset.sidebarView === name;
+    b.classList.toggle("active", active);
+    b.setAttribute("aria-selected", active ? "true" : "false");
   }
   const nextHooks = SIDEBAR_VIEW_HOOKS[name];
   if (nextHooks?.onShow) try { nextHooks.onShow(); } catch (e) { console.error(e); }
 }
-for (const b of document.querySelectorAll(".nav-btn[data-sidebar-view]")) {
+for (const b of document.querySelectorAll(".lt-tab[data-sidebar-view]")) {
   b.addEventListener("click", () => setSidebarView(b.dataset.sidebarView));
 }
 
@@ -1064,7 +1065,6 @@ async function applySupportedParams() {
   transcribePane.applyVisibility(features);
   imagePane.applyVisibility(features);
   agentsTab.applyVisibility(features);
-  serverPane.applyVisibility(features);
   batchPane.applyVisibility(features);
   // Composer paperclip is gated on the multimodal capability AND a
   // pinned mmproj path. The /info.features check alone isn't enough

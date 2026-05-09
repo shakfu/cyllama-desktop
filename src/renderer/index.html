@@ -43,24 +43,32 @@
     </svg>
 
     <div class="app" id="app" data-pane="chats">
-      <!-- Left: nav rail -->
+      <!-- Left: nav rail. Reserved for application-wide view switches.
+           Chat-scoped tools (Documents / Transcribe / Image / Batch)
+           live as tabs inside the chat sidebar; Server config lives in
+           the Sidecar tab of Preferences. -->
       <nav class="nav-rail" aria-label="Primary">
-        <button class="nav-btn active" data-sidebar-view="chats" data-pane-jump="chats" title="Chats"><svg><use href="#i-chat"/></svg></button>
+        <button class="nav-btn active" data-pane-jump="chats" title="Chats"><svg><use href="#i-chat"/></svg></button>
         <button class="nav-btn" data-pane-jump="models" title="Models"><svg><use href="#i-box"/></svg></button>
-        <button class="nav-btn" data-sidebar-view="documents" title="Documents"><svg><use href="#i-stack"/></svg></button>
-        <button class="nav-btn" data-sidebar-view="transcribe" id="navTranscribe" title="Transcribe" hidden><svg><use href="#i-mic"/></svg></button>
-        <button class="nav-btn" data-sidebar-view="image" id="navImage" title="Image" hidden><svg><use href="#i-image"/></svg></button>
-        <button class="nav-btn" data-sidebar-view="server" id="navServer" title="Server" hidden><svg><use href="#i-server"/></svg></button>
-        <button class="nav-btn" data-sidebar-view="batch" id="navBatch" title="Batch" hidden><svg><use href="#i-list"/></svg></button>
         <button class="nav-btn" id="navConsole" title="Console"><svg><use href="#i-terminal"/></svg></button>
         <div class="nav-spacer"></div>
         <button class="nav-btn" id="navPrefs" title="Settings (Cmd+,)"><svg><use href="#i-cog"/></svg></button>
       </nav>
 
-      <!-- Left sidebar. Holds one ``.sidebar-view`` at a time; the
-           nav-rail buttons with ``data-sidebar-view`` switch between
-           them. -->
+      <!-- Left sidebar. A tab strip across the top selects which
+           ``.sidebar-view`` body is visible. Tabs are chat-scoped tools;
+           switching tabs never leaves the chat pane. Per-tab lifecycle
+           hooks (refresh/cleanup) are dispatched from main.js as the
+           selection changes. -->
       <aside class="sidebar">
+        <nav class="lt-tabs" role="tablist" aria-label="Chat sidebar">
+          <button class="lt-tab active" role="tab" data-sidebar-view="chats" aria-selected="true">Chats</button>
+          <button class="lt-tab" role="tab" data-sidebar-view="documents" aria-selected="false">Documents</button>
+          <button class="lt-tab" role="tab" data-sidebar-view="transcribe" id="tabTranscribe" aria-selected="false" hidden>Transcribe</button>
+          <button class="lt-tab" role="tab" data-sidebar-view="image" id="tabImage" aria-selected="false" hidden>Image</button>
+          <button class="lt-tab" role="tab" data-sidebar-view="batch" id="tabBatch" aria-selected="false" hidden>Batch</button>
+        </nav>
+
         <div class="sidebar-view active" data-view="chats">
           <header class="sidebar-header">
             <h2>Chats</h2>
@@ -76,37 +84,18 @@
         </div>
 
         <div class="sidebar-view sv-documents" data-view="documents" hidden>
-          <header class="sidebar-header">
-            <h2>Documents</h2>
-          </header>
           <div class="sv-documents-body" id="docsBody"></div>
         </div>
 
         <div class="sidebar-view sv-batch" data-view="batch" hidden>
-          <header class="sidebar-header">
-            <h2>Batch</h2>
-          </header>
           <div class="sv-batch-body" id="batchBody"></div>
         </div>
 
-        <div class="sidebar-view sv-server" data-view="server" hidden>
-          <header class="sidebar-header">
-            <h2>Server</h2>
-          </header>
-          <div class="sv-server-body" id="serverBody"></div>
-        </div>
-
         <div class="sidebar-view sv-image" data-view="image" hidden>
-          <header class="sidebar-header">
-            <h2>Image</h2>
-          </header>
           <div class="sv-image-body" id="imageBody"></div>
         </div>
 
         <div class="sidebar-view sv-transcribe" data-view="transcribe" hidden>
-          <header class="sidebar-header">
-            <h2>Transcribe</h2>
-          </header>
           <div class="sv-transcribe-body" id="transcribeBody"></div>
         </div>
       </aside>

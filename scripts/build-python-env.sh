@@ -83,10 +83,14 @@ else
   "$PY" -m pip install "cyllama==${CYLLAMA_VERSION}"
 fi
 
-"$PY" -m pip install "fastapi>=0.115" "uvicorn[standard]>=0.32"
+# Install remaining sidecar deps from python-sidecar/pyproject.toml so this
+# script and the sidecar package stay in sync. cyllama is already installed
+# above (pinned/optionally from source), so pip will treat that dep as
+# satisfied and only resolve the rest.
+"$PY" -m pip install ./python-sidecar
 
 # Smoke test
-"$PY" -c "import cyllama; import fastapi; import uvicorn; print('cyllama', cyllama.__version__)"
+"$PY" -c "import cyllama, fastapi, uvicorn, openai, anthropic; print('cyllama', cyllama.__version__)"
 
 # Prune to shrink the bundle.
 PYLIB_GLOB="$OUT/lib/python${PY_VERSION%.*}"

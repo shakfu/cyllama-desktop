@@ -9,4 +9,6 @@ dependencies = [
   "uvicorn[standard]>=0.32",
   # Required for FastAPI multipart parsing (POST /chat/upload).
   "python-multipart>=0.0.9",
+  "openai>=1.50",
+  "anthropic>=0.40",
 ]

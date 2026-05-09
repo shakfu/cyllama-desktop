@@ -371,7 +371,7 @@ export async function show() {
 export function hide() {}
 
 export function applyVisibility(features) {
-  const btn = document.getElementById("navImage");
-  if (!btn) return;
-  btn.hidden = !(features && features.image);
+  const tab = document.getElementById("tabImage");
+  if (!tab) return;
+  tab.hidden = !(features && features.image);
 }

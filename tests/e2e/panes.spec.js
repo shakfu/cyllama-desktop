@@ -49,23 +49,20 @@ test("Documents pane mounts with collections list", async () => {
   ctx = await launchApp();
   const { window } = ctx;
   await openSidebarView(window, "documents");
-  // Header is the load-bearing assertion -- it only renders if
-  // documents-pane.show() ran without throwing.
-  await expect(window.locator(".sidebar-view[data-view='documents'] h2")).toContainText("Documents");
-  // The empty-state copy from the Documents pane should land within
-  // the body slot.
+  // Body slot only renders content if documents-pane.show() ran
+  // without throwing.
+  await expect(window.locator(".lt-tab[data-sidebar-view='documents']")).toHaveClass(/active/);
   await expect(window.locator("#docsBody")).toBeVisible();
 });
 
 test("Transcribe pane renders when whisper feature is on", async () => {
   ctx = await launchApp();
   const { window } = ctx;
-  // The conftest cyllama stub registers whisper, so the nav button
-  // un-hides itself once /info comes back.
-  const nav = window.locator("#navTranscribe");
-  await expect(nav).toBeVisible({ timeout: 15_000 });
+  // The conftest cyllama stub registers whisper, so the tab un-hides
+  // itself once /info comes back.
+  const tab = window.locator("#tabTranscribe");
+  await expect(tab).toBeVisible({ timeout: 15_000 });
   await openSidebarView(window, "transcribe");
-  await expect(window.locator(".sidebar-view[data-view='transcribe'] h2")).toContainText("Transcribe");
   // Build is async (model list fetch). Wait for the Input section
   // to land.
   await expect(window.locator("#transcribeBody")).toContainText(/Input/i, { timeout: 10_000 });
@@ -77,25 +74,26 @@ test("Transcribe pane renders when whisper feature is on", async () => {
 test("Image pane renders when SD feature is on", async () => {
   ctx = await launchApp();
   const { window } = ctx;
-  const nav = window.locator("#navImage");
-  await expect(nav).toBeVisible({ timeout: 15_000 });
+  const tab = window.locator("#tabImage");
+  await expect(tab).toBeVisible({ timeout: 15_000 });
   await openSidebarView(window, "image");
-  await expect(window.locator(".sidebar-view[data-view='image'] h2")).toContainText("Image");
   await expect(window.locator("#imageBody")).toContainText(/Generate/i, { timeout: 10_000 });
   // Width / Height / Steps / CFG / Seed grid lands.
   await expect(window.locator(".img-grid .dp-row")).toHaveCount(4);
 });
 
-test("Server pane shows the Start form when idle", async () => {
+test("Server controls render in the Preferences -> Sidecar tab", async () => {
   ctx = await launchApp();
-  const { window } = ctx;
-  const nav = window.locator("#navServer");
-  await expect(nav).toBeVisible({ timeout: 15_000 });
-  await openSidebarView(window, "server");
-  await expect(window.locator(".sidebar-view[data-view='server'] h2")).toContainText("Server");
-  await expect(window.locator("#serverBody")).toContainText(/Start a server/i, { timeout: 10_000 });
-  // Start button disabled until a model is picked.
-  const start = window.locator("#sv-start");
+  const { window, electron } = ctx;
+  const newWindowP = electron.waitForEvent("window", { timeout: 5_000 });
+  await window.click("#navPrefs");
+  const prefs = await newWindowP;
+  await prefs.waitForLoadState("domcontentloaded");
+  await prefs.click('.prefs-nav-item[data-prefs-tab="sidecar"]');
+  // Server-pane.show() mounts the Start form into #prefsServer when
+  // the openai_server feature is reported by /info (conftest stub).
+  await expect(prefs.locator("#prefsServer")).toContainText(/Start a server/i, { timeout: 15_000 });
+  const start = prefs.locator("#sv-start");
   await expect(start).toBeVisible();
   await expect(start).toBeDisabled();
 });
@@ -103,10 +101,9 @@ test("Server pane shows the Start form when idle", async () => {
 test("Batch pane renders prompts textarea + import + run", async () => {
   ctx = await launchApp();
   const { window } = ctx;
-  const nav = window.locator("#navBatch");
-  await expect(nav).toBeVisible({ timeout: 15_000 });
+  const tab = window.locator("#tabBatch");
+  await expect(tab).toBeVisible({ timeout: 15_000 });
   await openSidebarView(window, "batch");
-  await expect(window.locator(".sidebar-view[data-view='batch'] h2")).toContainText("Batch");
   await expect(window.locator("#bt-prompts")).toBeVisible({ timeout: 10_000 });
   await expect(window.locator("#bt-run")).toBeVisible();
 });

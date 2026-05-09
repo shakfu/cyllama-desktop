@@ -6,6 +6,28 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed (left nav rail is now app-wide only)
+- The leftmost control bar previously mixed two contracts: Chats /
+  Models switched the whole app, while Documents / Transcribe / Image
+  / Server / Batch only re-skinned the chat sidebar. The rail now
+  carries app-wide actions only (Chats, Models, Console, Settings).
+- Documents, Transcribe, Image, and Batch moved into a tab strip
+  (`.lt-tabs`, mirrors the right panel's `.rt-tabs`) at the top of
+  the chat sidebar. Per-view headers were dropped since the active
+  tab serves as the title; Chats keeps its header for the New-chat
+  button. Visibility flags now toggle tabs (`#tabTranscribe`,
+  `#tabImage`, `#tabBatch`) instead of nav buttons.
+- Server controls moved to **Preferences -> Sidecar tab**. The
+  OpenAI-compatible server is a sidecar-hosted concern, not a
+  per-chat tool. `server-pane.js` is now host-agnostic
+  (`show(host)`); the preferences bundle imports it directly. The
+  preferences preload exposes `pickModel`. The `openai_server`
+  feature gate moved from the module's old `applyVisibility` into
+  the preferences mount.
+- E2E suite updated: `_harness.js` clicks `.lt-tab` instead of
+  `.nav-btn[data-sidebar-view]`; the Server pane test became a
+  Preferences-window test.
+
 ### Added (slash commands in the chat composer)
 - **`/agent <task>`** routes the composer through `/jobs/agent/run`
   instead of `/chat`. The run renders inline in the chat stream as a
