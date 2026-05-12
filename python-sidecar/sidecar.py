@@ -203,6 +203,43 @@ _AGENT_EVENT_TYPE = _resolve_attr((
     ("cyllama.agents.types", "EventType"),
 ))
 
+# Phase 7+ (cyllama >= 0.2.16) -- additional agent classes and the
+# multi-agent composition helpers. Each is independently probed so the
+# sidecar advertises granular capability flags in /info/features and
+# downstream endpoints can 501-out cleanly when the bundle was built
+# without one. None of these are required for the base ``/jobs/agent/run``
+# (ReActAgent) endpoint to work.
+_AGENT_CONSTRAINED_CLS = _resolve_attr((
+    ("cyllama.agents", "ConstrainedAgent"),
+))
+_AGENT_CONTRACT_CLS = _resolve_attr((
+    ("cyllama.agents", "ContractAgent"),
+))
+_AGENT_CONTRACT_POLICY = _resolve_attr((
+    ("cyllama.agents", "ContractPolicy"),
+))
+_AGENT_REFLECTION_LOOP_CLS = _resolve_attr((
+    ("cyllama.agents", "ReflectionLoop"),
+))
+_AGENT_PLAN_AND_EXECUTE_FN = _resolve_attr((
+    ("cyllama.agents", "plan_and_execute"),
+))
+_AGENT_RAG_AS_TOOL_FN = _resolve_attr((
+    ("cyllama.agents", "rag_as_tool"),
+))
+_AGENT_SEMANTIC_MEMORY_CLS = _resolve_attr((
+    ("cyllama.agents", "SemanticMemory"),
+))
+_AGENT_WORKFLOW_CLS = _resolve_attr((
+    ("cyllama.agents", "Workflow"),
+))
+_AGENT_WORKFLOW_NODE_FN = _resolve_attr((
+    ("cyllama.agents", "workflow_node"),
+))
+_AGENT_AGENT_NODE_FN = _resolve_attr((
+    ("cyllama.agents", "agent_node"),
+))
+
 # Phase 8 -- OpenAI-compatible server. Both flavours (embedded C++
 # server vs. pure-Python http.server-based one) are surfaced; the
 # renderer picks. ``ServerConfig`` is shared between them.
@@ -314,6 +351,24 @@ _FEATURE_FLAGS: dict[str, bool] = {
     "agents": (
         _AGENT_REACT_CLS is not None
         and _AGENT_TOOL_CLS is not None
+    ),
+    # Granular per-class capability flags so the renderer can hide
+    # individual slash commands / panes for surfaces the bundle is
+    # missing. The base ``agents`` flag (above) gates the ReAct path
+    # only; everything else opts in independently.
+    "agents.constrained": _AGENT_CONSTRAINED_CLS is not None,
+    "agents.contract": (
+        _AGENT_CONTRACT_CLS is not None
+        and _AGENT_CONTRACT_POLICY is not None
+    ),
+    "agents.reflect": _AGENT_REFLECTION_LOOP_CLS is not None,
+    "agents.plan": _AGENT_PLAN_AND_EXECUTE_FN is not None,
+    "agents.rag_tool": _AGENT_RAG_AS_TOOL_FN is not None,
+    "agents.memory": _AGENT_SEMANTIC_MEMORY_CLS is not None,
+    "workflow": (
+        _AGENT_WORKFLOW_CLS is not None
+        and _AGENT_WORKFLOW_NODE_FN is not None
+        and _AGENT_AGENT_NODE_FN is not None
     ),
     # Either flavour is enough to enable the pane -- the renderer's
     # kind picker filters per-flavour availability via the granular
@@ -533,6 +588,21 @@ UPLOADS_DIR = Path(
     or (Path.home() / ".cache" / "cyllama-desktop" / "uploads")
 ).resolve()
 UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
+
+# Phase D: workspace-scoped workflow source files. Each *.py file is a
+# user-authored workflow exposing either ``flow: Workflow`` or
+# ``make_flow()`` returning a Workflow instance. The module's docstring
+# becomes the description shown in the Workflows pane.
+#
+# Trust boundary: workflow files execute in the sidecar's Python process
+# with full sidecar privileges (file access, network, etc.). The renderer
+# surface treats these as user-authored code -- same trust level as
+# ``agent_exec_python`` tools. See docs/dev/agent_plan.md §7.
+WORKFLOWS_DIR = Path(
+    os.environ.get("CYLLAMA_SIDECAR_WORKFLOWS")
+    or (Path.home() / ".cache" / "cyllama-desktop" / "workflows")
+).resolve()
+WORKFLOWS_DIR.mkdir(parents=True, exist_ok=True)
 
 # HF cache locations to enumerate read-only as a secondary listing. Both
 # the llama.cpp-flavoured cache and the standard HuggingFace hub cache
@@ -2762,6 +2832,10 @@ async def jobs_image_txt2img(req: Request):
 
 
 register_job_kind("agent.run")
+register_job_kind("agent.constrained")
+register_job_kind("agent.contract")
+register_job_kind("agent.plan")
+register_job_kind("agent.reflect")
 
 
 # Maximum bytes to read from the filesystem / pull from a URL. Larger reads
@@ -2925,13 +2999,120 @@ def _make_rag_query_tool(collection: dict, top_k: int = 3):
     )
 
 
+class _MemoryRagShim:
+    """Minimal duck-typed RAG-shaped object for SemanticMemory backing.
+
+    ``cyllama.agents.SemanticMemory`` only uses two methods on its
+    backing ``rag`` instance: ``add_texts(texts, metadata, split)``
+    returning a list of inserted ids, and ``search(query, k, threshold)``
+    returning hits with ``.text`` / ``.score`` / ``.metadata`` attributes.
+    Building a real :class:`cyllama.rag.RAG` would require a generation
+    model the sidecar's RAG collections don't carry (they're embed-only).
+    This shim provides exactly what SemanticMemory calls, no more.
+    """
+
+    def __init__(self, embedder, store):
+        self._embedder = embedder
+        self._store = store
+
+    def add_texts(self, texts, metadata=None, split=False):  # noqa: ARG002
+        # SemanticMemory uses split=False (default); we ignore the flag.
+        # Each fragment becomes one chunk.
+        vecs = self._embedder.embed_batch(list(texts))
+        md = list(metadata) if metadata else [None] * len(texts)
+        return self._store.add(
+            embeddings=vecs,
+            texts=list(texts),
+            metadata=md,
+        )
+
+    def search(self, query, k=5, threshold=None):
+        vecs = self._embedder.embed_batch([str(query)])
+        if not vecs:
+            return []
+        return self._store.search(vecs[0], k=k, threshold=threshold)
+
+
+def _make_semantic_memory_tools(collection: dict, *, namespace: str = "default", top_k: int = 5):
+    """Build a (remember, recall) tool pair backed by ``SemanticMemory``.
+
+    The backing store is a regular RAG collection; the namespace
+    isolates memory entries from any other content in that collection
+    (e.g. the same collection used for ``rag_query`` over docs).
+    """
+    if _AGENT_SEMANTIC_MEMORY_CLS is None:
+        raise RuntimeError("SemanticMemory not available in this cyllama build")
+    embedder, store = _get_retrieve(collection)
+    rag_shim = _MemoryRagShim(embedder, store)
+    memory = _AGENT_SEMANTIC_MEMORY_CLS(rag_shim, default_namespace=namespace)
+
+    def remember(text: str) -> str:
+        """Store a memory fragment under the configured namespace."""
+        if not isinstance(text, str) or not text.strip():
+            return "error: text required"
+        ids = memory.remember(text)
+        return f"remembered ({len(ids)} chunk{'s' if len(ids) != 1 else ''})"
+
+    def recall(query: str, k: int = top_k) -> str:
+        """Recall memories matching ``query`` from the configured namespace."""
+        if not isinstance(query, str) or not query.strip():
+            return "error: query required"
+        try:
+            kk = max(1, min(20, int(k)))
+        except (TypeError, ValueError):
+            kk = top_k
+        records = memory.retrieve(query, top_k=kk)
+        if not records:
+            return "(no matches)"
+        return "\n\n".join(
+            f"[{i + 1}] {r.text}" for i, r in enumerate(records)
+        )
+
+    remember_tool = _AGENT_TOOL_CLS(
+        name="remember",
+        description=(
+            f"Remember a fact for later. Stored under namespace "
+            f"{namespace!r} of collection {collection.get('name')!r}."
+        ),
+        func=remember,
+        parameters={
+            "type": "object",
+            "properties": {"text": {"type": "string"}},
+            "required": ["text"],
+        },
+    )
+    recall_tool = _AGENT_TOOL_CLS(
+        name="recall",
+        description=(
+            f"Recall up to {top_k} relevant memories matching the query. "
+            f"Searches namespace {namespace!r} of collection {collection.get('name')!r}."
+        ),
+        func=recall,
+        parameters={
+            "type": "object",
+            "properties": {
+                "query": {"type": "string"},
+                "k": {"type": "integer", "minimum": 1, "maximum": 20},
+            },
+            "required": ["query"],
+        },
+    )
+    return [remember_tool, recall_tool]
+
+
 def _build_agent_tools(spec: dict) -> list:
     """Translate the renderer's ``tools`` spec into a list of ``Tool`` objects.
 
-    Spec shape: ``{"calculator": true, "read_file": {"sandbox_dir": "..."},
-    "web_fetch": true, "rag_query": {"collection_id": "...", "top_k": 3}}``.
-    Unknown keys are ignored. Empty tool list is allowed -- the agent then
-    runs as a plain reasoning loop without tool calls.
+    Spec shape:
+
+    - ``{"calculator": true}``
+    - ``{"read_file": {"sandbox_dir": "..."}}``
+    - ``{"web_fetch": true}``
+    - ``{"rag_query": {"collection_id": "...", "top_k": 3}}``
+    - ``{"semantic_memory": {"collection_id": "...", "namespace": "default", "top_k": 5}}``
+
+    Unknown keys are ignored. Empty tool list is allowed -- the agent
+    then runs as a plain reasoning loop without tool calls.
     """
     out: list = []
     if spec.get("calculator"):
@@ -2958,6 +3139,24 @@ def _build_agent_tools(spec: dict) -> list:
             raise HTTPException(404, f"rag_query collection not found: {coll_id}")
         top_k = int(rq.get("top_k") or 3)
         out.append(_make_rag_query_tool(coll, top_k=top_k))
+    if "semantic_memory" in spec:
+        if not _FEATURE_FLAGS.get("agents.memory"):
+            raise HTTPException(501, "SemanticMemory not available in this cyllama build")
+        sm = spec["semantic_memory"] if isinstance(spec["semantic_memory"], dict) else {}
+        coll_id = sm.get("collection_id") or ""
+        if not coll_id or not _RAG_ID_RE.match(coll_id):
+            raise HTTPException(400, "semantic_memory requires a valid collection_id")
+        coll = _rag_collection_get(coll_id)
+        if coll is None:
+            raise HTTPException(404, f"semantic_memory collection not found: {coll_id}")
+        namespace = sm.get("namespace") or "default"
+        if not isinstance(namespace, str) or not namespace.strip():
+            raise HTTPException(400, "semantic_memory namespace must be a non-empty string")
+        try:
+            top_k = max(1, min(20, int(sm.get("top_k") or 5)))
+        except (TypeError, ValueError):
+            top_k = 5
+        out.extend(_make_semantic_memory_tools(coll, namespace=namespace, top_k=top_k))
     return out
 
 
@@ -3044,6 +3243,891 @@ async def jobs_agent_run(req: Request):
 
     job = await run_job("agent.run", producer)
     return {"job_id": job.id}
+
+
+@app.post("/jobs/agent/constrained")
+async def jobs_agent_constrained(req: Request):
+    """Run a ``ConstrainedAgent`` -- grammar-enforced tool calling.
+
+    Same body shape as ``/jobs/agent/run`` plus two optional fields:
+
+    - ``format``: ``"json"`` (default), ``"json_array"``, or
+      ``"function_call"``. Selects the grammar the agent enforces on
+      tool-call decode.
+    - ``allow_reasoning``: when true, the grammar permits a
+      ``reasoning`` field on each tool call so the LLM can include
+      its rationale alongside the structured call.
+
+    Streams the same SSE trace shape as ``/jobs/agent/run``; the only
+    runtime difference is grammar-constrained decode, which the
+    renderer doesn't need to know about.
+    """
+    if not _FEATURE_FLAGS.get("agents.constrained"):
+        raise HTTPException(501, "ConstrainedAgent not available in this cyllama build")
+    body = await req.json()
+    model_path = (body.get("model_path") or "").strip()
+    task = body.get("task") or ""
+    if not model_path or not os.path.isfile(model_path):
+        raise HTTPException(400, "model_path required and must exist")
+    if not isinstance(task, str) or not task.strip():
+        raise HTTPException(400, "task required")
+    system_prompt = body.get("system_prompt") or None
+    try:
+        max_iterations = max(1, min(50, int(body.get("max_iterations") or 10)))
+    except (TypeError, ValueError):
+        max_iterations = 10
+
+    fmt = body.get("format") or "json"
+    if fmt not in {"json", "json_array", "function_call"}:
+        raise HTTPException(400, f"format must be one of json|json_array|function_call (got {fmt!r})")
+    allow_reasoning = bool(body.get("allow_reasoning"))
+
+    tools = _build_agent_tools(body.get("tools") or {})
+    llm = _get_llm(model_path, body.get("params"))
+
+    async def producer(job: Job) -> None:
+        agent = _AGENT_CONSTRAINED_CLS(
+            llm=llm,
+            tools=tools,
+            system_prompt=system_prompt,
+            max_iterations=max_iterations,
+            verbose=False,
+            format=fmt,
+            allow_reasoning=allow_reasoning,
+        )
+
+        events: list[dict] = []
+        final_answer: Optional[str] = None
+        try:
+            it = iter(agent.stream(task))
+        except Exception as exc:  # noqa: BLE001
+            raise RuntimeError(f"agent.stream failed: {exc}") from exc
+
+        for ev in it:
+            etype = _agent_event_type_name(ev)
+            content = getattr(ev, "content", "")
+            metadata = getattr(ev, "metadata", {}) or {}
+            ev_dict = {
+                "event_type": etype,
+                "content": str(content) if content is not None else "",
+                "metadata": _jsonify(metadata),
+            }
+            events.append(ev_dict)
+            if etype == "ANSWER":
+                final_answer = ev_dict["content"]
+            await _emit(job, {"type": "trace", **ev_dict})
+
+        await _emit(job, {
+            "type": "result",
+            "result": {
+                "events": events,
+                "answer": final_answer,
+                "iterations": sum(1 for e in events if e["event_type"] == "ACTION"),
+            },
+        })
+
+    job = await run_job("agent.constrained", producer)
+    return {"job_id": job.id}
+
+
+# ---------------------------------------------------------------------------
+# Phase 7+ -- ContractAgent: pre/post-condition checks under a policy.
+#
+# Contracts in real cyllama are callables (task -> bool, answer -> bool, etc.).
+# We can't ship arbitrary Python from the renderer, so the endpoint accepts a
+# *named preset* the sidecar maps to a built-in set of contracts. New presets
+# land here as the renderer-side UI grows; users who need full expressiveness
+# author a workspace-scoped Python file (see docs/dev/agent_plan.md Phase D / Section 7).
+# ---------------------------------------------------------------------------
+
+
+def _contract_presets() -> dict[str, dict]:
+    """Map preset name -> contracts dict suitable for ContractAgent kwargs.
+
+    Each preset is a small set of independently-checked rules. The
+    ``policy`` body field controls IGNORE / OBSERVE / ENFORCE /
+    QUICK_ENFORCE; the preset only supplies the rules.
+    """
+    # Lazy: don't fail import if ContractAgent isn't bundled. Callers must
+    # check ``features["agents.contract"]`` first.
+    return {
+        # ``none``: no rules; the agent runs as a ContractAgent with the
+        # policy machinery active but no preconditions to violate.
+        # Useful for verifying the endpoint wiring without exercising
+        # rule semantics.
+        "none": {
+            "task_preconditions": [],
+            "answer_postconditions": [],
+            "iteration_invariants": [],
+        },
+        # ``answer-quality``: the answer must be non-empty and at least 10
+        # characters. Demonstrates a postcondition firing on a too-terse
+        # answer; useful as a smoke test for CONTRACT_VIOLATION events.
+        "answer-quality": {
+            "task_preconditions": [],
+            "answer_postconditions": [
+                (lambda a: bool(a) and len(a.strip()) >= 10),
+            ],
+            "iteration_invariants": [],
+        },
+        # ``task-nonempty``: simple precondition that the task is non-empty.
+        # Stub-friendly (the rule passes for any normal task).
+        "task-nonempty": {
+            "task_preconditions": [(lambda t: bool(t and t.strip()))],
+            "answer_postconditions": [],
+            "iteration_invariants": [],
+        },
+    }
+
+
+_CONTRACT_POLICY_NAMES = {"IGNORE", "OBSERVE", "ENFORCE", "QUICK_ENFORCE"}
+
+
+@app.post("/jobs/agent/contract")
+async def jobs_agent_contract(req: Request):
+    """Run a ``ContractAgent`` with a named preset and a policy.
+
+    Body shape (extends the common agent body):
+
+    - ``preset``: one of the keys in :func:`_contract_presets` (default
+      ``"none"``).
+    - ``policy``: one of ``IGNORE`` / ``OBSERVE`` / ``ENFORCE`` /
+      ``QUICK_ENFORCE`` (default ``OBSERVE`` so demo runs observe
+      violations instead of terminating).
+
+    Streams the same SSE trace shape as ``/jobs/agent/run`` plus
+    ``CONTRACT_CHECK`` and ``CONTRACT_VIOLATION`` event types (the
+    renderer's generic event renderer handles them).
+    """
+    if not _FEATURE_FLAGS.get("agents.contract"):
+        raise HTTPException(501, "ContractAgent not available in this cyllama build")
+    body = await req.json()
+    model_path = (body.get("model_path") or "").strip()
+    task = body.get("task") or ""
+    if not model_path or not os.path.isfile(model_path):
+        raise HTTPException(400, "model_path required and must exist")
+    if not isinstance(task, str) or not task.strip():
+        raise HTTPException(400, "task required")
+    system_prompt = body.get("system_prompt") or None
+    try:
+        max_iterations = max(1, min(50, int(body.get("max_iterations") or 10)))
+    except (TypeError, ValueError):
+        max_iterations = 10
+
+    preset_name = body.get("preset") or "none"
+    presets = _contract_presets()
+    if preset_name not in presets:
+        raise HTTPException(400, f"preset must be one of {sorted(presets)}; got {preset_name!r}")
+    rules = presets[preset_name]
+
+    policy_name = (body.get("policy") or "OBSERVE").upper()
+    if policy_name not in _CONTRACT_POLICY_NAMES:
+        raise HTTPException(400, f"policy must be one of {sorted(_CONTRACT_POLICY_NAMES)}; got {policy_name!r}")
+    # _AGENT_CONTRACT_POLICY is the cyllama enum class; map name to member.
+    try:
+        policy = getattr(_AGENT_CONTRACT_POLICY, policy_name)
+    except AttributeError:
+        raise HTTPException(500, f"cyllama.agents.ContractPolicy missing member {policy_name!r}")
+
+    tools = _build_agent_tools(body.get("tools") or {})
+    llm = _get_llm(model_path, body.get("params"))
+
+    async def producer(job: Job) -> None:
+        agent = _AGENT_CONTRACT_CLS(
+            llm=llm,
+            tools=tools,
+            system_prompt=system_prompt,
+            max_iterations=max_iterations,
+            verbose=False,
+            policy=policy,
+            **rules,
+        )
+
+        events: list[dict] = []
+        final_answer: Optional[str] = None
+        try:
+            it = iter(agent.stream(task))
+        except Exception as exc:  # noqa: BLE001
+            raise RuntimeError(f"agent.stream failed: {exc}") from exc
+
+        for ev in it:
+            etype = _agent_event_type_name(ev)
+            content = getattr(ev, "content", "")
+            metadata = getattr(ev, "metadata", {}) or {}
+            ev_dict = {
+                "event_type": etype,
+                "content": str(content) if content is not None else "",
+                "metadata": _jsonify(metadata),
+            }
+            events.append(ev_dict)
+            if etype == "ANSWER":
+                final_answer = ev_dict["content"]
+            await _emit(job, {"type": "trace", **ev_dict})
+
+        # Result includes a count of contract events so the renderer
+        # can surface "3 violations" summaries without re-walking events.
+        violations = sum(1 for e in events if e["event_type"] == "CONTRACT_VIOLATION")
+        await _emit(job, {
+            "type": "result",
+            "result": {
+                "events": events,
+                "answer": final_answer,
+                "iterations": sum(1 for e in events if e["event_type"] == "ACTION"),
+                "contract": {
+                    "preset": preset_name,
+                    "policy": policy_name,
+                    "violations": violations,
+                },
+            },
+        })
+
+    job = await run_job("agent.contract", producer)
+    return {"job_id": job.id}
+
+
+# Expose the preset registry for the renderer to populate a picker.
+@app.get("/info/contract-presets")
+async def contract_presets_endpoint():
+    if not _FEATURE_FLAGS.get("agents.contract"):
+        return {"presets": []}
+    return {
+        "presets": sorted(_contract_presets().keys()),
+        "policies": sorted(_CONTRACT_POLICY_NAMES),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Phase 7+ -- plan_and_execute: a planner emits steps, an executor runs each.
+#
+# cyllama ships ``plan_and_execute`` as a synchronous helper that uses
+# ``planner.run`` / ``executor.run`` -- no incremental events. To stream
+# the trace we bypass the helper and orchestrate the same two-agent
+# pattern ourselves with ``.stream()``, tagging each event with a
+# ``source`` field ("planner" or ``step-<n>``) so the renderer can
+# render the two phases distinctly.
+#
+# The planner runs without tools (it's a reasoning-only role); the
+# executor inherits the tool catalog from the body the same way
+# ``/jobs/agent/run`` does.
+# ---------------------------------------------------------------------------
+
+
+_DEFAULT_PLANNER_PROMPT = (
+    "You are a task planner. Break the user's task into a small number "
+    "of clear, ordered steps -- one per line, no numbering or bullets. "
+    "Emit only the steps; do not include any preamble, postscript, or "
+    "explanation. Keep each step short and actionable."
+)
+
+
+def _parse_plan(answer: str) -> list[str]:
+    """Newline-split the planner's answer into step strings.
+
+    Mirrors cyllama's ``_default_plan_parser`` newline fallback (no JSON
+    handling here -- the default planner prompt asks for plain lines).
+    """
+    if not answer:
+        return []
+    out: list[str] = []
+    for line in str(answer).splitlines():
+        s = line.strip()
+        # Strip common bullets / numbering that LLMs add despite the prompt.
+        s = re.sub(r"^\s*(?:[-*+]|\d+[\.\)])\s+", "", s)
+        if s:
+            out.append(s)
+    return out
+
+
+@app.post("/jobs/agent/plan")
+async def jobs_agent_plan(req: Request):
+    """Plan-and-Execute: planner.stream(task) -> N executor.stream(step).
+
+    Body extends the common agent shape with:
+
+    - ``planner_system_prompt``: override the default planner prompt.
+    - ``executor_system_prompt``: optional executor prompt; defaults to
+      whatever the agent class uses.
+    - ``stop_on_error``: when true (default), abort after the first
+      failed step; otherwise run them all.
+    - ``max_steps``: cap on the number of steps executed (default 10).
+
+    Each streamed event carries ``metadata.source`` -- ``"planner"`` for
+    the plan-emission phase, ``"step-1"``, ``"step-2"``, ... for each
+    executor invocation. The final ``result`` payload contains the
+    concatenated answers under ``answer`` plus a ``steps`` list with
+    per-step ``{plan, answer, success, events}`` entries.
+    """
+    if not _FEATURE_FLAGS.get("agents.plan"):
+        raise HTTPException(501, "plan_and_execute not available in this cyllama build")
+    body = await req.json()
+    model_path = (body.get("model_path") or "").strip()
+    task = body.get("task") or ""
+    if not model_path or not os.path.isfile(model_path):
+        raise HTTPException(400, "model_path required and must exist")
+    if not isinstance(task, str) or not task.strip():
+        raise HTTPException(400, "task required")
+    try:
+        max_iterations = max(1, min(50, int(body.get("max_iterations") or 10)))
+    except (TypeError, ValueError):
+        max_iterations = 10
+    try:
+        max_steps = max(1, min(20, int(body.get("max_steps") or 10)))
+    except (TypeError, ValueError):
+        max_steps = 10
+
+    planner_prompt = body.get("planner_system_prompt") or _DEFAULT_PLANNER_PROMPT
+    executor_prompt = body.get("executor_system_prompt") or None
+    stop_on_error = bool(body.get("stop_on_error", True))
+
+    tools = _build_agent_tools(body.get("tools") or {})
+    llm = _get_llm(model_path, body.get("params"))
+
+    async def emit_stream(job: Job, agent, task_str: str, source: str) -> tuple[list[dict], Optional[str]]:
+        """Run ``agent.stream(task_str)``, emit each event with a source
+        tag stamped into metadata, and return the (events, answer) tuple.
+        """
+        evs: list[dict] = []
+        answer: Optional[str] = None
+        try:
+            it = iter(agent.stream(task_str))
+        except Exception as exc:  # noqa: BLE001
+            raise RuntimeError(f"agent.stream failed ({source}): {exc}") from exc
+        for ev in it:
+            etype = _agent_event_type_name(ev)
+            content = getattr(ev, "content", "")
+            metadata = getattr(ev, "metadata", {}) or {}
+            md = dict(_jsonify(metadata) or {})
+            md["source"] = source
+            ev_dict = {
+                "event_type": etype,
+                "content": str(content) if content is not None else "",
+                "metadata": md,
+            }
+            evs.append(ev_dict)
+            if etype == "ANSWER":
+                answer = ev_dict["content"]
+            await _emit(job, {"type": "trace", **ev_dict})
+        return evs, answer
+
+    async def producer(job: Job) -> None:
+        # Planner: no tools, custom prompt. ReActAgent is fine for plan
+        # emission -- the constrained variant doesn't help here since the
+        # planner output is a freeform list, not a tool call.
+        planner = _AGENT_REACT_CLS(
+            llm=llm,
+            tools=[],
+            system_prompt=planner_prompt,
+            max_iterations=max_iterations,
+            verbose=False,
+        )
+        planner_events, plan_answer = await emit_stream(job, planner, task, "planner")
+        plan_steps = _parse_plan(plan_answer or "")
+        plan_steps = plan_steps[:max_steps]
+
+        if not plan_steps:
+            await _emit(job, {
+                "type": "result",
+                "result": {
+                    "events": planner_events,
+                    "answer": plan_answer or "",
+                    "plan": [],
+                    "steps": [],
+                },
+            })
+            return
+
+        step_results: list[dict] = []
+        all_events: list[dict] = list(planner_events)
+        for idx, step in enumerate(plan_steps, start=1):
+            executor = _AGENT_REACT_CLS(
+                llm=llm,
+                tools=tools,
+                system_prompt=executor_prompt,
+                max_iterations=max_iterations,
+                verbose=False,
+            )
+            evs, step_answer = await emit_stream(job, executor, step, f"step-{idx}")
+            success = step_answer is not None
+            step_results.append({
+                "index": idx,
+                "plan": step,
+                "answer": step_answer or "",
+                "success": success,
+                "events": evs,
+            })
+            all_events.extend(evs)
+            if not success and stop_on_error:
+                break
+
+        # Aggregated answer: numbered list of step results. The
+        # renderer treats this as the user-facing answer; the per-step
+        # breakdown lives in ``result["steps"]`` for richer UIs.
+        final = "\n".join(
+            f"{s['index']}. {s['plan']}\n   -> {s['answer']}" for s in step_results
+        )
+
+        await _emit(job, {
+            "type": "result",
+            "result": {
+                "events": all_events,
+                "answer": final,
+                "plan": plan_steps,
+                "steps": step_results,
+            },
+        })
+
+    job = await run_job("agent.plan", producer)
+    return {"job_id": job.id}
+
+
+# ---------------------------------------------------------------------------
+# Phase 7+ -- ReflectionLoop: worker draft + critic accept/revise.
+#
+# As with plan_and_execute, we orchestrate the loop in the sidecar (not
+# via cyllama's ``ReflectionLoop`` wrapper) so worker and critic events
+# stream incrementally with ``metadata.source`` set to ``worker-<n>`` /
+# ``critic-<n>``. The wrapper's loop semantics are preserved: substring
+# match on ``acceptance_marker`` (case-insensitive) decides acceptance;
+# on non-acceptance the worker re-runs with a revision-template task.
+# ---------------------------------------------------------------------------
+
+
+_DEFAULT_CRITIC_PROMPT = (
+    "You are a careful reviewer. Read the draft answer the user supplies. "
+    "If it is correct and complete, reply with exactly 'ACCEPT' (one word). "
+    "Otherwise list the specific issues that need to be fixed in the next "
+    "revision -- be concrete and brief."
+)
+
+_DEFAULT_CRITIQUE_PREFIX = "Critique this draft:"
+
+
+def _reflection_revision(task: str, draft: str, critique: str) -> str:
+    """Same shape as cyllama.agents.composition._default_revision_template."""
+    return (
+        f"{task}\n\n"
+        f"Your previous attempt:\n{draft}\n\n"
+        f"Critic feedback (please address):\n{critique}"
+    )
+
+
+@app.post("/jobs/agent/reflect")
+async def jobs_agent_reflect(req: Request):
+    """Worker + critic reflection loop.
+
+    Body extends the common agent shape with:
+
+    - ``worker_system_prompt``: optional; defaults to the agent class's
+      own default.
+    - ``critic_system_prompt``: optional; defaults to a "respond with
+      ACCEPT or list issues" reviewer prompt.
+    - ``max_attempts``: hard cap on loop iterations (default 3).
+    - ``acceptance_marker``: substring (case-insensitive) the critic
+      must include to accept the draft. Default ``"ACCEPT"``.
+    - ``critique_prefix``: prefix on the draft when asking the critic.
+      Default ``"Critique this draft:"``.
+
+    Worker events stream with ``metadata.source = "worker-<n>"``;
+    critic events with ``"critic-<n>"`` where ``<n>`` is the 1-indexed
+    attempt. The final ``result`` payload carries the accepted draft
+    (or the last draft when no critic pass accepted), plus
+    ``attempts`` and ``accepted`` flags.
+    """
+    if not _FEATURE_FLAGS.get("agents.reflect"):
+        raise HTTPException(501, "ReflectionLoop not available in this cyllama build")
+    body = await req.json()
+    model_path = (body.get("model_path") or "").strip()
+    task = body.get("task") or ""
+    if not model_path or not os.path.isfile(model_path):
+        raise HTTPException(400, "model_path required and must exist")
+    if not isinstance(task, str) or not task.strip():
+        raise HTTPException(400, "task required")
+    try:
+        max_iterations = max(1, min(50, int(body.get("max_iterations") or 10)))
+    except (TypeError, ValueError):
+        max_iterations = 10
+    try:
+        max_attempts = max(1, min(10, int(body.get("max_attempts") or 3)))
+    except (TypeError, ValueError):
+        max_attempts = 3
+
+    worker_prompt = body.get("worker_system_prompt") or None
+    critic_prompt = body.get("critic_system_prompt") or _DEFAULT_CRITIC_PROMPT
+    acceptance_marker = (body.get("acceptance_marker") or "ACCEPT").upper()
+    critique_prefix = body.get("critique_prefix") or _DEFAULT_CRITIQUE_PREFIX
+
+    tools = _build_agent_tools(body.get("tools") or {})
+    llm = _get_llm(model_path, body.get("params"))
+
+    async def emit_stream(job: Job, agent, task_str: str, source: str) -> tuple[list[dict], Optional[str]]:
+        evs: list[dict] = []
+        answer: Optional[str] = None
+        try:
+            it = iter(agent.stream(task_str))
+        except Exception as exc:  # noqa: BLE001
+            raise RuntimeError(f"agent.stream failed ({source}): {exc}") from exc
+        for ev in it:
+            etype = _agent_event_type_name(ev)
+            content = getattr(ev, "content", "")
+            metadata = getattr(ev, "metadata", {}) or {}
+            md = dict(_jsonify(metadata) or {})
+            md["source"] = source
+            ev_dict = {
+                "event_type": etype,
+                "content": str(content) if content is not None else "",
+                "metadata": md,
+            }
+            evs.append(ev_dict)
+            if etype == "ANSWER":
+                answer = ev_dict["content"]
+            await _emit(job, {"type": "trace", **ev_dict})
+        return evs, answer
+
+    async def producer(job: Job) -> None:
+        current_task = task
+        last_draft: str = ""
+        accepted = False
+        attempts_run = 0
+        all_events: list[dict] = []
+        per_attempt: list[dict] = []
+
+        for n in range(1, max_attempts + 1):
+            attempts_run = n
+            # Worker pass.
+            worker = _AGENT_REACT_CLS(
+                llm=llm,
+                tools=tools,
+                system_prompt=worker_prompt,
+                max_iterations=max_iterations,
+                verbose=False,
+            )
+            w_evs, draft = await emit_stream(job, worker, current_task, f"worker-{n}")
+            all_events.extend(w_evs)
+            if draft is None:
+                # Worker produced no ANSWER; ReflectionLoop treats this
+                # as a hard failure -- emit ERROR and stop.
+                await _emit(job, {
+                    "type": "trace",
+                    "event_type": "ERROR",
+                    "content": "worker produced no answer",
+                    "metadata": {"source": f"worker-{n}"},
+                })
+                per_attempt.append({
+                    "index": n, "draft": "", "critique": "",
+                    "accepted": False, "worker_events": w_evs, "critic_events": [],
+                })
+                break
+            last_draft = draft
+
+            # Critic pass.
+            critic = _AGENT_REACT_CLS(
+                llm=llm,
+                tools=[],  # critic has no tools by default
+                system_prompt=critic_prompt,
+                max_iterations=max_iterations,
+                verbose=False,
+            )
+            critic_task = f"{critique_prefix}\n\n{draft}"
+            c_evs, critic_answer = await emit_stream(job, critic, critic_task, f"critic-{n}")
+            all_events.extend(c_evs)
+
+            this_attempt = {
+                "index": n,
+                "draft": draft,
+                "critique": critic_answer or "",
+                "accepted": False,
+                "worker_events": w_evs,
+                "critic_events": c_evs,
+            }
+
+            if critic_answer and acceptance_marker in critic_answer.upper():
+                this_attempt["accepted"] = True
+                accepted = True
+                per_attempt.append(this_attempt)
+                break
+
+            per_attempt.append(this_attempt)
+            # Not accepted -- build the next worker task.
+            current_task = _reflection_revision(task, draft, critic_answer or "")
+
+        await _emit(job, {
+            "type": "result",
+            "result": {
+                "events": all_events,
+                "answer": last_draft,
+                "accepted": accepted,
+                "attempts": attempts_run,
+                "rounds": per_attempt,
+            },
+        })
+
+    job = await run_job("agent.reflect", producer)
+    return {"job_id": job.id}
+
+
+# ---------------------------------------------------------------------------
+# Phase D -- Workflow discovery + execute + dry-run.
+#
+# Workflows are workspace-scoped Python files under ``WORKFLOWS_DIR``.
+# Each module exports either ``flow: Workflow`` (already configured) or
+# ``make_flow()`` returning a Workflow instance. The module docstring
+# becomes the user-facing description.
+#
+# Module loading uses importlib.util.spec_from_file_location with a
+# per-(path, mtime) cache so iterative authoring doesn't pay the
+# validation cost on every run. Failures during import or compile
+# surface as 400 with the exception message so the user can diagnose
+# without inspecting sidecar logs.
+# ---------------------------------------------------------------------------
+
+
+# id -> (path, mtime, compiled_workflow). Populated lazily; mtime
+# invalidation happens on every load attempt.
+_WORKFLOW_CACHE: dict[str, tuple[Path, float, Any]] = {}
+
+
+_WORKFLOW_ID_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*$")
+
+
+def _list_workflow_files() -> list[Path]:
+    """Return *.py files in WORKFLOWS_DIR with valid id-shape names.
+
+    A valid workflow id is a leading-letter alphanumeric (plus ``_-``)
+    -- the same shape the renderer can put on a URL or DOM id. Files
+    whose stem violates this are skipped silently (e.g. ``__init__.py``,
+    ``.foo.py``, ``2024_thing.py``).
+    """
+    if not WORKFLOWS_DIR.is_dir():
+        return []
+    out: list[Path] = []
+    for p in sorted(WORKFLOWS_DIR.iterdir()):
+        if p.suffix != ".py":
+            continue
+        if not _WORKFLOW_ID_RE.match(p.stem):
+            continue
+        out.append(p)
+    return out
+
+
+def _load_workflow_module(path: Path) -> Any:
+    """Import a workflow module by path; return the module object."""
+    import importlib.util as _ilu
+
+    # Use a unique namespace so re-imports of the same path don't clash
+    # with each other in sys.modules. The id encodes path stem + mtime
+    # so a re-imported module after edit is a fresh object, not a
+    # potentially-stale cached one.
+    mtime = path.stat().st_mtime_ns
+    mod_name = f"_cyllama_workflow_{path.stem}_{mtime}"
+    spec = _ilu.spec_from_file_location(mod_name, path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"could not load workflow spec for {path}")
+    module = _ilu.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _resolve_workflow(path: Path) -> Any:
+    """Return a compiled :class:`CompiledWorkflow` for ``path``.
+
+    Looks for an attribute named ``flow`` (already-configured
+    :class:`Workflow`) or a callable ``make_flow()`` returning one.
+    Compiles the workflow before returning so downstream code can
+    rely on the compiled form. Caches by (path, mtime).
+    """
+    if _AGENT_WORKFLOW_CLS is None:
+        raise RuntimeError("cyllama.agents.Workflow not available in this build")
+
+    mtime = path.stat().st_mtime
+    cached = _WORKFLOW_CACHE.get(path.stem)
+    if cached is not None and cached[0] == path and cached[1] == mtime:
+        return cached[2]
+
+    module = _load_workflow_module(path)
+
+    flow = getattr(module, "flow", None)
+    if flow is None:
+        maker = getattr(module, "make_flow", None)
+        if callable(maker):
+            flow = maker()
+    if flow is None:
+        raise RuntimeError(
+            f"workflow module {path.name!r} exports neither ``flow`` "
+            "nor ``make_flow()``"
+        )
+    # Accept either a Workflow or a pre-compiled CompiledWorkflow.
+    compiled = flow
+    if isinstance(flow, _AGENT_WORKFLOW_CLS):
+        compiled = flow.compile()
+
+    _WORKFLOW_CACHE[path.stem] = (path, mtime, compiled)
+    return compiled
+
+
+def _workflow_summary(path: Path) -> dict:
+    """Best-effort discovery summary for the Workflows pane."""
+    summary: dict[str, Any] = {
+        "id": path.stem,
+        "filename": path.name,
+        "doc": "",
+        "entry": None,
+        "exits": [],
+        "inputs_required": [],
+        "error": None,
+    }
+    try:
+        compiled = _resolve_workflow(path)
+        plan = compiled.dry_run()
+        # The module's docstring becomes the description. Re-import is
+        # cheap because _resolve_workflow cached the compiled form.
+        module = _load_workflow_module(path)
+        summary["doc"] = (getattr(module, "__doc__", None) or "").strip()
+        summary["entry"] = plan.entry
+        summary["exits"] = sorted(plan.exits)
+        summary["inputs_required"] = list(plan.inputs_required)
+    except Exception as exc:  # noqa: BLE001
+        # A broken workflow file shouldn't poison the discovery list --
+        # surface the error inline so the pane can render a disabled row.
+        summary["error"] = f"{type(exc).__name__}: {exc}"
+    return summary
+
+
+@app.get("/workflows")
+async def workflows_list():
+    """Discover *.py files in the workflows directory.
+
+    Returns a list of summaries with id, filename, docstring, entry
+    node, exits, and inputs_required. Files that fail to load have
+    ``error`` populated and other fields empty so the Workflows pane
+    can render a disabled row pointing at the file.
+    """
+    if not _FEATURE_FLAGS.get("workflow"):
+        return {"workflows": [], "dir": str(WORKFLOWS_DIR)}
+    items = [_workflow_summary(p) for p in _list_workflow_files()]
+    return {"workflows": items, "dir": str(WORKFLOWS_DIR)}
+
+
+@app.get("/workflows/{workflow_id}/spec")
+async def workflow_spec(workflow_id: str):
+    """Static execution plan for a workflow (no node bodies run).
+
+    Returns the topological levels, conditional-only nodes, entry,
+    exits, and inputs the user must supply via ``initial_state``.
+    Also returns a Mermaid rendering when the compiled workflow
+    supports ``to_mermaid()``.
+    """
+    if not _FEATURE_FLAGS.get("workflow"):
+        raise HTTPException(501, "workflow runtime not available in this cyllama build")
+    if not _WORKFLOW_ID_RE.match(workflow_id):
+        raise HTTPException(400, f"invalid workflow id: {workflow_id!r}")
+    path = WORKFLOWS_DIR / f"{workflow_id}.py"
+    if not path.is_file():
+        raise HTTPException(404, f"workflow not found: {workflow_id!r}")
+    try:
+        compiled = _resolve_workflow(path)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(400, f"workflow load failed: {type(exc).__name__}: {exc}")
+
+    plan = compiled.dry_run()
+    mermaid: Optional[str] = None
+    try:
+        mermaid = compiled.to_mermaid()
+    except Exception:
+        # to_mermaid is best-effort; the pane works without it.
+        pass
+
+    return {
+        "id": workflow_id,
+        "entry": plan.entry,
+        "exits": sorted(plan.exits),
+        "levels": [list(lvl) for lvl in plan.levels],
+        "conditional_nodes": sorted(plan.conditional_nodes),
+        "inputs_required": list(plan.inputs_required),
+        "mermaid": mermaid,
+    }
+
+
+@app.post("/jobs/workflow/run")
+async def jobs_workflow_run(req: Request):
+    """Run a discovered workflow, streaming its native event surface.
+
+    Body: ``{workflow_id: str, initial_state: dict}``. Initial state
+    keys map to workflow inputs (``inputs_required`` on the dry-run
+    plan); the workflow runtime raises ``WorkflowExecutionError`` if a
+    required input is missing, captured into the final ``WORKFLOW_END``
+    event as usual.
+
+    SSE events stream the workflow's native shape: ``WORKFLOW_START``,
+    per-node ``NODE_START`` / ``NODE_END``, ``ANSWER`` (the projected
+    output), ``WORKFLOW_END`` with full state + metrics. Sub-workflow
+    and ``agent_node`` events arrive with ``metadata.source`` set so
+    the pane can render the nesting tree.
+    """
+    if not _FEATURE_FLAGS.get("workflow"):
+        raise HTTPException(501, "workflow runtime not available in this cyllama build")
+    body = await req.json()
+    workflow_id = (body.get("workflow_id") or "").strip()
+    if not _WORKFLOW_ID_RE.match(workflow_id):
+        raise HTTPException(400, f"invalid workflow_id: {workflow_id!r}")
+    path = WORKFLOWS_DIR / f"{workflow_id}.py"
+    if not path.is_file():
+        raise HTTPException(404, f"workflow not found: {workflow_id!r}")
+    initial_state = body.get("initial_state") or {}
+    if not isinstance(initial_state, dict):
+        raise HTTPException(400, "initial_state must be a JSON object")
+    try:
+        compiled = _resolve_workflow(path)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(400, f"workflow load failed: {type(exc).__name__}: {exc}")
+
+    async def producer(job: Job) -> None:
+        events: list[dict] = []
+        final_state: dict = {}
+        success = True
+        error: Optional[str] = None
+        answer: Optional[str] = None
+
+        async for ev in compiled.astream(dict(initial_state)):
+            etype = _agent_event_type_name(ev)
+            content = getattr(ev, "content", "")
+            metadata = getattr(ev, "metadata", {}) or {}
+            md = _jsonify(metadata) or {}
+            # Preserve source/parent_event_id sub-event nesting from
+            # the cyllama runtime (agent_node / workflow_node).
+            for k in ("source", "parent_event_id"):
+                v = getattr(ev, k, None)
+                if v is not None and k not in md:
+                    md[k] = v
+            ev_dict = {
+                "event_type": etype,
+                "content": str(content) if content is not None else "",
+                "metadata": md,
+            }
+            events.append(ev_dict)
+            if etype == "ANSWER":
+                answer = ev_dict["content"]
+            elif etype == "WORKFLOW_END":
+                final_state = md.get("state", {}) or {}
+                success = bool(md.get("success", True))
+                error = md.get("error")
+            await _emit(job, {"type": "trace", **ev_dict})
+
+        await _emit(job, {
+            "type": "result",
+            "result": {
+                "events": events,
+                "answer": answer or "",
+                "state": final_state,
+                "success": success,
+                "error": error,
+            },
+        })
+
+    job = await run_job("workflow.run", producer)
+    return {"job_id": job.id}
+
+
+register_job_kind("workflow.run")
 
 
 # ---------------------------------------------------------------------------

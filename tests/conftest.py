@@ -529,6 +529,299 @@ class _FakeReActAgent:
         for kind, content in type(self)._script:
             yield _FakeAgentEvent(_FakeAgentEventType(kind), content)
 
+    def run(self, task):
+        """Mirror real cyllama.agents.ReActAgent.run: drain the stream,
+        return an AgentResult-shape object. Tests for plan_and_execute
+        rely on this synchronous form (planner.run / executor.run)."""
+        steps = []
+        answer = ""
+        for ev in self.stream(task):
+            steps.append(ev)
+            etype = getattr(ev.type, "name", str(ev.type))
+            if etype == "ANSWER":
+                answer = ev.content
+        return _FakeAgentResult(answer=answer, steps=steps,
+                                iterations=len(steps), success=True)
+
+
+class _FakeConstrainedAgent(_FakeReActAgent):
+    """Stub for ``cyllama.agents.ConstrainedAgent``. Same surface as the
+    ReAct fake; tests override ``_script`` to drive trace content. A
+    distinct class so the sidecar's isinstance / kwargs handling can
+    differ between the two endpoints if needed."""
+    instances: list["_FakeConstrainedAgent"] = []
+
+
+class _FakeContractAgent(_FakeReActAgent):
+    """Stub for ``cyllama.agents.ContractAgent``. Stores the policy and
+    rules so tests can assert pass-through, and -- when the default
+    script's ANSWER violates a postcondition -- emits a synthetic
+    CONTRACT_VIOLATION event before the ANSWER so the trace surfaces
+    rule firing in the same shape real cyllama would."""
+    instances: list["_FakeContractAgent"] = []
+
+    def __init__(self, llm, tools=None, system_prompt=None,
+                 policy=None, task_preconditions=None,
+                 answer_postconditions=None, iteration_invariants=None,
+                 max_iterations=10, verbose=False, **kwargs):  # noqa: ARG002
+        super().__init__(llm, tools=tools, system_prompt=system_prompt,
+                         max_iterations=max_iterations, verbose=verbose,
+                         **kwargs)
+        self.policy = policy
+        self.task_preconditions = list(task_preconditions or [])
+        self.answer_postconditions = list(answer_postconditions or [])
+        self.iteration_invariants = list(iteration_invariants or [])
+
+    def stream(self, task):
+        # Check task preconditions; emit CONTRACT_VIOLATION for each
+        # that fails. Note: under ENFORCE the real agent would
+        # terminate; the stub just emits the event and continues so
+        # tests can observe both the rule firing and downstream events.
+        for rule in self.task_preconditions:
+            try:
+                ok = bool(rule(task))
+            except Exception:
+                ok = False
+            if not ok:
+                yield _FakeAgentEvent(
+                    _FakeAgentEventType("CONTRACT_VIOLATION"),
+                    "task precondition failed",
+                )
+
+        # Replay the base script (defaults to THOUGHT + ANSWER) and
+        # check the ANSWER against each postcondition.
+        last_answer = None
+        for kind, content in type(self)._script:
+            yield _FakeAgentEvent(_FakeAgentEventType(kind), content)
+            if kind == "ANSWER":
+                last_answer = content
+
+        if last_answer is not None:
+            for rule in self.answer_postconditions:
+                try:
+                    ok = bool(rule(last_answer))
+                except Exception:
+                    ok = False
+                if not ok:
+                    yield _FakeAgentEvent(
+                        _FakeAgentEventType("CONTRACT_VIOLATION"),
+                        "answer postcondition failed",
+                    )
+
+
+class _FakeContractPolicy:
+    """Stub mirroring ``cyllama.agents.ContractPolicy``. Real cyllama
+    exposes an IntEnum (IGNORE / OBSERVE / ENFORCE / QUICK_ENFORCE);
+    tests only need name -> sentinel equality, not the int values."""
+    IGNORE = "IGNORE"
+    OBSERVE = "OBSERVE"
+    ENFORCE = "ENFORCE"
+    QUICK_ENFORCE = "QUICK_ENFORCE"
+
+
+class _FakeAgentResult:
+    """Mirror ``cyllama.agents.AgentResult`` (dataclass-shape)."""
+    def __init__(self, answer="", steps=None, iterations=0,
+                 success=True, error=None, metrics=None):
+        self.answer = answer
+        self.steps = list(steps or [])
+        self.iterations = iterations
+        self.success = success
+        self.error = error
+        self.metrics = metrics
+
+
+class _FakeDryRunPlan:
+    def __init__(self, entry, exits, levels, conditional_nodes, inputs_required):
+        self.entry = entry
+        self.exits = frozenset(exits)
+        self.levels = tuple(tuple(lvl) for lvl in levels)
+        self.conditional_nodes = frozenset(conditional_nodes)
+        self.inputs_required = tuple(inputs_required)
+
+
+class _FakeCompiledWorkflow:
+    """Compiled-form fake. Supports astream() yielding scripted events
+    and dry_run() returning a static plan derived from the builder
+    inputs. Tests poke the workflow file's ``_script`` attribute to
+    drive different event sequences.
+    """
+
+    def __init__(self, source):
+        self._source = source
+
+    def dry_run(self):
+        return _FakeDryRunPlan(
+            entry=self._source._entry,
+            exits=self._source._exits or {self._source._entry},
+            levels=[[self._source._entry]] + [[n] for n in self._source._other_nodes()],
+            conditional_nodes=[],
+            inputs_required=list(self._source._inputs_required),
+        )
+
+    def to_mermaid(self):
+        return f"graph TD\n  {self._source._entry}([{self._source._entry}])"
+
+    async def astream(self, initial_state=None):
+        state = dict(initial_state or {})
+        yield _FakeAgentEvent(_FakeAgentEventType("WORKFLOW_START"), "",
+                              metadata={"entry": self._source._entry,
+                                        "initial_state": dict(state)})
+        # Replay scripted node events. Each entry is
+        # (event_type, content, metadata_overrides).
+        for entry in self._source._script:
+            etype, content = entry[0], entry[1]
+            md = entry[2] if len(entry) >= 3 else {}
+            yield _FakeAgentEvent(_FakeAgentEventType(etype), content, metadata=dict(md))
+        # Project the answer from a configured state key, falling back
+        # to the entry node's name if it exists in state.
+        answer_key = self._source._answer_key
+        if answer_key and answer_key in state:
+            answer = str(state[answer_key])
+        else:
+            answer = ""
+        yield _FakeAgentEvent(_FakeAgentEventType("ANSWER"), answer,
+                              metadata={"answer_key": answer_key})
+        yield _FakeAgentEvent(_FakeAgentEventType("WORKFLOW_END"), "",
+                              metadata={
+                                  "state": state,
+                                  "success": True,
+                                  "error": None,
+                                  "metrics": None,
+                                  "nodes_run": list(self._source._all_nodes()),
+                              })
+
+
+class _FakeWorkflow:
+    """Builder-form fake for cyllama.agents.Workflow.
+
+    Minimal surface: add_node / add_edge / set_entry / set_exit + a
+    compile() that returns a _FakeCompiledWorkflow. The astream output
+    is driven by a class-level ``_default_script`` that test files can
+    override per-instance.
+    """
+
+    # Default scripted node events used by every fake compiled workflow
+    # whose source doesn't override. Just one NODE_START / NODE_END pair.
+    _default_script = [
+        ("NODE_START", "", {"node": "n1", "event_id": "ev-n1"}),
+        ("NODE_END", "", {"node": "n1", "update": {}, "elapsed_ms": 0.1,
+                          "event_id": "ev-n1"}),
+    ]
+
+    def __init__(self, *args, task_param="task", answer_key=None, **kwargs):  # noqa: ARG002
+        self._entry = None
+        self._exits = set()
+        self._nodes = {}
+        self._edges = []
+        self._inputs_required = []
+        self._script = list(type(self)._default_script)
+        self._task_param = task_param
+        self._answer_key = answer_key
+
+    def add_node(self, name, fn=None, **kwargs):  # noqa: ARG002
+        # Layer-B form: add_node(name, fn). Layer-C: add_node(fn).
+        # Tests use Layer-B, which is the simpler path.
+        node_name = name if isinstance(name, str) else getattr(name, "__name__", "node")
+        self._nodes[node_name] = fn
+
+    def add_edge(self, from_node, to_node):
+        self._edges.append((from_node, to_node))
+
+    def add_conditional_edge(self, from_node, router, edge_map=None):  # noqa: ARG002
+        self._edges.append((from_node, "<conditional>"))
+
+    def set_entry(self, name):
+        self._entry = name
+
+    def set_exit(self, name):
+        self._exits.add(name)
+
+    def declare_inputs(self, *names):
+        """Test-only helper -- real Workflow infers these; the fake
+        lets tests state them explicitly."""
+        self._inputs_required = list(names)
+
+    def set_script(self, script):
+        """Test-only: replace the astream() event script."""
+        self._script = list(script)
+
+    def _other_nodes(self):
+        return [n for n in self._nodes if n != self._entry]
+
+    def _all_nodes(self):
+        out = [self._entry] if self._entry else []
+        out += self._other_nodes()
+        return out
+
+    def compile(self):
+        if self._entry is None:
+            raise ValueError("no entry node set")
+        return _FakeCompiledWorkflow(self)
+
+
+class _FakeSemanticMemoryRecord:
+    def __init__(self, text, score=1.0, namespace="default", metadata=None):
+        self.text = text
+        self.score = score
+        self.namespace = namespace
+        self.metadata = metadata or {}
+
+
+class _FakeSemanticMemory:
+    """Mirror cyllama.agents.SemanticMemory just enough for tests.
+
+    Records the ``rag`` shim + namespace on the instance; ``remember`` /
+    ``retrieve`` are backed by an in-memory list keyed by namespace so
+    a round-trip test can write and read a fragment without exercising
+    a real vector store.
+    """
+    instances: list["_FakeSemanticMemory"] = []
+    # Class-level storage so tests can clear between cases via the fixture.
+    _store: dict[str, list[str]] = {}
+
+    def __init__(self, rag, namespace_field="_memory_namespace", default_namespace="default"):
+        self.rag = rag
+        self.namespace_field = namespace_field
+        self.default_namespace = default_namespace
+        type(self).instances.append(self)
+
+    def remember(self, text, *, namespace=None, metadata=None, split=False):  # noqa: ARG002
+        ns = namespace or self.default_namespace
+        bucket = type(self)._store.setdefault(ns, [])
+        bucket.append(str(text))
+        return [len(bucket) - 1]  # synthetic id
+
+    def retrieve(self, query, *, namespace=None, top_k=5, threshold=None):  # noqa: ARG002
+        ns = namespace or self.default_namespace
+        bucket = type(self)._store.get(ns, [])
+        # Trivial relevance: case-insensitive substring match on query,
+        # ordered by recency, capped at top_k.
+        q = str(query).lower()
+        hits = [t for t in reversed(bucket) if q in t.lower()] or list(reversed(bucket))
+        return [
+            _FakeSemanticMemoryRecord(text=t, score=1.0 - i * 0.1, namespace=ns)
+            for i, t in enumerate(hits[:top_k])
+        ]
+
+
+def _fake_plan_and_execute(planner, executor, task, **kwargs):  # noqa: ARG001
+    """Stub for ``cyllama.agents.plan_and_execute``. Returns a list of
+    per-step AgentResults built from the executor's scripted trace."""
+    # Drive the planner to produce a fake plan, then run the executor
+    # once per step. Tests override planner/executor _script as needed.
+    plan_result = planner.run(task) if hasattr(planner, "run") else _FakeAgentResult(answer="step1\nstep2")
+    if not getattr(plan_result, "success", True):
+        return [plan_result]
+    steps = [s.strip() for s in (plan_result.answer or "").splitlines() if s.strip()]
+    results = []
+    for step in steps:
+        if hasattr(executor, "run"):
+            results.append(executor.run(step))
+        else:
+            results.append(_FakeAgentResult(answer=f"did: {step}"))
+    return results
+
 
 class _FakeSDImage:
     """Minimal stand-in for cyllama.sd.SDImage.
@@ -623,12 +916,34 @@ def _install_cyllama_stub() -> None:
     sys.modules["cyllama.sd"] = sd
     mod.sd = sd
 
-    # Agents stub: cyllama.agents.{ReActAgent, Tool, AgentEvent, EventType}.
+    # Agents stub: cyllama.agents.{ReActAgent, Tool, AgentEvent, EventType}
+    # plus the Phase-7+ additions probed by sidecar.py at module load.
     agents = types.ModuleType("cyllama.agents")
     agents.ReActAgent = _FakeReActAgent
     agents.Tool = _FakeAgentTool
     agents.AgentEvent = _FakeAgentEvent
     agents.EventType = _FakeAgentEventType
+    agents.ConstrainedAgent = _FakeConstrainedAgent
+    agents.ContractAgent = _FakeContractAgent
+    agents.ContractPolicy = _FakeContractPolicy
+    agents.AgentResult = _FakeAgentResult
+    agents.plan_and_execute = _fake_plan_and_execute
+    # Phase C: ReflectionLoop. The sidecar orchestrates worker+critic
+    # itself (bypassing the wrapper for incremental streaming) and only
+    # uses the symbol for feature detection, so a marker class suffices.
+    agents.ReflectionLoop = type("_FakeReflectionLoop", (), {})
+    # Phase D: Workflow / workflow_node / agent_node. The sidecar imports
+    # workflow files at runtime and calls compile().dry_run() +
+    # compile().astream(); the fakes implement just that surface.
+    agents.Workflow = _FakeWorkflow
+    agents.workflow_node = lambda *a, **kw: None  # marker for feature flag
+    agents.agent_node = lambda *a, **kw: None     # marker for feature flag
+    # Phase E: SemanticMemory. The sidecar constructs an instance with a
+    # rag-shaped shim + namespace, then wraps ``remember`` / ``retrieve``
+    # as Tools. The fake records the rag + namespace and provides minimal
+    # remember/retrieve implementations backed by an in-memory list so
+    # round-trip tests can verify wiring without a real vector store.
+    agents.SemanticMemory = _FakeSemanticMemory
     sys.modules["cyllama.agents"] = agents
     mod.agents = agents
 

@@ -32,7 +32,12 @@ endif
 PYENV_DIR := build/python-$(HOST_OS)-$(HOST_ARCH)
 PY_BIN    := $(PYENV_DIR)/bin/python3
 
-.PHONY: all dev dmg python npm test test-deps e2e clean reset help
+.PHONY: all dev dmg python python-local npm test test-deps e2e clean reset help
+
+# Default path to a local cyllama checkout. Override at invocation
+# (``make python-local CYLLAMA_SOURCE=/elsewhere/cyllama``) or via the
+# environment.
+CYLLAMA_SOURCE ?= $(abspath ../cyllama)
 
 all: dmg
 
@@ -41,7 +46,10 @@ help:
 	@echo "  make           Build a distributable .dmg for the host arch (default)"
 	@echo "  make dev       Run the app in dev mode (npm start)"
 	@echo "  make dmg       Build the installer for the host (mac=dmg, win=nsis, linux=AppImage)"
-	@echo "  make python    Build the bundled Python env only"
+	@echo "  make python    Build the bundled Python env only (cyllama from PyPI)"
+	@echo "  make python-local"
+	@echo "                 Rebuild the bundled Python env using a local cyllama"
+	@echo "                 checkout (default: ../cyllama; override CYLLAMA_SOURCE)"
 	@echo "  make npm       npm install"
 	@echo "  make test      Run the sidecar pytest suite"
 	@echo "  make e2e       Run the Playwright per-pane smoke suite"
@@ -60,6 +68,18 @@ $(PY_BIN):
 	bash scripts/build-python-env.sh
 
 python: $(PY_BIN)
+
+# Rebuild the bundled Python env using a local cyllama checkout. Always
+# wipes the existing env first so the rebuild actually runs (the plain
+# ``python`` target is gated on $(PY_BIN) existing). The build-python-env.sh
+# script honors CYLLAMA_SOURCE; we just guarantee the rebuild fires.
+python-local:
+	@if [ ! -d "$(CYLLAMA_SOURCE)" ]; then \
+	  echo "CYLLAMA_SOURCE=$(CYLLAMA_SOURCE) does not exist"; exit 1; \
+	fi
+	@echo "Rebuilding bundled Python env from $(CYLLAMA_SOURCE)"
+	rm -rf "$(PYENV_DIR)"
+	CYLLAMA_SOURCE="$(CYLLAMA_SOURCE)" bash scripts/build-python-env.sh
 
 dev: node_modules python
 	npm start

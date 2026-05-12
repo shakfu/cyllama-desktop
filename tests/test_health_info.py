@@ -45,3 +45,25 @@ def test_info_exposes_features(client, auth):
     assert feats.get("grammar") is False
     assert feats.get("speculative") is False
     assert feats.get("ngram") is False
+
+
+def test_info_exposes_granular_agent_flags(client, auth):
+    """Each Phase-7+ agent class is independently probed at module load
+    so the renderer can hide individual slash commands when the bundle
+    is missing a class. The conftest stub installs all of them."""
+    r = client.get("/info", headers=auth)
+    feats = r.json()["features"]
+    # Base agents flag remains the gate for the ReAct surface.
+    assert feats.get("agents") is True
+    # Granular flags: each independently True when the corresponding
+    # cyllama.agents.* symbol resolves.
+    assert feats.get("agents.constrained") is True
+    assert feats.get("agents.contract") is True
+    assert feats.get("agents.plan") is True
+    assert feats.get("agents.reflect") is True
+    assert feats.get("workflow") is True
+    assert feats.get("agents.memory") is True
+    # rag_tool stub not installed (cyllama.agents.rag_as_tool isn't wired
+    # into the conftest). Asserting key existence + value catches
+    # accidental removal of the probe.
+    assert feats.get("agents.rag_tool") is False

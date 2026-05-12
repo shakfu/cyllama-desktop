@@ -163,14 +163,18 @@ test("Models pane: switching back to Chats restores the chat layout", async () =
   await expect(window.locator("#modelsPane")).toBeHidden();
 });
 
-test("Agents right-tab renders the Run section", async () => {
+test("Agents right-tab renders the settings surface", async () => {
   ctx = await launchApp();
   const { window } = ctx;
   await openRightTab(window, "agents");
-  // Agents tab is async (needs /info). Wait for its Run header to
-  // land rather than asserting on the placeholder.
-  await expect(window.locator("#agentsTabHost")).toContainText(/Run/i, { timeout: 15_000 });
-  await expect(window.locator("#ag-run")).toBeVisible();
+  // Agents tab is async (needs /info). Wait for its settings surface
+  // to land. As of the slash-command refactor (2026-05-07) agent runs
+  // are triggered from the chat composer via ``/agent <task>``; the
+  // tab is settings-only -- no inline Run button.
+  const host = window.locator("#agentsTabHost");
+  await expect(host).toContainText(/\/agent <task>/, { timeout: 15_000 });
+  await expect(host).toContainText(/Max iterations/);
+  await expect(host).toContainText(/Tools/);
 });
 
 test("right-sidebar tabs are Parameters + Agents only", async () => {
@@ -201,4 +205,104 @@ test("cog nav-rail opens the Preferences window", async () => {
   // load-bearing check.
   await expect(prefs.locator(".prefs-nav-item")).toHaveCount(4);
   await expect(prefs.locator(".prefs-nav-item.active")).toContainText("General");
+});
+
+test("/constrained slash command is registered (Tab autocompletes)", async () => {
+  ctx = await launchApp();
+  const { window } = ctx;
+  const prompt = window.locator("#prompt");
+  await prompt.click();
+  await prompt.fill("/cons");
+  await prompt.press("Tab");
+  // Unique-prefix autocomplete: ``/cons`` matches only ``/constrained``,
+  // so Tab fills the composer with the full command + trailing space.
+  await expect(prompt).toHaveValue("/constrained ");
+});
+
+test("/agent and /constrained both surface on /-prefix autocomplete", async () => {
+  ctx = await launchApp();
+  const { window } = ctx;
+  const prompt = window.locator("#prompt");
+  await prompt.click();
+  await prompt.fill("/");
+  await prompt.press("Tab");
+  // Multiple matches: Tab fills the longest common prefix (empty here,
+  // since ``agent`` and ``constrained`` share none) and emits a
+  // candidate hint into the chat log. The log line contains both names.
+  await expect(window.locator("#log")).toContainText(/\/agent/);
+  await expect(window.locator("#log")).toContainText(/\/constrained/);
+  await expect(window.locator("#log")).toContainText(/\/contract/);
+});
+
+test("/plan slash command is registered", async () => {
+  ctx = await launchApp();
+  const { window } = ctx;
+  const prompt = window.locator("#prompt");
+  await prompt.click();
+  await prompt.fill("/pl");
+  await prompt.press("Tab");
+  await expect(prompt).toHaveValue("/plan ");
+});
+
+test("Workflows nav-button surfaces when the feature flag is on", async () => {
+  ctx = await launchApp();
+  const { window } = ctx;
+  // The conftest stub installs Workflow + workflow_node + agent_node,
+  // so /info.features.workflow is true and the nav-rail button reveals.
+  const btn = window.locator("#navWorkflows");
+  await expect(btn).toBeVisible({ timeout: 15_000 });
+  await btn.click();
+  await expect(window.locator("#app")).toHaveAttribute("data-pane", "workflows");
+  await expect(window.locator("#workflowsPane")).toBeVisible();
+  // No workflow files on disk in the test harness -> the subnav shows
+  // the empty-state hint.
+  await expect(window.locator("#workflowsPaneSubnav")).toContainText(/No workflow files/i);
+});
+
+test("/reflect slash + Reflection section render when feature is on", async () => {
+  ctx = await launchApp();
+  const { window } = ctx;
+  const prompt = window.locator("#prompt");
+  await prompt.click();
+  await prompt.fill("/ref");
+  await prompt.press("Tab");
+  await expect(prompt).toHaveValue("/reflect ");
+  await openRightTab(window, "agents");
+  const host = window.locator("#agentsTabHost");
+  await expect(host).toContainText(/Reflection/i, { timeout: 15_000 });
+  await expect(window.locator("#ag-reflect-attempts")).toBeVisible();
+  await expect(window.locator("#ag-reflect-marker")).toBeVisible();
+  await expect(window.locator("#ag-reflect-critic-prompt")).toBeVisible();
+});
+
+test("Semantic memory row renders when agents.memory feature is on", async () => {
+  ctx = await launchApp();
+  const { window } = ctx;
+  // The conftest stub installs SemanticMemory so features['agents.memory']
+  // is true; the row should land in the agents tab Tools section.
+  await openRightTab(window, "agents");
+  const host = window.locator("#agentsTabHost");
+  await expect(host).toContainText(/Semantic memory/i, { timeout: 15_000 });
+  await expect(window.locator("#ag-memory-enable")).toBeVisible();
+  await expect(window.locator("#ag-memory-coll")).toBeVisible();
+  await expect(window.locator("#ag-memory-ns")).toBeVisible();
+});
+
+test("/contract slash + Contracts section render when feature is on", async () => {
+  ctx = await launchApp();
+  const { window } = ctx;
+  // Slash registration: typing /contr completes to /contract (a longer
+  // common prefix than /cons -> /constrained).
+  const prompt = window.locator("#prompt");
+  await prompt.click();
+  await prompt.fill("/contr");
+  await prompt.press("Tab");
+  await expect(prompt).toHaveValue("/contract ");
+  // Agents-tab Contracts row only renders when features['agents.contract']
+  // is true; the conftest stub sets it. Wait for the section to land.
+  await openRightTab(window, "agents");
+  const host = window.locator("#agentsTabHost");
+  await expect(host).toContainText(/Contracts/i, { timeout: 15_000 });
+  await expect(window.locator("#ag-contract-preset")).toBeVisible();
+  await expect(window.locator("#ag-contract-policy")).toBeVisible();
 });

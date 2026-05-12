@@ -21,6 +21,11 @@ extraResources:
     to: "python-sidecar"
     filter:
       - "sidecar.py"
+  # Phase D: example workflows seeded into the workspace on first launch.
+  - from: "resources/example-workflows"
+    to: "example-workflows"
+    filter:
+      - "*.py"
 
 asar: true
 # Native libs (libllama, libggml-*) and Python .so files cannot be loaded

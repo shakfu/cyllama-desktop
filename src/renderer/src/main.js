@@ -27,6 +27,7 @@ import * as transcribePane from "./features/transcribe-pane.js";
 import * as imagePane from "./features/image-pane.js";
 import * as batchPane from "./features/batch-pane.js";
 import * as modelsPane from "./features/models-pane.js";
+import * as workflowsPane from "./features/workflows-pane.js";
 // Server-pane lives in Preferences -> Sidecar tab now. Not imported here.
 
 // Expose the libs on a single namespace so feature modules added later --
@@ -94,6 +95,10 @@ const PANE_HOOKS = {
   models: {
     onShow: () => modelsPane.show && modelsPane.show(),
     onHide: () => modelsPane.hide && modelsPane.hide(),
+  },
+  workflows: {
+    onShow: () => workflowsPane.show && workflowsPane.show(),
+    onHide: () => workflowsPane.hide && workflowsPane.hide(),
   },
 };
 let activePane = "chats";
@@ -1066,6 +1071,7 @@ async function applySupportedParams() {
   imagePane.applyVisibility(features);
   agentsTab.applyVisibility(features);
   batchPane.applyVisibility(features);
+  applyWorkflowsVisibility(features);
   // Composer paperclip is gated on the multimodal capability AND a
   // pinned mmproj path. The /info.features check alone isn't enough
   // -- attaching an image without an mmproj would 200 OK but the
@@ -1079,6 +1085,17 @@ function applyAttachButtonVisibility(features) {
   if (!btn) return;
   const ok = !!(features && features.multimodal) && !!getMmprojPath();
   btn.hidden = !ok;
+}
+
+// Workflows pane nav-rail button is hidden until /info.features.workflow
+// is true. When the bundle includes the workflow runtime, surface it
+// and mount the pane so a click of the button reveals discovered files.
+function applyWorkflowsVisibility(features) {
+  const btn = document.getElementById("navWorkflows");
+  if (!btn) return;
+  const ok = !!(features && features.workflow);
+  btn.hidden = !ok;
+  if (ok) workflowsPane.mount();
 }
 
 // Hide main_gpu / split_mode / tensor_split rows when the machine has
@@ -1798,6 +1815,30 @@ const SLASH_COMMANDS = [
     hint: "<task>",
     run: (body, raw) => sendAgent(body, raw),
   },
+  {
+    name: "constrained",
+    kind: "action",
+    hint: "<task>",
+    run: (body, raw) => sendConstrainedAgent(body, raw),
+  },
+  {
+    name: "contract",
+    kind: "action",
+    hint: "<task>",
+    run: (body, raw) => sendContractAgent(body, raw),
+  },
+  {
+    name: "plan",
+    kind: "action",
+    hint: "<task>",
+    run: (body, raw) => sendPlanAgent(body, raw),
+  },
+  {
+    name: "reflect",
+    kind: "action",
+    hint: "<task>",
+    run: (body, raw) => sendReflectAgent(body, raw),
+  },
 ];
 const SLASH_NAMES = SLASH_COMMANDS.map((c) => c.name);
 function getSlashCommand(name) {
@@ -1863,6 +1904,17 @@ function fmtAgentEventType(t) {
 function renderAgentEvent(ev) {
   const row = document.createElement("div");
   row.className = `ag-event ag-ev-${fmtAgentEventType(ev.event_type)}`;
+  // ``metadata.source`` is set by /jobs/agent/plan (and by sub-workflow
+  // event forwarding when that lands) to tag which sub-agent emitted
+  // the event. Surface it as a prefix chip so the user can tell a
+  // planner THOUGHT apart from a step-3 executor THOUGHT.
+  const source = ev && ev.metadata && ev.metadata.source;
+  if (source) {
+    const sEl = document.createElement("span");
+    sEl.className = "ag-ev-source";
+    sEl.textContent = source;
+    row.appendChild(sEl);
+  }
   const tEl = document.createElement("span");
   tEl.className = "ag-ev-type";
   tEl.textContent = ev.event_type || "?";
@@ -1874,10 +1926,17 @@ function renderAgentEvent(ev) {
   return row;
 }
 
-async function sendAgent(task, rawPrompt) {
-  if (!task) { errorLine("Usage: /agent <task>"); return; }
+// Shared driver for any agent variant (ReAct, ConstrainedAgent, ...). The
+// only per-variant knobs are the slash label used in errors, the sidecar
+// job kind, and any extra body fields beyond the shared base. The trace
+// rendering and chat-history bookkeeping is uniform across variants.
+async function runAgentVariant({ label, slashName, jobKind, extraBody }, task, rawPrompt) {
+  if (!task) { errorLine(`Usage: /${slashName} <task>`); return; }
   if (!modelPath) { errorLine("Load a chat model first"); return; }
   if (!sidecar)   { errorLine("Sidecar not connected"); return; }
+  // Variant availability is enforced by the sidecar (501 if the
+  // bundle was built without the corresponding cyllama class); the
+  // error propagates through the job-start path below.
 
   const cfg = agentsTab.getAgentConfig();
   const cfgErr = agentsTab.validateAgentConfig();
@@ -1889,7 +1948,7 @@ async function sendAgent(task, rawPrompt) {
   bumpTokens(task);
 
   // Persist the user turn as a plain chat-shaped message so reload
-  // replays it correctly. The raw "/agent ..." input is kept on the
+  // replays it correctly. The raw "/<cmd> ..." input is kept on the
   // DOM dataset for regenerate; the persisted content is just the task.
   const userMsg = { role: "user", content: task };
   messages.push(userMsg);
@@ -1902,14 +1961,15 @@ async function sendAgent(task, rawPrompt) {
 
   let job;
   try {
-    job = await cyllamaJobs.startJob("agent/run", {
+    job = await cyllamaJobs.startJob(jobKind, {
       model_path: modelPath,
       task,
       max_iterations: cfg.maxIterations,
       tools: cfg.tools,
+      ...(extraBody || {}),
     });
   } catch (e) {
-    errorLine(`agent: ${e.message}`);
+    errorLine(`${label}: ${e.message}`);
     setBusy(false);
     messages.pop();
     return;
@@ -1927,21 +1987,21 @@ async function sendAgent(task, rawPrompt) {
       }
       if (stickyScroll) logEl.scrollTop = logEl.scrollHeight;
     } else if (ev.type === "error") {
-      errorLine(`agent: ${ev.message}`);
+      errorLine(`${label}: ${ev.message}`);
     }
   });
 
   try {
     await job.done;
   } catch (e) {
-    errorLine(`agent: ${e.message || e}`);
+    errorLine(`${label}: ${e.message || e}`);
   } finally {
     off();
     currentAgentJob = null;
 
     if (answer) {
       wrap.dataset.asstRaw = answer;
-      messages.push({ role: "assistant", content: answer, agent: { events } });
+      messages.push({ role: "assistant", content: answer, agent: { events, variant: slashName } });
       persistActiveChat();
     } else {
       // No ANSWER event -- drop the user turn so history stays balanced.
@@ -1951,6 +2011,76 @@ async function sendAgent(task, rawPrompt) {
     setBusy(false);
     promptEl.focus();
   }
+}
+
+async function sendAgent(task, rawPrompt) {
+  return runAgentVariant(
+    { label: "agent", slashName: "agent", jobKind: "agent/run" },
+    task, rawPrompt,
+  );
+}
+
+async function sendConstrainedAgent(task, rawPrompt) {
+  return runAgentVariant(
+    {
+      label: "constrained",
+      slashName: "constrained",
+      jobKind: "agent/constrained",
+    },
+    task, rawPrompt,
+  );
+}
+
+async function sendReflectAgent(task, rawPrompt) {
+  // ReflectionLoop: events tagged worker-<n> / critic-<n>. The agents-tab
+  // gains a Reflection row with max_attempts + critic prompt; defaults
+  // are fine if the user hasn't visited the tab.
+  const rcfg = agentsTab.getReflectConfig?.() || {};
+  return runAgentVariant(
+    {
+      label: "reflect",
+      slashName: "reflect",
+      jobKind: "agent/reflect",
+      extraBody: {
+        max_attempts: rcfg.maxAttempts || 3,
+        acceptance_marker: rcfg.acceptanceMarker || "ACCEPT",
+        critic_system_prompt: rcfg.criticPrompt || undefined,
+      },
+    },
+    task, rawPrompt,
+  );
+}
+
+async function sendPlanAgent(task, rawPrompt) {
+  // Same runner as the other variants. The /plan endpoint emits events
+  // tagged with ``metadata.source`` ("planner" / "step-N"); the trace
+  // renderer surfaces that as a prefix on each event row.
+  return runAgentVariant(
+    {
+      label: "plan",
+      slashName: "plan",
+      jobKind: "agent/plan",
+    },
+    task, rawPrompt,
+  );
+}
+
+async function sendContractAgent(task, rawPrompt) {
+  // For now, agent-tab settings include policy + preset for contract
+  // runs; the helper exposes them via getContractConfig (added below).
+  const ccfg = agentsTab.getContractConfig?.() || {};
+  return runAgentVariant(
+    {
+      label: "contract",
+      slashName: "contract",
+      jobKind: "agent/contract",
+      extraBody: {
+        preset: ccfg.preset || "none",
+        policy: ccfg.policy || "OBSERVE",
+      },
+    },
+    task, rawPrompt,
+  );
 }
 
 async function send() {
