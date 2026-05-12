@@ -110,17 +110,34 @@ or move them to `CHANGELOG.md` under `[Unreleased]`.
 
 ## Agents
 
-- [ ] **ContractAgent UI** (Phase 7 follow-up). cyllama exposes
-      `ContractSpec` / `PreCondition` / `PostCondition` /
-      `ContractPolicy` / `ContractViolation`, but the wire shape
-      between the renderer's pre/post text fields, the
-      `CONTRACT_CHECK` / `CONTRACT_VIOLATION` event stream, and the
-      enforcement policy still needs design. Minimum surface: two
-      multi-line text fields (pre, post) on the Agents tab, a
-      sidecar branch in `/jobs/agent/run` that constructs
-      `ContractAgent` instead of `ReActAgent` when either field is
-      non-empty, and renderer styling for the contract-* event
-      types (already mapped in CSS).
+- [x] **ContractAgent UI** (Phase 7 follow-up). Landed as Phase B
+      `/agent-contract` slash + the Contract section in the Agents
+      pane (preset + policy from a named registry, modal at
+      invocation). Custom user-authored contracts (vs. shipped
+      presets) remain workflow-shaped -- write a workspace Python
+      file and run it via `/agent-workflow`.
+
+- [ ] **Phase F.4: per-agent-type run history pane.** Right
+      detail-rail column of the Agents pane currently shows a "Run
+      a workflow to see its result here" placeholder for every
+      type except workflow. F.4 fills this with a list of recent
+      runs (per agent type), each clickable to drill into the full
+      trace + final state + error. Needs:
+
+      - Sidecar: persist per-job `kind` / `state` / `result_summary`
+        beyond the in-memory `Job` registry so a renderer reload
+        doesn't drop history. SQLite at `<workspace>/run_history.db`
+        with a small migration is the natural shape.
+      - Renderer: subscribe to `job:done` events and refresh the
+        right rail. Click a row to open a read-only trace viewer
+        (similar to the chat-stream inline trace renderer).
+      - Retention: cap rows per type (last 50?) and surface a
+        "Clear history" action in the rail.
+
+      Defer until the rest of Phase F (slash rename + pane +
+      modal) has lived in real use long enough to know whether
+      history is the right shape, or whether per-run linkbacks
+      from the chat stream are enough.
 
 ## App shell
 

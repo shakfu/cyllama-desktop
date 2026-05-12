@@ -15,7 +15,9 @@ import * as rightTabs from "./features/right-tabs.js";
 // models-pane.js (the full-area pane). The file lives on temporarily
 // for the quantize / multimodal-projector-pin tools that still need
 // to be migrated; nothing imports it from main.js any more.
-import * as agentsTab from "./features/agents-tab.js";
+// Phase F.2: features/agents-tab.js merged into features/agents-pane.js.
+// The pane is the single source of truth for agent config; nothing to
+// import from a dedicated tab module any more.
 import * as slash from "./features/slash.js";
 // general-tab.js superseded by the Preferences window. Module
 // retained for now in case a follow-up wants to mount Preferences-
@@ -27,7 +29,10 @@ import * as transcribePane from "./features/transcribe-pane.js";
 import * as imagePane from "./features/image-pane.js";
 import * as batchPane from "./features/batch-pane.js";
 import * as modelsPane from "./features/models-pane.js";
-import * as workflowsPane from "./features/workflows-pane.js";
+// Phase F.2: features/agents-pane.js replaces features/workflows-pane.js
+// as the full-area pane. Workflows are one row of the agents pane.
+import * as agentsPane from "./features/agents-pane.js";
+import { openAgentModal } from "./features/agent-modal.js";
 // Server-pane lives in Preferences -> Sidecar tab now. Not imported here.
 
 // Expose the libs on a single namespace so feature modules added later --
@@ -96,9 +101,9 @@ const PANE_HOOKS = {
     onShow: () => modelsPane.show && modelsPane.show(),
     onHide: () => modelsPane.hide && modelsPane.hide(),
   },
-  workflows: {
-    onShow: () => workflowsPane.show && workflowsPane.show(),
-    onHide: () => workflowsPane.hide && workflowsPane.hide(),
+  agents: {
+    onShow: () => agentsPane.show && agentsPane.show(),
+    onHide: () => agentsPane.hide && agentsPane.hide(),
   },
 };
 let activePane = "chats";
@@ -1069,9 +1074,9 @@ async function applySupportedParams() {
   applyMultiGpuVisibility(info);
   transcribePane.applyVisibility(features);
   imagePane.applyVisibility(features);
-  agentsTab.applyVisibility(features);
+  agentsPane.applyVisibility(features);
   batchPane.applyVisibility(features);
-  applyWorkflowsVisibility(features);
+  applyAgentsPaneVisibility(features);
   // Composer paperclip is gated on the multimodal capability AND a
   // pinned mmproj path. The /info.features check alone isn't enough
   // -- attaching an image without an mmproj would 200 OK but the
@@ -1087,15 +1092,17 @@ function applyAttachButtonVisibility(features) {
   btn.hidden = !ok;
 }
 
-// Workflows pane nav-rail button is hidden until /info.features.workflow
-// is true. When the bundle includes the workflow runtime, surface it
-// and mount the pane so a click of the button reveals discovered files.
-function applyWorkflowsVisibility(features) {
-  const btn = document.getElementById("navWorkflows");
+// Agents pane nav-rail button surfaces when /info.features.agents is
+// true. The pane hosts every agent type's defaults form -- a bundle
+// missing ``features.workflow`` still has five usable rows
+// (agent/strict/contract/plan/reflect) plus an agent-workflow row
+// that shows an "unavailable" placeholder.
+function applyAgentsPaneVisibility(features) {
+  const btn = document.getElementById("navAgents");
   if (!btn) return;
-  const ok = !!(features && features.workflow);
+  const ok = !!(features && features.agents);
   btn.hidden = !ok;
-  if (ok) workflowsPane.mount();
+  if (ok) agentsPane.mount();
 }
 
 // Hide main_gpu / split_mode / tensor_split rows when the machine has
@@ -1600,7 +1607,7 @@ async function init() {
     onPick: (p) => { if (p) setModel(p); },
     reveal: (p) => window.cyllama.revealItem && window.cyllama.revealItem(p),
   });
-  agentsTab.mount();
+  agentsPane.mount();
   // Cog nav-rail button opens the Preferences window instead of
   // jumping to the (now-removed) General right-tab. Cmd+, also
   // works via the application menu.
@@ -1782,7 +1789,18 @@ promptEl.addEventListener("keydown", (e) => {
   }
   if (e.key === "Enter" && !e.shiftKey) {
     e.preventDefault();
-    if (!inFlight && !sendBtn.disabled) send();
+    if (inFlight) return;
+    // Slash commands (navigation + action) handle their own
+    // preconditions and feedback; bypass the Send button's
+    // model-loaded gate so the agent modal can open for
+    // /agent-strict, /agent-contract, /agent-reflect without
+    // requiring a model first. Raw chat still requires the button.
+    const parsed = slash.parse(promptEl.value.trim(), SLASH_NAMES);
+    if (parsed) {
+      send();
+      return;
+    }
+    if (!sendBtn.disabled) send();
   }
 });
 promptEl.addEventListener("input", autoGrow);
@@ -1809,6 +1827,9 @@ function setBusy(busy) {
 // (messages, persistActiveChat, the composer DOM, etc.) directly.
 // See docs/slash-commands.md for the broader plan.
 const SLASH_COMMANDS = [
+  // /agent is the plain ReAct loop and keeps its bare name -- it's the
+  // default and most common path. Everything else uses the /agent-*
+  // prefix family so Tab autocomplete from "/agent" surfaces them all.
   {
     name: "agent",
     kind: "action",
@@ -1816,28 +1837,45 @@ const SLASH_COMMANDS = [
     run: (body, raw) => sendAgent(body, raw),
   },
   {
-    name: "constrained",
+    name: "agent-constrained",
+    kind: "action",
+    hint: "<task>",
+    run: (body, raw) => sendConstrainedAgent(body, raw),
+  },
+  // `agent-strict` is an alias for `agent-constrained` -- the friendlier
+  // name in the UI; the underlying cyllama class is still ConstrainedAgent.
+  {
+    name: "agent-strict",
     kind: "action",
     hint: "<task>",
     run: (body, raw) => sendConstrainedAgent(body, raw),
   },
   {
-    name: "contract",
+    name: "agent-contract",
     kind: "action",
     hint: "<task>",
     run: (body, raw) => sendContractAgent(body, raw),
   },
   {
-    name: "plan",
+    name: "agent-plan",
     kind: "action",
     hint: "<task>",
     run: (body, raw) => sendPlanAgent(body, raw),
   },
   {
-    name: "reflect",
+    name: "agent-reflect",
     kind: "action",
     hint: "<task>",
     run: (body, raw) => sendReflectAgent(body, raw),
+  },
+  // /agent-workflow [<name>] -- with a name, navigates to the Agents
+  // pane with that workflow selected and ready to run. Without a name,
+  // opens the pane on the agent-workflow row so the user can pick.
+  {
+    name: "agent-workflow",
+    kind: "navigation",
+    hint: "[<name>]",
+    run: (body, raw) => navigateToWorkflow(body, raw),
   },
 ];
 const SLASH_NAMES = SLASH_COMMANDS.map((c) => c.name);
@@ -1938,8 +1976,8 @@ async function runAgentVariant({ label, slashName, jobKind, extraBody }, task, r
   // bundle was built without the corresponding cyllama class); the
   // error propagates through the job-start path below.
 
-  const cfg = agentsTab.getAgentConfig();
-  const cfgErr = agentsTab.validateAgentConfig();
+  const cfg = agentsPane.getAgentConfig();
+  const cfgErr = agentsPane.validateAgentConfig();
   if (cfgErr) { errorLine(cfgErr); return; }
 
   promptEl.value = "";
@@ -2021,65 +2059,180 @@ async function sendAgent(task, rawPrompt) {
 }
 
 async function sendConstrainedAgent(task, rawPrompt) {
+  // Phase F.3: open the per-call modal pre-filled with the Agents pane
+  // defaults. Enter runs with defaults; the user can tweak the task,
+  // format, or allow_reasoning for this one invocation. Esc / Cancel
+  // drops the run.
+  const defaults = agentsPane.getStrictConfig?.() || { format: "json", allowReasoning: false };
+  let values;
+  try {
+    values = await openAgentModal({
+      title: "Strict agent",
+      hint: "Grammar-constrained tool calling. Press Enter to run with defaults.",
+      task,
+      fields: [
+        { key: "format", label: "Format", type: "select",
+          options: ["json", "json_array", "function_call"],
+          default: defaults.format,
+          hint: "Grammar shape enforced on tool calls." },
+        { key: "allowReasoning", label: "Allow reasoning",
+          type: "checkbox", default: defaults.allowReasoning,
+          hint: "Permit a reasoning field alongside each tool call." },
+      ],
+    });
+  } catch { return; /* cancelled */ }
+  // values.task captures any in-modal edits to the task text.
+  const finalTask = values.task != null ? values.task : task;
   return runAgentVariant(
     {
-      label: "constrained",
-      slashName: "constrained",
+      label: "strict",
+      slashName: "agent-strict",
       jobKind: "agent/constrained",
+      extraBody: {
+        format: values.format,
+        allow_reasoning: !!values.allowReasoning,
+      },
     },
-    task, rawPrompt,
+    finalTask, rawPrompt,
   );
 }
 
 async function sendReflectAgent(task, rawPrompt) {
-  // ReflectionLoop: events tagged worker-<n> / critic-<n>. The agents-tab
-  // gains a Reflection row with max_attempts + critic prompt; defaults
-  // are fine if the user hasn't visited the tab.
-  const rcfg = agentsTab.getReflectConfig?.() || {};
+  // Phase F.3: per-call modal for max_attempts + acceptance_marker +
+  // critic_prompt. Defaults pulled from the Agents pane's reflect row.
+  const defaults = agentsPane.getReflectConfig?.() || {};
+  let values;
+  try {
+    values = await openAgentModal({
+      title: "Reflection loop",
+      hint: "Worker drafts; critic accepts or asks for revision. Press Enter to run with defaults.",
+      task,
+      fields: [
+        { key: "maxAttempts", label: "Max attempts", type: "number",
+          min: 1, max: 10, default: defaults.maxAttempts || 3,
+          hint: "Hard ceiling on loop iterations." },
+        { key: "acceptanceMarker", label: "Accept marker", type: "text",
+          default: defaults.acceptanceMarker || "ACCEPT",
+          hint: "Substring the critic must include to approve (case-insensitive)." },
+        { key: "criticPrompt", label: "Critic prompt", type: "textarea",
+          default: defaults.criticPrompt || "",
+          placeholder: "Blank = use sidecar default reviewer prompt." },
+      ],
+    });
+  } catch { return; /* cancelled */ }
+  const finalTask = values.task != null ? values.task : task;
   return runAgentVariant(
     {
       label: "reflect",
-      slashName: "reflect",
+      slashName: "agent-reflect",
       jobKind: "agent/reflect",
       extraBody: {
-        max_attempts: rcfg.maxAttempts || 3,
-        acceptance_marker: rcfg.acceptanceMarker || "ACCEPT",
-        critic_system_prompt: rcfg.criticPrompt || undefined,
+        max_attempts: values.maxAttempts,
+        acceptance_marker: values.acceptanceMarker || "ACCEPT",
+        critic_system_prompt: values.criticPrompt || undefined,
       },
     },
-    task, rawPrompt,
+    finalTask, rawPrompt,
   );
 }
 
+// /agent-workflow is a navigation slash, not an action -- it switches
+// the renderer to the Agents pane with the workflow row selected.
+// When a name is supplied, the pane preselects that workflow so the
+// user can fill its initial-state inputs and click Run.
+function navigateToWorkflow(body /* arg */, _rawPrompt) {
+  promptEl.value = "";
+  autoGrow();
+  setPane("agents");
+  // Switch the agents-pane to the agent-workflow row and optionally
+  // preselect a workflow by id (parses the first whitespace-token).
+  const name = (body || "").trim().split(/\s+/)[0] || "";
+  if (name) {
+    agentsPane.selectWorkflowById(name);
+  } else {
+    agentsPane.selectWorkflowRow();
+  }
+}
+
 async function sendPlanAgent(task, rawPrompt) {
-  // Same runner as the other variants. The /plan endpoint emits events
-  // tagged with ``metadata.source`` ("planner" / "step-N"); the trace
-  // renderer surfaces that as a prefix on each event row.
+  // Phase F.5: /agent-plan now opens a per-call modal for the
+  // planner / executor system prompts + max_steps + stop_on_error
+  // alongside the editable task. Defaults pulled from the Agents
+  // pane's plan section; blank prompts fall through to the sidecar's
+  // own defaults.
+  const defaults = agentsPane.getPlanConfig?.() || {
+    maxSteps: 10, stopOnError: true, plannerPrompt: "", executorPrompt: "",
+  };
+  let values;
+  try {
+    values = await openAgentModal({
+      title: "Plan / execute",
+      hint: "Planner emits steps; executor runs each. Press Enter to run with defaults.",
+      task,
+      fields: [
+        { key: "maxSteps", label: "Max steps", type: "number",
+          min: 1, max: 20, default: defaults.maxSteps || 10,
+          hint: "Cap on the number of executor invocations." },
+        { key: "stopOnError", label: "Stop on error", type: "checkbox",
+          default: !!defaults.stopOnError,
+          hint: "Abort the run on the first failing step." },
+        { key: "plannerPrompt", label: "Planner prompt", type: "textarea",
+          default: defaults.plannerPrompt || "",
+          placeholder: "Blank = use sidecar default planner prompt." },
+        { key: "executorPrompt", label: "Executor prompt", type: "textarea",
+          default: defaults.executorPrompt || "",
+          placeholder: "Blank = use default ReActAgent system prompt." },
+      ],
+    });
+  } catch { return; /* cancelled */ }
+  const finalTask = values.task != null ? values.task : task;
   return runAgentVariant(
     {
       label: "plan",
-      slashName: "plan",
+      slashName: "agent-plan",
       jobKind: "agent/plan",
+      extraBody: {
+        max_steps: values.maxSteps,
+        stop_on_error: !!values.stopOnError,
+        planner_system_prompt: values.plannerPrompt || undefined,
+        executor_system_prompt: values.executorPrompt || undefined,
+      },
     },
-    task, rawPrompt,
+    finalTask, rawPrompt,
   );
 }
 
 async function sendContractAgent(task, rawPrompt) {
-  // For now, agent-tab settings include policy + preset for contract
-  // runs; the helper exposes them via getContractConfig (added below).
-  const ccfg = agentsTab.getContractConfig?.() || {};
+  // Phase F.3: per-call modal for preset + policy. Defaults pulled from
+  // the Agents pane's contract row.
+  const defaults = agentsPane.getContractConfig?.() || { preset: "none", policy: "OBSERVE" };
+  let values;
+  try {
+    values = await openAgentModal({
+      title: "Contract agent",
+      hint: "Pre/post-condition checked run. Press Enter to run with defaults.",
+      task,
+      fields: [
+        { key: "preset", label: "Preset", type: "select",
+          options: ["none", "task-nonempty", "answer-quality"],
+          default: defaults.preset || "none",
+          hint: "Which built-in contract bundle to enforce." },
+        { key: "policy", label: "Policy", type: "select",
+          options: ["IGNORE", "OBSERVE", "ENFORCE", "QUICK_ENFORCE"],
+          default: defaults.policy || "OBSERVE",
+          hint: "How violations are handled." },
+      ],
+    });
+  } catch { return; /* cancelled */ }
+  const finalTask = values.task != null ? values.task : task;
   return runAgentVariant(
     {
       label: "contract",
-      slashName: "contract",
+      slashName: "agent-contract",
       jobKind: "agent/contract",
-      extraBody: {
-        preset: ccfg.preset || "none",
-        policy: ccfg.policy || "OBSERVE",
-      },
+      extraBody: { preset: values.preset, policy: values.policy },
     },
-    task, rawPrompt,
+    finalTask, rawPrompt,
   );
 }
 

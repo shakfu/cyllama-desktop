@@ -163,30 +163,28 @@ test("Models pane: switching back to Chats restores the chat layout", async () =
   await expect(window.locator("#modelsPane")).toBeHidden();
 });
 
-test("Agents right-tab renders the settings surface", async () => {
+test("Agents pane main column renders the Common + per-type sections", async () => {
   ctx = await launchApp();
   const { window } = ctx;
-  await openRightTab(window, "agents");
-  // Agents tab is async (needs /info). Wait for its settings surface
-  // to land. As of the slash-command refactor (2026-05-07) agent runs
-  // are triggered from the chat composer via ``/agent <task>``; the
-  // tab is settings-only -- no inline Run button.
-  const host = window.locator("#agentsTabHost");
-  await expect(host).toContainText(/\/agent <task>/, { timeout: 15_000 });
-  await expect(host).toContainText(/Max iterations/);
-  await expect(host).toContainText(/Tools/);
+  // Open the Agents pane via the nav-rail. Default selection is /agent,
+  // which renders the Common section (tools + max iterations) and no
+  // per-type form (plain ReAct has no extra defaults).
+  await window.click("#navAgents");
+  await expect(window.locator("#app")).toHaveAttribute("data-pane", "agents");
+  const main = window.locator("#agentsPaneMain");
+  await expect(main).toContainText(/Common/i, { timeout: 15_000 });
+  await expect(main).toContainText(/Max iterations/i);
+  await expect(main).toContainText(/Tools/i);
 });
 
-test("right-sidebar tabs are Parameters + Agents only", async () => {
+test("right-sidebar tabs collapse to Parameters only", async () => {
   ctx = await launchApp();
   const { window } = ctx;
-  // The General tab moved to the standalone Preferences window
-  // (Cmd+, / cog nav-rail). Right sidebar should show only the two
-  // chat-side tabs now.
+  // Phase F.2: Agents tab moved to a full-area pane. Right sidebar
+  // shows only Parameters now. (General moved to Preferences earlier.)
   const tabs = window.locator(".rt-tab");
-  await expect(tabs).toHaveCount(2);
+  await expect(tabs).toHaveCount(1);
   await expect(tabs.nth(0)).toContainText("Parameters");
-  await expect(tabs.nth(1)).toContainText("Agents");
   await expect(window.locator('[data-tab="general"]')).toHaveCount(0);
 });
 
@@ -207,102 +205,211 @@ test("cog nav-rail opens the Preferences window", async () => {
   await expect(prefs.locator(".prefs-nav-item.active")).toContainText("General");
 });
 
-test("/constrained slash command is registered (Tab autocompletes)", async () => {
+test("/agent-constrained slash command is registered (Tab autocompletes)", async () => {
   ctx = await launchApp();
   const { window } = ctx;
   const prompt = window.locator("#prompt");
   await prompt.click();
-  await prompt.fill("/cons");
+  await prompt.fill("/agent-cons");
   await prompt.press("Tab");
-  // Unique-prefix autocomplete: ``/cons`` matches only ``/constrained``,
-  // so Tab fills the composer with the full command + trailing space.
-  await expect(prompt).toHaveValue("/constrained ");
+  // Unique-prefix: ``/agent-cons`` matches only ``agent-constrained``
+  // (``agent-contract`` shares the ``agent-co`` prefix but diverges at
+  // the ``n``).
+  await expect(prompt).toHaveValue("/agent-constrained ");
 });
 
-test("/agent and /constrained both surface on /-prefix autocomplete", async () => {
+test("/agent-strict alias completes to its full name", async () => {
   ctx = await launchApp();
   const { window } = ctx;
   const prompt = window.locator("#prompt");
   await prompt.click();
-  await prompt.fill("/");
+  await prompt.fill("/agent-st");
   await prompt.press("Tab");
-  // Multiple matches: Tab fills the longest common prefix (empty here,
-  // since ``agent`` and ``constrained`` share none) and emits a
-  // candidate hint into the chat log. The log line contains both names.
-  await expect(window.locator("#log")).toContainText(/\/agent/);
-  await expect(window.locator("#log")).toContainText(/\/constrained/);
-  await expect(window.locator("#log")).toContainText(/\/contract/);
+  // ``agent-strict`` is the only slash starting with ``agent-st``;
+  // unique-prefix autocomplete completes it.
+  await expect(prompt).toHaveValue("/agent-strict ");
 });
 
-test("/plan slash command is registered", async () => {
+test("/agent-plan opens a modal with planner/executor prompt fields", async () => {
+  ctx = await launchApp();
+  const { window } = ctx;
+  await window.evaluate(() => {
+    document.getElementById("prompt").value = "/agent-plan summarize the docs";
+    document.getElementById("prompt").dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Enter", bubbles: true }),
+    );
+  });
+  const dialog = window.locator("dialog.agent-modal");
+  await expect(dialog).toBeVisible({ timeout: 5_000 });
+  await expect(dialog).toContainText(/Plan \/ execute/i);
+  // Editable task field carries the slash body verbatim.
+  await expect(window.locator("#am-task")).toHaveValue("summarize the docs");
+  // Planner + executor prompt textareas land in the modal.
+  await expect(window.locator("#am-plannerPrompt")).toBeVisible();
+  await expect(window.locator("#am-executorPrompt")).toBeVisible();
+  await window.keyboard.press("Escape");
+});
+
+test("Modal task field is editable and carries refined text on submit", async () => {
+  ctx = await launchApp();
+  const { window } = ctx;
+  // Open the strict modal with an initial task...
+  await window.evaluate(() => {
+    document.getElementById("prompt").value = "/agent-strict do thing";
+    document.getElementById("prompt").dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Enter", bubbles: true }),
+    );
+  });
+  const taskInput = window.locator("#am-task");
+  await expect(taskInput).toBeVisible({ timeout: 5_000 });
+  await expect(taskInput).toHaveValue("do thing");
+  // ...replace the contents in-place.
+  await taskInput.fill("do thing AND verify");
+  await expect(taskInput).toHaveValue("do thing AND verify");
+  await window.keyboard.press("Escape");
+});
+
+test("/agent-strict opens the per-call modal pre-filled with defaults", async () => {
   ctx = await launchApp();
   const { window } = ctx;
   const prompt = window.locator("#prompt");
   await prompt.click();
-  await prompt.fill("/pl");
-  await prompt.press("Tab");
-  await expect(prompt).toHaveValue("/plan ");
+  await prompt.fill("/agent-strict do a thing");
+  // Submit via the send button if a model were loaded; the slash
+  // handler opens the modal regardless of model state.
+  // The keydown Enter handler gates on inFlight/sendBtn for non-nav
+  // slashes, but the modal-opening path doesn't reach send() at all
+  // when the button is disabled. For a deterministic test, we invoke
+  // the handler manually from page context.
+  await window.evaluate(async () => {
+    // The render module re-exports SLASH_COMMANDS via the global for
+    // tests; if not, parse + dispatch by hand.
+    const p = "/agent-strict do a thing";
+    const m = p.match(/^\s*\/([A-Za-z][A-Za-z0-9_-]*)\b\s*([\s\S]*)$/);
+    if (!m) return;
+    // Simulate the same path send() takes for an action slash.
+    document.getElementById("prompt").value = p;
+    document.getElementById("prompt").dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Enter", bubbles: true }),
+    );
+  });
+  // The modal is a <dialog class="agent-modal">; Playwright can see it
+  // even though it's positioned over the rest of the page.
+  await expect(window.locator("dialog.agent-modal")).toBeVisible({ timeout: 5_000 });
+  await expect(window.locator("dialog.agent-modal")).toContainText(/Strict agent/i);
+  // Pre-filled default format = "json".
+  await expect(window.locator("#am-format")).toHaveValue("json");
+  // Esc dismisses without running.
+  await window.keyboard.press("Escape");
+  await expect(window.locator("dialog.agent-modal")).toHaveCount(0);
 });
 
-test("Workflows nav-button surfaces when the feature flag is on", async () => {
+test("/-prefix autocomplete surfaces the agent-* family", async () => {
+  ctx = await launchApp();
+  const { window } = ctx;
+  const prompt = window.locator("#prompt");
+  await prompt.click();
+  await prompt.fill("/agent-");
+  await prompt.press("Tab");
+  // Multiple matches under ``agent-``: the longest common prefix is
+  // already ``agent-`` so Tab emits a candidate hint into the log
+  // listing each ``/agent-...`` variant.
+  await expect(window.locator("#log")).toContainText(/\/agent-constrained/);
+  await expect(window.locator("#log")).toContainText(/\/agent-strict/);
+  await expect(window.locator("#log")).toContainText(/\/agent-contract/);
+  await expect(window.locator("#log")).toContainText(/\/agent-plan/);
+  await expect(window.locator("#log")).toContainText(/\/agent-reflect/);
+  await expect(window.locator("#log")).toContainText(/\/agent-workflow/);
+});
+
+test("/agent-plan slash command is registered", async () => {
+  ctx = await launchApp();
+  const { window } = ctx;
+  const prompt = window.locator("#prompt");
+  await prompt.click();
+  await prompt.fill("/agent-p");
+  await prompt.press("Tab");
+  await expect(prompt).toHaveValue("/agent-plan ");
+});
+
+test("/agent-workflow navigates to the Agents pane", async () => {
+  ctx = await launchApp();
+  const { window } = ctx;
+  // Navigation slashes bypass the Send-button gate (model not loaded
+  // in the test harness), so Enter fires the handler directly.
+  const prompt = window.locator("#prompt");
+  await prompt.click();
+  await prompt.fill("/agent-workflow");
+  await prompt.press("Enter");
+  await expect(window.locator("#app")).toHaveAttribute("data-pane", "agents");
+  // The agent-workflow subnav row is selected on entry.
+  await expect(window.locator("#agt-row-agent-workflow.active")).toBeVisible();
+});
+
+test("Agents nav-button surfaces and pane renders six agent rows", async () => {
   ctx = await launchApp();
   const { window } = ctx;
   // The conftest stub installs Workflow + workflow_node + agent_node,
   // so /info.features.workflow is true and the nav-rail button reveals.
-  const btn = window.locator("#navWorkflows");
+  const btn = window.locator("#navAgents");
   await expect(btn).toBeVisible({ timeout: 15_000 });
   await btn.click();
-  await expect(window.locator("#app")).toHaveAttribute("data-pane", "workflows");
-  await expect(window.locator("#workflowsPane")).toBeVisible();
-  // No workflow files on disk in the test harness -> the subnav shows
-  // the empty-state hint.
-  await expect(window.locator("#workflowsPaneSubnav")).toContainText(/No workflow files/i);
+  await expect(window.locator("#app")).toHaveAttribute("data-pane", "agents");
+  await expect(window.locator("#agentsPane")).toBeVisible();
+  // Subnav shows one row per agent type.
+  for (const id of ["agent", "agent-strict", "agent-contract", "agent-plan", "agent-reflect", "agent-workflow"]) {
+    await expect(window.locator(`#agt-row-${id}`)).toBeVisible();
+  }
+  // Default selection is /agent (plain ReAct).
+  await expect(window.locator("#agt-row-agent.active")).toBeVisible();
 });
 
-test("/reflect slash + Reflection section render when feature is on", async () => {
+test("/agent-reflect slash + Reflection section render when feature is on", async () => {
   ctx = await launchApp();
   const { window } = ctx;
   const prompt = window.locator("#prompt");
   await prompt.click();
-  await prompt.fill("/ref");
+  await prompt.fill("/agent-r");
   await prompt.press("Tab");
-  await expect(prompt).toHaveValue("/reflect ");
-  await openRightTab(window, "agents");
-  const host = window.locator("#agentsTabHost");
-  await expect(host).toContainText(/Reflection/i, { timeout: 15_000 });
+  await expect(prompt).toHaveValue("/agent-reflect ");
+  // Reflection defaults now live in the Agents pane main column,
+  // visible when the agent-reflect subnav row is selected.
+  await window.click("#navAgents");
+  await window.click("#agt-row-agent-reflect");
+  await expect(window.locator("#agentsPaneMain")).toContainText(/Reflection/i, { timeout: 15_000 });
   await expect(window.locator("#ag-reflect-attempts")).toBeVisible();
   await expect(window.locator("#ag-reflect-marker")).toBeVisible();
   await expect(window.locator("#ag-reflect-critic-prompt")).toBeVisible();
 });
 
-test("Semantic memory row renders when agents.memory feature is on", async () => {
+test("Semantic memory row renders in the Agents pane Common section", async () => {
   ctx = await launchApp();
   const { window } = ctx;
   // The conftest stub installs SemanticMemory so features['agents.memory']
-  // is true; the row should land in the agents tab Tools section.
-  await openRightTab(window, "agents");
-  const host = window.locator("#agentsTabHost");
-  await expect(host).toContainText(/Semantic memory/i, { timeout: 15_000 });
+  // is true; the row lands in the Common (tools) section on every
+  // non-workflow agent type.
+  await window.click("#navAgents");
+  await expect(window.locator("#agentsPaneMain"))
+    .toContainText(/Semantic memory/i, { timeout: 15_000 });
   await expect(window.locator("#ag-memory-enable")).toBeVisible();
-  await expect(window.locator("#ag-memory-coll")).toBeVisible();
   await expect(window.locator("#ag-memory-ns")).toBeVisible();
 });
 
-test("/contract slash + Contracts section render when feature is on", async () => {
+test("/agent-contract slash + Contract section render when feature is on", async () => {
   ctx = await launchApp();
   const { window } = ctx;
-  // Slash registration: typing /contr completes to /contract (a longer
-  // common prefix than /cons -> /constrained).
+  // Slash registration: typing /agent-cont completes to /agent-contract
+  // (a longer common prefix than /agent-cons -> /agent-constrained).
   const prompt = window.locator("#prompt");
   await prompt.click();
-  await prompt.fill("/contr");
+  await prompt.fill("/agent-cont");
   await prompt.press("Tab");
-  await expect(prompt).toHaveValue("/contract ");
-  // Agents-tab Contracts row only renders when features['agents.contract']
-  // is true; the conftest stub sets it. Wait for the section to land.
-  await openRightTab(window, "agents");
-  const host = window.locator("#agentsTabHost");
-  await expect(host).toContainText(/Contracts/i, { timeout: 15_000 });
+  await expect(prompt).toHaveValue("/agent-contract ");
+  // Contract defaults render in the Agents pane main column when the
+  // agent-contract subnav row is selected.
+  await window.click("#navAgents");
+  await window.click("#agt-row-agent-contract");
+  await expect(window.locator("#agentsPaneMain")).toContainText(/Contract/i, { timeout: 15_000 });
   await expect(window.locator("#ag-contract-preset")).toBeVisible();
   await expect(window.locator("#ag-contract-policy")).toBeVisible();
 });

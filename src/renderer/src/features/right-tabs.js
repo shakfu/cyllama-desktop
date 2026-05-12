@@ -1,12 +1,17 @@
 // Right-sidebar tab router.
 //
-// Three tabs: models, agents, general. The tab strip lives in the params-
-// panel; each tab body is a sibling section toggled hidden/visible. Active
-// tab persisted to localStorage so the user lands on the same tab next
-// launch.
+// Phase F.2: the Agents tab moved to a full-area pane (nav-rail icon).
+// Parameters ("models") is now the only right-sidebar surface; the
+// router stays in place so the existing setActive/getActive API
+// continues to compose with the Preferences window and other consumers.
+//
+// "general" is also retired (the General tab moved to the Preferences
+// window earlier). "agents" is retained as a recognised name so any
+// stale localStorage value from a prior install round-trips cleanly
+// to "models".
 
 const STORAGE_KEY = "right_tab_active";
-const VALID = new Set(["models", "agents", "general"]);
+const VALID = new Set(["models"]);
 let current = "models";
 const listeners = new Set();
 

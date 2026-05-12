@@ -51,7 +51,7 @@
       <nav class="nav-rail" aria-label="Primary">
         <button class="nav-btn active" data-pane-jump="chats" title="Chats"><svg><use href="#i-chat"/></svg></button>
         <button class="nav-btn" data-pane-jump="models" title="Models"><svg><use href="#i-box"/></svg></button>
-        <button class="nav-btn" data-pane-jump="workflows" id="navWorkflows" title="Workflows" hidden><svg><use href="#i-network"/></svg></button>
+        <button class="nav-btn" data-pane-jump="agents" id="navAgents" title="Agents" hidden><svg><use href="#i-network"/></svg></button>
         <button class="nav-btn" id="navConsole" title="Console"><svg><use href="#i-terminal"/></svg></button>
         <div class="nav-spacer"></div>
         <button class="nav-btn" id="navPrefs" title="Settings (Cmd+,)"><svg><use href="#i-cog"/></svg></button>
@@ -170,8 +170,10 @@
            which is visible. -->
       <aside class="params-panel">
         <nav class="rt-tabs" role="tablist" aria-label="Right sidebar">
+          <!-- Phase F.2: Agents tab removed -- agent configuration
+               moved to the full-area Agents pane (nav-rail icon).
+               Parameters tab is now the only right-sidebar surface. -->
           <button class="rt-tab active" role="tab" data-tab="models" aria-selected="true">Parameters</button>
-          <button class="rt-tab" role="tab" data-tab="agents" aria-selected="false">Agents</button>
         </nav>
         <div class="rt-body" id="rightTabBody">
 
@@ -395,9 +397,6 @@
             </details>
           </section>
 
-          <section class="rt-pane" data-tab="agents" hidden>
-            <div id="agentsTabHost"></div>
-          </section>
 
 
         </div>
@@ -414,16 +413,18 @@
         <aside class="mp-detail"   id="modelsPaneDetail"></aside>
       </section>
 
-      <!-- Workflows pane (full-area). Shown when .app[data-pane="workflows"].
-           Three columns: subnav (workflow list), main (spec preview + Run
-           form + live trace), detail (per-run summary). Populated by
-           features/workflows-pane.js. Hidden until a discovered workflow
-           file exists; the nav-rail button itself only surfaces when
-           ``/info/features.workflow`` is true. -->
-      <section class="app-pane" data-pane-view="workflows" id="workflowsPane" hidden>
-        <aside class="mp-subnav" id="workflowsPaneSubnav"></aside>
-        <main class="mp-main"      id="workflowsPaneMain"></main>
-        <aside class="mp-detail"   id="workflowsPaneDetail"></aside>
+      <!-- Agents pane (full-area). Shown when .app[data-pane="agents"].
+           Three columns: subnav (six agent types incl. workflow), main
+           (selected type's defaults form or workflow content), detail
+           (per-run summary for the selected type). Populated by
+           features/agents-pane.js. Nav-rail button surfaces when
+           ``/info/features.workflow`` is true (the only agent type
+           that needs a sidecar feature beyond ``agents``); the row
+           itself stays usable for the other types regardless. -->
+      <section class="app-pane" data-pane-view="agents" id="agentsPane" hidden>
+        <aside class="mp-subnav" id="agentsPaneSubnav"></aside>
+        <main class="mp-main"      id="agentsPaneMain"></main>
+        <aside class="mp-detail"   id="agentsPaneDetail"></aside>
       </section>
 
     </div>

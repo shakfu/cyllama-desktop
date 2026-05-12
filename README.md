@@ -4,12 +4,12 @@ Electron desktop app that runs [cyllama](https://github.com/shakfu/cyllama) via 
 
 ## Concepts
 
-- **Pane.** A UI surface in the app shell. Sidebar views (left
-  nav-rail): Chats, Documents, Transcribe, Image, Server, Batch,
-  Console. Right-sidebar tabs: Parameters and Agents (system-style
-  Settings opens in a separate Preferences window via `Cmd+,`).
-  Panes whose underlying cyllama capability isn't present in the
-  build hide themselves automatically via `/info.features`.
+- **Pane.** A UI surface in the app shell. Left nav-rail: Chats,
+  Models, Agents (full-area pane covering agent-type defaults +
+  workflow file management), Console. Right-sidebar tab: Parameters
+  (system-style Settings opens in a separate Preferences window via
+  `Cmd+,`). Panes whose underlying cyllama capability isn't present
+  in the build hide themselves automatically via `/info.features`.
 - **Workspace.** A *project*: a scoped bundle of inputs, outputs,
   chosen models, presets, agent tool sandbox, and config. Today only
   an implicit `default` workspace exists. Multi-workspace support and
@@ -20,8 +20,8 @@ Electron desktop app that runs [cyllama](https://github.com/shakfu/cyllama) via 
   inference, models, and jobs.
 - **Slash commands.** A `/`-prefixed entry in the chat composer
   routes the prompt to a specific handler instead of `/chat`. The
-  agent family of commands (`/agent`, `/constrained`, `/contract`,
-  `/plan`, `/reflect`) runs an agent loop against the loaded chat
+  agent family of commands (`/agent`, `/agent-constrained`, `/agent-contract`,
+  `/agent-plan`, `/agent-reflect`) runs an agent loop against the loaded chat
   model with the sidebar's tool config; the trace + answer render
   inline in the chat stream. Tab autocompletes a unique prefix
   (`/a<Tab>` -> `/agent `). See `docs/slash-commands.md` for the
@@ -33,8 +33,8 @@ shipped.
 ## User documentation
 
 - [`docs/guide-to-agents.md`](docs/guide-to-agents.md) -- end-user guide
-  to the agent slash-commands (`/agent`, `/constrained`, `/contract`,
-  `/plan`, `/reflect`), the Tools catalog, and the Workflows pane.
+  to the agent slash-commands (`/agent`, `/agent-constrained`, `/agent-contract`,
+  `/agent-plan`, `/agent-reflect`), the Tools catalog, and the Workflows pane.
   Read this first if you want to *use* the agent layer; skip to
   [`docs/dev/agent_plan.md`](docs/dev/agent_plan.md) if you want to
   *extend* it.

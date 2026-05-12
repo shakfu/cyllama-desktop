@@ -16,11 +16,11 @@ endpoints, feature flags, integration tests), see
 1. [What is an agent?](#what-is-an-agent)
 2. [The basic `/agent` command](#the-basic-agent-command)
 3. [Choosing the right command](#choosing-the-right-command)
-4. [`/constrained` -- strict tool calls](#constrained-strict-tool-calls)
-5. [`/contract` -- rules the agent must obey](#contract-rules-the-agent-must-obey)
-6. [`/plan` -- break a task into steps](#plan-break-a-task-into-steps)
-7. [`/reflect` -- worker + critic loop](#reflect-worker-critic-loop)
-8. [The Agents tab](#the-agents-tab)
+4. [`/agent-constrained` -- strict tool calls](#agent-constrained----strict-tool-calls)
+5. [`/agent-contract` -- rules the agent must obey](#agent-contract----rules-the-agent-must-obey)
+6. [`/agent-plan` -- break a task into steps](#agent-plan----break-a-task-into-steps)
+7. [`/agent-reflect` -- worker + critic loop](#agent-reflect----worker--critic-loop)
+8. [The Agents pane](#the-agents-pane)
 9. [Tools the agent can call](#tools-the-agent-can-call)
 10. [Workflows pane](#workflows-pane)
 11. [Common patterns](#common-patterns)
@@ -78,7 +78,7 @@ composer (same button that interrupts a chat turn).
 
 The settings that apply to every `/agent` run live in the **Agents**
 right-sidebar tab: max iterations, which tools to expose, sandbox
-folder, etc. (See [The Agents tab](#the-agents-tab).)
+folder, etc. (See [The Agents pane](#the-agents-pane).)
 
 ---
 
@@ -89,10 +89,10 @@ Five commands sit side by side. Pick by what you need from the run:
 | Want this | Use this |
 |---|---|
 | A general-purpose ReAct loop -- LLM thinks, calls tools, answers. | `/agent` |
-| Same as `/agent` but the model is *forced* by a grammar to produce well-formed tool calls. Eliminates "the model invented a tool that doesn't exist" failures. | `/constrained` |
-| The agent must satisfy named pre/post-conditions on the task or answer. Pre-conditions reject bad inputs; post-conditions catch bad outputs. | `/contract` |
-| A task that breaks into discrete steps (research, then summarise; refactor, then test...). One agent plans, another runs each step. | `/plan` |
-| A draft-then-review loop. Worker produces a draft; critic accepts it or asks for revisions; loop until accepted or budget hits. | `/reflect` |
+| Same as `/agent` but the model is *forced* by a grammar to produce well-formed tool calls. Eliminates "the model invented a tool that doesn't exist" failures. | `/agent-constrained` |
+| The agent must satisfy named pre/post-conditions on the task or answer. Pre-conditions reject bad inputs; post-conditions catch bad outputs. | `/agent-contract` |
+| A task that breaks into discrete steps (research, then summarise; refactor, then test...). One agent plans, another runs each step. | `/agent-plan` |
+| A draft-then-review loop. Worker produces a draft; critic accepts it or asks for revisions; loop until accepted or budget hits. | `/agent-reflect` |
 | A multi-node DAG with typed state, parallel branches, conditional routing, or sub-workflows. | Workflows pane |
 
 If you're not sure which to start with, **use `/agent`**. The other
@@ -100,16 +100,30 @@ commands solve specific problems on top of it.
 
 ---
 
-## `/constrained` -- strict tool calls
+## `/agent-constrained` -- strict tool calls
+
+Also reachable via the friendly alias **`/agent-strict`** -- both
+slashes hit the same handler. Pick whichever reads better.
 
 ```
-/constrained What's the weather in Paris right now?
+/agent-constrained What's the weather in Paris right now?
 ```
 
-Identical surface to `/agent` (same task input, same trace shape, same
-Agents-tab settings). The only difference: when the model decides to
-call a tool, decoding is constrained by a grammar that *requires* the
-output to be a valid tool call.
+A per-call modal opens pre-filled with the Agents pane's strict
+defaults:
+
+- **Task** -- editable. Pre-filled with whatever you typed after the
+  slash. Refine the wording, add constraints, or paste a longer task
+  in place. Submitted text is what runs.
+- **Format** -- `json` (default) / `json_array` / `function_call`.
+  Selects the grammar the agent enforces on each tool call.
+- **Allow reasoning** -- when on, the grammar permits a `reasoning`
+  field alongside each tool call.
+
+Press **Enter** inside any field to run with current values; **Esc**
+cancels. Same trace shape as `/agent` -- the only runtime
+difference is grammar-constrained decode, which the renderer doesn't
+need to know about.
 
 When this helps:
 
@@ -131,15 +145,15 @@ long traces it can be noticeable.
 
 ---
 
-## `/contract` -- rules the agent must obey
+## `/agent-contract` -- rules the agent must obey
 
 ```
-/contract Explain the Treaty of Westphalia in two paragraphs.
+/agent-contract Explain the Treaty of Westphalia in two paragraphs.
 ```
 
-The Agents tab gains a **Contracts** section when this is available.
-You pick:
+A modal opens with three fields:
 
+- **Task** -- editable; pre-filled from the slash body.
 - **Preset** -- one of the named contract bundles shipped with the
   sidecar:
   - `none` -- no rules; the agent runs with policy machinery active
@@ -156,8 +170,10 @@ You pick:
   - `QUICK_ENFORCE` -- terminate immediately without calling the
     violation handler.
 
-Violations show up in the trace as `CONTRACT_VIOLATION` rows alongside
-the THOUGHT / ACTION / OBSERVATION rows.
+Press **Enter** to run with the defaults from the Agents pane;
+Cancel/Esc drops the run. Violations show up in the trace as
+`CONTRACT_VIOLATION` rows alongside the THOUGHT / ACTION /
+OBSERVATION rows.
 
 When to use which policy:
 
@@ -173,10 +189,10 @@ the UI yet. If you need custom rules, see the [Workflows pane](#workflows-pane).
 
 ---
 
-## `/plan` -- break a task into steps
+## `/agent-plan` -- break a task into steps
 
 ```
-/plan Refactor the authentication module to use bcrypt and update the tests.
+/agent-plan Refactor the authentication module to use bcrypt and update the tests.
 ```
 
 Two agents run in sequence:
@@ -184,7 +200,7 @@ Two agents run in sequence:
 1. **Planner** -- an LLM with no tools and a "break this task into
    numbered steps" system prompt. Its answer is parsed line-by-line
    into a step list.
-2. **Executor** -- an LLM with the Agents-tab tool catalog. Runs once
+2. **Executor** -- an LLM with the Agents pane tool catalog. Runs once
    per step, in order, with the step text as its task.
 
 The trace tags each event with a `source`:
@@ -206,25 +222,37 @@ When not to use:
 
 - Tasks that need data from step N to *decide* what step N+1 should
   be. Plan-and-execute fixes the plan upfront; if you need dynamic
-  decisions between steps, use `/reflect` or a workflow.
+  decisions between steps, use `/agent-reflect` or a workflow.
 - Tasks better served by a single tool call. The planner+executor
   overhead is wasted on "what's 2 + 2?".
 
-The Agents tab gains no extra controls for `/plan` -- the default
-planner prompt is good for most tasks. Custom planner/executor prompts
-land via the workflow surface (see below).
+The modal carries five fields:
+
+- **Task** -- editable.
+- **Max steps** -- cap on the number of executor invocations
+  (default 10, range 1-20).
+- **Stop on error** -- when on (default), aborts the run on the
+  first failing step.
+- **Planner prompt** -- override the planner's system prompt. Blank
+  uses the sidecar default ("break this task into clear ordered
+  steps, one per line").
+- **Executor prompt** -- override the executor's system prompt.
+  Blank uses the default ReActAgent system prompt.
+
+Defaults come from the Agents pane's `/agent-plan` row; Enter runs
+with current values.
 
 ---
 
-## `/reflect` -- worker + critic loop
+## `/agent-reflect` -- worker + critic loop
 
 ```
-/reflect Write a 3-sentence summary of the Cretaceous-Paleogene extinction event.
+/agent-reflect Write a 3-sentence summary of the Cretaceous-Paleogene extinction event.
 ```
 
 Two agents loop:
 
-1. **Worker** -- with tools from the Agents tab -- produces a draft.
+1. **Worker** -- with tools from the Agents pane -- produces a draft.
 2. **Critic** -- *without* tools, with a "reply ACCEPT or list issues"
    prompt -- reviews the draft.
 
@@ -233,8 +261,9 @@ If the critic's reply contains the **acceptance marker** (default
 draft is the answer. Otherwise the critic's feedback is folded into
 the next worker pass.
 
-The Agents tab gains a **Reflection** section with:
+The modal exposes four fields:
 
+- **Task** -- editable; pre-filled from the slash body.
 - **Max attempts** -- hard ceiling on loop iterations (default 3,
   range 1-10).
 - **Accept marker** -- the substring the critic must include to
@@ -243,6 +272,8 @@ The Agents tab gains a **Reflection** section with:
 - **Critic prompt** -- override the default reviewer system prompt.
   Leave blank to use the sidecar default ("respond with ACCEPT or
   list issues").
+
+Defaults come from the Agents pane's `/agent-reflect` row.
 
 Trace events are tagged `worker-1` / `critic-1` / `worker-2` / etc.
 so you can see which role emitted which event.
@@ -262,32 +293,49 @@ When not to use:
 
 ---
 
-## The Agents tab
+## The Agents pane
 
-Open it via the right-sidebar's "Agents" tab. The tab is settings-only
--- runs happen from the chat composer. Settings persist within a
-session; close-and-reopen resets them.
+Open it via the **Agents** button in the left nav-rail (network-graph
+icon, below Models). The pane is a full-area three-column surface:
 
-What's there:
+- **Left subnav** lists the six agent types -- `/agent`,
+  `/agent-strict`, `/agent-contract`, `/agent-plan`, `/agent-reflect`,
+  `/agent-workflow`. Click a row to switch.
+- **Main column** shows the selected type's defaults. The first
+  section is **Common** (max iterations + tool catalog -- shared by
+  every type). Below it sits a type-specific section: format /
+  allow_reasoning for strict, preset / policy for contract, max_steps
+  / stop_on_error / planner prompt / executor prompt for plan, max
+  attempts / accept marker / critic prompt for reflect. Plain
+  `/agent` has no type-specific section -- just the Common.
+- **Right detail rail** shows per-type run history (placeholder for
+  most types today; the `agent-workflow` row shows the last
+  workflow run's final state + answer + error).
 
-- **Max iterations** -- ceiling on the THOUGHT/ACTION/OBSERVATION loop
-  per agent run. Default 10. The framework's loop-detection guard
-  fires at lower counts when it sees the same action repeated.
-- **Tools** -- which tools to expose to the agent. See the next section.
-- **Contracts** -- preset + policy for `/contract` runs (only renders
-  when `agents.contract` is available).
-- **Reflection** -- max_attempts, acceptance marker, critic prompt for
-  `/reflect` runs (only renders when `agents.reflect` is available).
+### Defaults vs. per-call modal
 
-Settings apply to **every** slash-command that uses an agent loop.
-There's no per-command override.
+The pane holds **defaults**. The defaults flow into the per-call
+modal that opens when you invoke `/agent-strict`, `/agent-contract`,
+`/agent-plan`, or `/agent-reflect` from the chat composer -- you
+edit them once in the pane, then every modal invocation starts with
+those values pre-filled. Press Enter inside the modal to run with
+the defaults unchanged; tweak any field for this one invocation.
+
+`/agent` and `/agent-workflow` don't open a modal. `/agent` runs
+inline with current defaults; `/agent-workflow` switches to this
+pane on the workflow row.
+
+The `agent-workflow` row of the subnav is the **Workflows pane** --
+it's the same interface that used to live as a separate full-area
+pane (file list + spec preview + initial-state form + Run + live
+trace). See [Workflows](#workflows-pane) below.
 
 ---
 
 ## Tools the agent can call
 
 Tools are concrete functions the model can invoke during a run. Pick
-which ones to expose in the Agents tab's **Tools** row.
+which ones to expose in the Agents pane's **Tools** row.
 
 | Tool | What it does | When to enable |
 |---|---|---|
@@ -410,7 +458,7 @@ tool yet -- you'll need a workflow for the write half.
 **Q: I want the model to remember facts about me across conversations.**
 
 A: Create a RAG collection in the Documents pane. Enable
-`semantic_memory` in the Agents tab with that collection + a stable
+`semantic_memory` in the Agents pane with that collection + a stable
 namespace (e.g., `"user-preferences"`). Use `/agent` and tell the
 model "remember that I prefer tabs over spaces"; later use `/agent`
 again and ask "what do you remember about my code style?" -- the
@@ -421,11 +469,11 @@ recall tool will surface the prior fact.
 A: Open the live trace and find the failing `NODE_END` (or `ERROR`)
 event. The error string surfaces the Python traceback. If the node
 calls into the LLM and you've hit the per-iteration cap, raise it in
-the Agents tab.
+the Agents pane.
 
 **Q: Which command should I use for code review?**
 
-A: `/reflect` is the natural fit: worker writes a code change, critic
+A: `/agent-reflect` is the natural fit: worker writes a code change, critic
 reviews against your style guide. Set the critic prompt to spell out
 what the reviewer should look for ("flag missing tests, unguarded
 nulls, untyped externs"). Use the acceptance marker to set the bar:
@@ -446,14 +494,14 @@ the model to use.
 **The agent's trace shows the same THOUGHT/ACTION over and over.**
 
 Loop detection wasn't triggered fast enough. Lower `max_iterations`
-in the Agents tab, or use `/constrained` to make sure the model's
+in the Agents pane, or use `/agent-constrained` to make sure the model's
 tool calls are well-formed (malformed calls often look identical to
 the loop guard).
 
-**`/constrained` fails with a grammar error.**
+**`/agent-constrained` fails with a grammar error.**
 
 The bundled cyllama wasn't built with grammar support. Check the
-right-sidebar Agents tab -- if `/constrained` works, you'll see the
+Agents pane -- if `/agent-constrained` works, you'll see the
 slash autocomplete on Tab. If not, the bundle is missing
 `ConstrainedAgent`.
 

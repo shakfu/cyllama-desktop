@@ -133,7 +133,7 @@ svg circle, svg rect, svg polygon { fill: none; }
   overflow: hidden;
 }
 .app[data-pane="chats"] .app-pane[data-pane-view="models"] { display: none; }
-.app[data-pane="chats"] .app-pane[data-pane-view="workflows"] { display: none; }
+.app[data-pane="chats"] .app-pane[data-pane-view="agents"] { display: none; }
 .app[data-pane="models"] .sidebar,
 .app[data-pane="models"] .main-col,
 .app[data-pane="models"] .params-panel { display: none; }
@@ -154,13 +154,13 @@ svg circle, svg rect, svg polygon { fill: none; }
    grid (subnav | main | detail). The .mp-* class names from the
    Models pane CSS apply to the workflow subnav/main/detail children
    too -- see index.html. */
-.app[data-pane="workflows"] .sidebar,
-.app[data-pane="workflows"] .main-col,
-.app[data-pane="workflows"] .params-panel { display: none; }
-.app[data-pane="workflows"] {
+.app[data-pane="agents"] .sidebar,
+.app[data-pane="agents"] .main-col,
+.app[data-pane="agents"] .params-panel { display: none; }
+.app[data-pane="agents"] {
   grid-template-columns: var(--col-rail) 1fr;
 }
-.app[data-pane="workflows"] .app-pane[data-pane-view="workflows"] {
+.app[data-pane="agents"] .app-pane[data-pane-view="agents"] {
   display: grid;
   grid-template-columns: 220px 1fr 320px;
   height: 100vh;
@@ -170,16 +170,16 @@ svg circle, svg rect, svg polygon { fill: none; }
 /* Workflows pane: main column. Unlike the Models pane, which has
    ``.mp-header`` adding per-section padding, the workflows main column
    is a vertical scroll of sections with shared inset + spacing. Scope
-   to ``[data-pane="workflows"]`` so we don't touch the Models layout. */
-.app[data-pane="workflows"] .mp-main {
+   to ``[data-pane="agents"]`` so we don't touch the Models layout. */
+.app[data-pane="agents"] .mp-main {
   padding: 20px 24px;
   overflow-y: auto;
   gap: 16px;
 }
-.app[data-pane="workflows"] .mp-main-head h2 {
+.app[data-pane="agents"] .mp-main-head h2 {
   font-size: 18px; font-weight: 600; margin: 0 0 6px 0;
 }
-.app[data-pane="workflows"] .mp-main-doc {
+.app[data-pane="agents"] .mp-main-doc {
   margin: 0;
   color: var(--fg-faint);
   font-size: 13px;
@@ -189,40 +189,40 @@ svg circle, svg rect, svg polygon { fill: none; }
      without collapsing internal whitespace runs). */
   white-space: pre-line;
 }
-.app[data-pane="workflows"] .mp-section {
+.app[data-pane="agents"] .mp-section {
   display: flex; flex-direction: column; gap: 8px;
   padding: 12px 0;
   border-top: 1px solid var(--border);
 }
-.app[data-pane="workflows"] .mp-section h3 {
+.app[data-pane="agents"] .mp-section h3 {
   font-size: 11px; font-weight: 600;
   color: var(--fg-faint);
   text-transform: uppercase; letter-spacing: 0.04em;
   margin: 0 0 4px 0;
 }
-.app[data-pane="workflows"] .mp-section .ag-row {
+.app[data-pane="agents"] .mp-section .ag-row {
   display: grid;
   grid-template-columns: 110px 1fr;
   gap: 12px;
   align-items: center;
 }
-.app[data-pane="workflows"] .mp-section .ag-row > .ag-label {
+.app[data-pane="agents"] .mp-section .ag-row > .ag-label {
   font-size: 11px;
   color: var(--fg-faint);
   text-transform: uppercase; letter-spacing: 0.04em;
 }
 /* Run button: align right, sensible width. */
-.app[data-pane="workflows"] #wf-run {
+.app[data-pane="agents"] #wf-run {
   align-self: flex-start;
   margin-top: 6px;
   padding: 6px 18px;
 }
-.app[data-pane="workflows"] details.mp-mermaid summary {
+.app[data-pane="agents"] details.mp-mermaid summary {
   cursor: pointer;
   font-size: 12px;
   color: var(--fg-faint);
 }
-.app[data-pane="workflows"] details.mp-mermaid pre {
+.app[data-pane="agents"] details.mp-mermaid pre {
   margin-top: 6px;
   padding: 10px;
   background: var(--bg-sunken);
@@ -232,7 +232,7 @@ svg circle, svg rect, svg polygon { fill: none; }
   overflow-x: auto;
 }
 /* Live trace events sit in a scrollable region under "Trace". */
-.app[data-pane="workflows"] #wf-events {
+.app[data-pane="agents"] #wf-events {
   display: flex; flex-direction: column;
   gap: 2px;
   max-height: 320px;
@@ -244,32 +244,93 @@ svg circle, svg rect, svg polygon { fill: none; }
   font-size: 12px;
   font-family: var(--mono, monospace);
 }
-.app[data-pane="workflows"] #wf-events:empty::before {
+.app[data-pane="agents"] #wf-events:empty::before {
   content: "Run the workflow to see events here.";
   color: var(--fg-faint);
   font-style: italic;
   padding: 6px;
 }
 
+/* Per-call agent modal (Phase F.3). Opened by /agent-strict,
+   /agent-contract, /agent-reflect to let the user tweak this one
+   invocation's settings before running. Pre-filled with defaults from
+   the Agents pane. */
+dialog.agent-modal {
+  min-width: 420px;
+  max-width: 560px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--fg);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.2);
+}
+dialog.agent-modal::backdrop { background: rgba(0, 0, 0, 0.4); }
+dialog.agent-modal .agent-modal-head {
+  padding: 14px 18px 10px;
+  border-bottom: 1px solid var(--border);
+}
+dialog.agent-modal .agent-modal-head h2 {
+  margin: 0; font-size: 15px; font-weight: 600;
+}
+dialog.agent-modal .agent-modal-hint {
+  margin: 4px 0 0; font-size: 12px; color: var(--fg-faint);
+}
+dialog.agent-modal .agent-modal-form {
+  display: flex; flex-direction: column; gap: 10px;
+  padding: 14px 18px;
+}
+dialog.agent-modal .agent-modal-task {
+  padding-bottom: 10px;
+  border-bottom: 1px dashed var(--border);
+  display: flex; flex-direction: column; gap: 4px;
+}
+dialog.agent-modal .agent-modal-task-input {
+  font-size: 12px;
+  font-family: var(--mono, monospace);
+  resize: vertical;
+  min-height: 56px;
+}
+dialog.agent-modal .agent-modal-row {
+  display: grid;
+  grid-template-columns: 130px 1fr;
+  gap: 10px;
+  align-items: center;
+}
+dialog.agent-modal .agent-modal-row .ag-tool-hint {
+  grid-column: 2 / 3;
+  font-size: 11px; color: var(--fg-faint);
+}
+dialog.agent-modal .agent-modal-row textarea {
+  resize: vertical;
+  min-height: 64px;
+}
+dialog.agent-modal .agent-modal-actions {
+  display: flex; justify-content: flex-end; gap: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+  margin-top: 4px;
+}
+
 /* Detail rail headings + sections. */
-.app[data-pane="workflows"] .mp-detail-head h3 {
+.app[data-pane="agents"] .mp-detail-head h3 {
   font-size: 11px; font-weight: 600;
   color: var(--fg-faint);
   text-transform: uppercase; letter-spacing: 0.04em;
   margin: 0 0 12px 0;
 }
-.app[data-pane="workflows"] .mp-detail-section {
+.app[data-pane="agents"] .mp-detail-section {
   margin-top: 12px;
   padding-top: 12px;
   border-top: 1px solid var(--border);
 }
-.app[data-pane="workflows"] .mp-detail-section h4 {
+.app[data-pane="agents"] .mp-detail-section h4 {
   font-size: 11px; font-weight: 600;
   color: var(--fg-faint);
   text-transform: uppercase; letter-spacing: 0.04em;
   margin: 0 0 6px 0;
 }
-.app[data-pane="workflows"] .mp-detail-section pre {
+.app[data-pane="agents"] .mp-detail-section pre {
   margin: 0;
   padding: 8px;
   background: var(--bg-sunken);
