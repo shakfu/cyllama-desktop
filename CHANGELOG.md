@@ -6,6 +6,207 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added (Agents pane -- full-area config + workflow management, Phase F)
+- **`Agents` nav-rail pane** (network-graph icon, gated on
+  `/info.features.agents`). Three-column layout mirroring the
+  Models pane: left subnav lists six agent types
+  (`agent` / `agent-strict` / `agent-contract` / `agent-plan` /
+  `agent-reflect` / `agent-workflow`), middle column holds the
+  selected type's defaults form, right detail rail shows
+  per-type last-run summary (workflow row only today; general
+  per-type run history deferred to TODO.md).
+- **`features/agents-pane.js`** is the new single source of truth
+  for every agent type's defaults. Common section (tools +
+  max_iterations) renders on every non-workflow row; per-type
+  sections below: `strict` (format / allow_reasoning),
+  `contract` (preset / policy), `plan` (max_steps / stop_on_error
+  / planner prompt / executor prompt), `reflect` (max_attempts /
+  acceptance marker / critic prompt). The `agent-workflow` row
+  hosts the former Workflows pane verbatim (file list + spec
+  preview + initial-state form + Run + live trace).
+- **Per-call modal** (`features/agent-modal.js`) opens when
+  `/agent-strict`, `/agent-contract`, `/agent-plan`, or
+  `/agent-reflect` is invoked from the chat composer. Modal is
+  pre-filled with the Agents pane's defaults so Enter runs with
+  current values; the user can tweak any field for this one
+  invocation. Schema-driven (`{key, label, type, default,
+  options?, min?, max?, placeholder?, hint?}`) with field types
+  `text` / `number` / `select` / `checkbox` / `textarea`. The
+  task field at the top is **editable** -- pre-filled from the
+  slash body, refined-in-place text on submit becomes the run's
+  task. Esc / Cancel / backdrop-click cancels.
+- `/agent` and `/agent-workflow` skip the modal (no per-call
+  knobs / navigation slash respectively).
+- **Slash command family rename**: `/constrained` ->
+  `/agent-constrained`, `/contract` -> `/agent-contract`,
+  `/plan` -> `/agent-plan`, `/reflect` -> `/agent-reflect`.
+  Tab autocomplete from `/agent` now surfaces every variant.
+  `/agent-strict` registered as a friendlier alias for
+  `agent-constrained` (same handler; the cyllama class is still
+  `ConstrainedAgent`).
+- **`/agent-workflow [<name>]`** (navigation slash): with a
+  name, navigates to the Agents pane with that workflow row
+  selected; without a name, navigates to the workflow row for
+  discovery. Slash bypasses the Send-button gate (works without
+  a model loaded).
+- Enter on any slash command now bypasses the model-loaded gate
+  so the agent modal can open before a model is picked
+  (handlers themselves enforce preconditions). Raw chat still
+  requires the Send button enabled.
+
+### Changed (Agents pane consolidation removes the right-sidebar tab and standalone Workflows pane)
+- **Right-sidebar `Agents` tab removed** -- the pane is now the
+  only config surface. `rt-tabs` collapses to just `Parameters`
+  (a single-tab tab-strip; revisit when another right-sidebar
+  surface lands). `features/agents-tab.js` deleted; the
+  `getAgentConfig` / `getStrictConfig` / `getContractConfig` /
+  `getPlanConfig` / `getReflectConfig` / `validateAgentConfig`
+  exports moved to `features/agents-pane.js` as the same shape.
+- **Standalone Workflows pane removed** -- folded into the
+  Agents pane as the `agent-workflow` subnav row.
+  `features/workflows-pane.js` deleted; everything it owned
+  (discovery, spec preview, initial-state form, Run, live trace,
+  per-run detail) renders under the workflow row of the new
+  Agents pane.
+- `right-tabs.js` `VALID` set shrunk from
+  `{models, agents, general}` to `{models}`; the
+  setActive/getActive API stays so the Preferences window and
+  other consumers compose unchanged.
+
+### Added (cyllama agent surface -- Phases A-E)
+- **`make python-local`** target rebuilds the bundled Python
+  env using a local cyllama checkout instead of the PyPI pin.
+  Defaults to `../cyllama`; override with
+  `CYLLAMA_SOURCE=/path/to/cyllama`. Wipes the existing env
+  first (the plain `python` target is gated on the env existing,
+  so a re-bump without `python-local` would no-op).
+- **Granular agent feature flags** at sidecar module load
+  (`/info.features`): `agents.constrained`, `agents.contract`,
+  `agents.reflect`, `agents.plan`, `agents.rag_tool`,
+  `agents.memory`, `workflow`. Each is independently probed via
+  `_resolve_attr` so the bundle's actual capabilities surface to
+  the renderer (which uses them to gate slash commands + UI
+  rows).
+- **`POST /jobs/agent/constrained`** wraps
+  `cyllama.agents.ConstrainedAgent`. Same SSE shape as
+  `/jobs/agent/run`; extra body fields `format` (one of
+  `json` / `json_array` / `function_call`) and
+  `allow_reasoning`. 8 sidecar tests.
+- **`POST /jobs/agent/contract`** wraps `ContractAgent` with a
+  **named preset registry** (`none` / `task-nonempty` /
+  `answer-quality`) and a policy (`IGNORE` / `OBSERVE` /
+  `ENFORCE` / `QUICK_ENFORCE`). The registry lives in the
+  sidecar (`_contract_presets()`) so the renderer doesn't ship
+  Python callables across the wire. New `GET
+  /info/contract-presets` exposes the preset/policy lists for UI
+  pickers. Emits `CONTRACT_CHECK` / `CONTRACT_VIOLATION` events
+  alongside the usual THOUGHT / ACTION / OBSERVATION /
+  ANSWER. 11 sidecar tests.
+- **`POST /jobs/agent/plan`** orchestrates a planner + N
+  executors itself (bypassing cyllama's `plan_and_execute`
+  helper which uses `.run()` not `.stream()`) so events flow in
+  real time. Each event carries `metadata.source = "planner"`
+  or `"step-<n>"` so the trace renderer distinguishes phases.
+  Configurable planner / executor system prompts; default
+  planner prompt asks for newline-separated steps. Result
+  payload carries the full plan + per-step `{plan, answer,
+  success, events}`. 7 sidecar tests.
+- **`POST /jobs/agent/reflect`** orchestrates a worker + critic
+  reflection loop (also bypassing cyllama's `ReflectionLoop`
+  wrapper for incremental events). Worker inherits the tool
+  catalog; critic always runs tool-less. Event source tags
+  `worker-<n>` / `critic-<n>`. Loop terminates on
+  case-insensitive substring match of the configurable
+  acceptance marker (default `ACCEPT`) in the critic's answer,
+  or hits `max_attempts` (default 3, clamped 1-10). Result
+  payload carries `accepted: bool`, `attempts: int`, the last
+  draft as `answer`, and per-round `{draft, critique, accepted,
+  worker_events, critic_events}`. 8 sidecar tests.
+- **Workflow surface** (`POST /jobs/workflow/run` +
+  `GET /workflows` + `GET /workflows/{id}/spec`). Workflows are
+  workspace-scoped `*.py` files under
+  `<workspace>/workflows/`, discovered on demand. Each file
+  exports either `flow: Workflow` or `make_flow()` returning a
+  Workflow; the module docstring becomes the description.
+  Module loading caches by `(path, mtime)` so iterative
+  authoring doesn't pay validation cost on every run. Broken
+  files surface with an `error` field in the discovery list
+  rather than poisoning sibling files. The execute endpoint
+  forwards the workflow's native event stream
+  (`WORKFLOW_START` / `NODE_START` / `NODE_END` / `ANSWER` /
+  `WORKFLOW_END`) plus any sub-event nesting set by `agent_node`
+  / `workflow_node` (`metadata.source` / `parent_event_id`
+  preserved). 19 sidecar tests covering discovery (broken file
+  isolation, invalid-filename skipping, factory-form workflow,
+  feature gate), spec (404/400/501), execute (validation +
+  event sequence + state pass-through).
+- **`semantic_memory` agent tool** -- adds `remember(text)` +
+  `recall(query, k?)` to the agent tool catalog when configured
+  with `{collection_id, namespace?, top_k?}`. Backed by a
+  `_MemoryRagShim` around the existing RAG `Embedder` +
+  `SqliteVectorStore` (avoids needing a generation model that
+  `cyllama.rag.RAG` requires but the sidecar's embed-only RAG
+  collections don't have). Different namespaces over the same
+  collection are isolated by design. 9 sidecar tests.
+- **Bundled Python env at cyllama 0.2.16** -- bumped from
+  0.2.15 (PyPI pin) to the local checkout via
+  `make python-local`. All Phase 1-5 workflow surface verified
+  importable (`Workflow.as_agent`, `workflow_node`,
+  `ReflectionLoop`, `SemanticMemory`, etc.).
+- **First-launch example workflow seeding**: Electron main
+  process copies `resources/example-workflows/*.py` into the
+  workspace's `workflows/` dir on first launch (tracked by a
+  `.seeded` marker so a user who deletes the seeded files
+  doesn't get them back). Skipped under the e2e harness so the
+  stub doesn't see real-cyllama Layer-C code. One example
+  shipped: `word_count.py` -- linear Layer-C pipeline that
+  tokenises an input string, counts tokens, emits a summary.
+  Verified end-to-end against the real cyllama runtime.
+  `electron-builder.yml` ships `resources/example-workflows/`
+  under `process.resourcesPath/example-workflows/`.
+
+### Added (user docs)
+- **`docs/guide-to-agents.md`** -- end-user guide to the agent
+  layer. Covers the five slash-commands (`/agent`,
+  `/agent-constrained` aka `/agent-strict`, `/agent-contract`,
+  `/agent-plan`, `/agent-reflect`), per-call modals and what
+  each field does, the Agents pane (subnav + Common section +
+  per-type defaults), the Tools catalog (calculator / read_file
+  / web_fetch / rag_query / semantic_memory) with sandbox notes,
+  and the Workflows pane (file authoring + trust boundary).
+  Common-patterns and troubleshooting sections cover the
+  most-likely first-time-user questions. Linked from `README.md`.
+- **`docs/dev/agent_plan.md`** -- developer plan covering
+  Phases A-E (bundle bump, slash agents, ReflectionLoop,
+  Workflows pane, Memory + RAG tool). Survey of the cyllama
+  agent surface, priority-ordered integration table, uniform
+  endpoint shape, feature-detection probes, workflow authoring
+  decision (workspace Python + trust boundary), UX split
+  (slashes for chat-shaped agents, pane for workflows). 5-phase
+  rollout each shipped with sidecar pytest + Playwright smoke +
+  CHANGELOG entry + feature-flag expansion.
+
+### Fixed
+- **`prefsWindow.show()` race on `ready-to-show`** -- the
+  preferences window's `ready-to-show` callback unconditionally
+  called `.show()` on the window. Playwright tears down the app
+  faster than Electron's window load completes, so the callback
+  could fire after the window was destroyed; calling `.show()`
+  on a destroyed window triggers
+  `BrowserWindow.visibilityChanged` -> `emit` and crashes the
+  main process with "Object has been destroyed". Guarded with
+  `if (!prefsWindow.isDestroyed())` (same pattern as
+  `pushLog`). Predates this session -- the bug has been there
+  since the very first commit, surfaced only because the new
+  Playwright tests cycle the app faster.
+- **Stale `#ag-run` Playwright assertion** -- a panes-suite
+  test asserted the Agents right-tab had an inline Run button
+  (`#ag-run`), but the slash-command refactor in 2026-05-07
+  removed the inline button (agents now invoked via the
+  chat composer's `/agent <task>`). Test updated to assert the
+  current settings surface (`/agent <task>` hint + Max
+  iterations + Tools rows).
+
 ### Changed (left nav rail is now app-wide only)
 - The leftmost control bar previously mixed two contracts: Chats /
   Models switched the whole app, while Documents / Transcribe / Image
