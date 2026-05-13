@@ -53,6 +53,14 @@ def test_constrained_400_on_bad_format(client, auth, fake_model):
     assert r.status_code == 400
 
 
+def test_constrained_400_on_empty_tools(client, auth, fake_model):
+    r = client.post("/jobs/agent/constrained", json={
+        "model_path": fake_model, "task": "x",
+    }, headers=auth)
+    assert r.status_code == 400
+    assert "tools required" in r.json()["detail"]
+
+
 def test_constrained_501_when_missing(client, auth, fake_model, sidecar_app, monkeypatch):
     monkeypatch.setitem(sidecar_app._FEATURE_FLAGS, "agents.constrained", False)
     r = client.post("/jobs/agent/constrained", json={
@@ -64,6 +72,7 @@ def test_constrained_501_when_missing(client, auth, fake_model, sidecar_app, mon
 def test_constrained_streams_trace_then_result(client, auth, fake_model):
     r = client.post("/jobs/agent/constrained", json={
         "model_path": fake_model, "task": "what is 6 * 7?",
+        "tools": {"calculator": True},
     }, headers=auth)
     assert r.status_code == 200, f"unexpected: {r.status_code} body={r.text}"
     job_id = r.json()["job_id"]
@@ -86,6 +95,7 @@ def test_constrained_passes_format_and_reasoning_through(
 ):
     r = client.post("/jobs/agent/constrained", json={
         "model_path": fake_model, "task": "x",
+        "tools": {"calculator": True},
         "format": "function_call",
         "allow_reasoning": True,
         "max_iterations": 7,
@@ -103,6 +113,7 @@ def test_constrained_passes_format_and_reasoning_through(
 def test_constrained_clamps_max_iterations(client, auth, fake_model, sidecar_app):
     r = client.post("/jobs/agent/constrained", json={
         "model_path": fake_model, "task": "x",
+        "tools": {"calculator": True},
         "max_iterations": 9999,
     }, headers=auth)
     assert r.status_code == 200

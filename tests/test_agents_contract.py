@@ -51,6 +51,14 @@ def test_contract_400_on_unknown_policy(client, auth, fake_model):
     assert "policy" in r.json()["detail"]
 
 
+def test_contract_400_on_empty_tools(client, auth, fake_model):
+    r = client.post("/jobs/agent/contract", json={
+        "model_path": fake_model, "task": "x",
+    }, headers=auth)
+    assert r.status_code == 400
+    assert "tools required" in r.json()["detail"]
+
+
 def test_contract_501_when_missing(client, auth, fake_model, sidecar_app, monkeypatch):
     monkeypatch.setitem(sidecar_app._FEATURE_FLAGS, "agents.contract", False)
     r = client.post("/jobs/agent/contract", json={
@@ -63,6 +71,7 @@ def test_contract_default_preset_runs(client, auth, fake_model):
     """Default preset 'none' + default policy 'OBSERVE' -> clean run."""
     r = client.post("/jobs/agent/contract", json={
         "model_path": fake_model, "task": "what is 6 * 7?",
+        "tools": {"calculator": True},
     }, headers=auth)
     assert r.status_code == 200
     events = _drain(client, auth, r.json()["job_id"])
@@ -83,6 +92,7 @@ def test_contract_answer_quality_preset_fires_violation(client, auth, fake_model
     (2 chars) -> a CONTRACT_VIOLATION event should land."""
     r = client.post("/jobs/agent/contract", json={
         "model_path": fake_model, "task": "x",
+        "tools": {"calculator": True},
         "preset": "answer-quality",
         "policy": "OBSERVE",
     }, headers=auth)
@@ -102,6 +112,7 @@ def test_contract_task_nonempty_preset_passes(client, auth, fake_model):
     """'task-nonempty' precondition holds for any non-blank task."""
     r = client.post("/jobs/agent/contract", json={
         "model_path": fake_model, "task": "do something",
+        "tools": {"calculator": True},
         "preset": "task-nonempty",
     }, headers=auth)
     assert r.status_code == 200
@@ -114,6 +125,7 @@ def test_contract_task_nonempty_preset_passes(client, auth, fake_model):
 def test_contract_passes_policy_through(client, auth, fake_model, sidecar_app):
     r = client.post("/jobs/agent/contract", json={
         "model_path": fake_model, "task": "x",
+        "tools": {"calculator": True},
         "preset": "none",
         "policy": "ENFORCE",
     }, headers=auth)

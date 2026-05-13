@@ -45,6 +45,17 @@ def test_agent_400_on_blank_task(client, auth, fake_model):
     assert r.status_code == 400
 
 
+def test_agent_400_on_empty_tools(client, auth, fake_model):
+    """ReAct without tools is structurally pointless -- the prompt asks
+    the model to pick from an empty catalog. Reject up front; /chat is
+    the right endpoint for tool-less generation."""
+    r = client.post("/jobs/agent/run", json={
+        "model_path": fake_model, "task": "x",
+    }, headers=auth)
+    assert r.status_code == 400
+    assert "tools required" in r.json()["detail"]
+
+
 def test_agent_501_when_missing(client, auth, fake_model, sidecar_app, monkeypatch):
     monkeypatch.setitem(sidecar_app._FEATURE_FLAGS, "agents", False)
     r = client.post("/jobs/agent/run", json={
@@ -76,6 +87,7 @@ def test_agent_streams_trace_then_result(client, auth, fake_model):
 def test_agent_clamps_max_iterations(client, auth, fake_model, sidecar_app):
     r = client.post("/jobs/agent/run", json={
         "model_path": fake_model, "task": "x",
+        "tools": {"calculator": True},
         "max_iterations": 9999,
     }, headers=auth)
     assert r.status_code == 200

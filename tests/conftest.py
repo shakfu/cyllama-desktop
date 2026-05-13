@@ -805,6 +805,159 @@ class _FakeSemanticMemory:
         ]
 
 
+def _fake_stream_agent(
+    kind,
+    llm,
+    task,
+    *,
+    tools=None,
+    system_prompt=None,
+    max_iterations=10,
+    max_steps=10,
+    planner_system_prompt=None,
+    executor_system_prompt=None,
+    stop_on_error=True,
+    max_attempts=3,
+    worker_system_prompt=None,
+    critic_system_prompt=None,
+    acceptance_marker="ACCEPT",
+    critique_prefix=None,
+    **agent_kwargs,
+):
+    """Stub for ``cyllama.agents.runner.stream_agent``.
+
+    Mirrors the real runner's kind dispatch using the fake agent classes
+    installed in this stub. Yields ``_FakeAgentEvent`` objects so the
+    sidecar's per-event handling sees the same shape it would with the
+    real runner.
+
+    For ``"plan"`` / ``"reflect"`` the stub stamps ``metadata.source``
+    onto each forwarded event (matching the real runner's ``_tag``
+    behaviour) and emits a final ANSWER event with ``source = "final"``.
+    """
+    import re as _re
+
+    tools = list(tools or [])
+
+    def _tag(ev, source):
+        md = dict(getattr(ev, "metadata", {}) or {})
+        md["source"] = source
+        return _FakeAgentEvent(ev.type, ev.content, metadata=md)
+
+    if kind in {"react", "constrained", "contract"}:
+        cls = {
+            "react": _FakeReActAgent,
+            "constrained": _FakeConstrainedAgent,
+            "contract": _FakeContractAgent,
+        }[kind]
+        agent = cls(
+            llm=llm, tools=tools, system_prompt=system_prompt,
+            max_iterations=max_iterations, verbose=False, **agent_kwargs,
+        )
+        yield from agent.stream(task)
+        return
+
+    if kind == "plan":
+        # Default planner prompt match keeps tests prompt-agnostic.
+        planner = _FakeReActAgent(
+            llm=llm, tools=[],
+            system_prompt=planner_system_prompt,
+            max_iterations=max_iterations, verbose=False,
+        )
+        plan_answer = None
+        for ev in planner.stream(task):
+            if getattr(ev.type, "name", "") == "ANSWER":
+                plan_answer = ev.content
+            yield _tag(ev, "planner")
+        steps = []
+        for line in (plan_answer or "").splitlines():
+            s = _re.sub(r"^\s*(?:[-*+]|\d+[\.\)])\s+", "", line.strip())
+            if s:
+                steps.append(s)
+        steps = steps[:max_steps]
+        if not steps:
+            yield _FakeAgentEvent(
+                _FakeAgentEventType("ANSWER"),
+                plan_answer or "",
+                metadata={"source": "final", "plan": []},
+            )
+            return
+        step_summaries = []
+        for idx, step in enumerate(steps, start=1):
+            executor = _FakeReActAgent(
+                llm=llm, tools=tools,
+                system_prompt=executor_system_prompt,
+                max_iterations=max_iterations, verbose=False,
+            )
+            step_answer = None
+            for ev in executor.stream(step):
+                if getattr(ev.type, "name", "") == "ANSWER":
+                    step_answer = ev.content
+                yield _tag(ev, f"step-{idx}")
+            step_summaries.append(f"{idx}. {step}\n   -> {step_answer or ''}")
+            if step_answer is None and stop_on_error:
+                break
+        yield _FakeAgentEvent(
+            _FakeAgentEventType("ANSWER"),
+            "\n".join(step_summaries),
+            metadata={"source": "final", "plan": steps},
+        )
+        return
+
+    if kind == "reflect":
+        marker = (acceptance_marker or "ACCEPT").upper()
+        cprefix = critique_prefix or "Critique this draft:"
+        current = task
+        last_draft = ""
+        accepted = False
+        attempts = 0
+        for n in range(1, max_attempts + 1):
+            attempts = n
+            worker = _FakeReActAgent(
+                llm=llm, tools=tools,
+                system_prompt=worker_system_prompt,
+                max_iterations=max_iterations, verbose=False,
+            )
+            draft = None
+            for ev in worker.stream(current):
+                if getattr(ev.type, "name", "") == "ANSWER":
+                    draft = ev.content
+                yield _tag(ev, f"worker-{n}")
+            if draft is None:
+                yield _FakeAgentEvent(
+                    _FakeAgentEventType("ERROR"),
+                    "worker produced no answer",
+                    metadata={"source": f"worker-{n}"},
+                )
+                break
+            last_draft = draft
+            critic = _FakeReActAgent(
+                llm=llm, tools=[],
+                system_prompt=critic_system_prompt,
+                max_iterations=max_iterations, verbose=False,
+            )
+            critique = None
+            for ev in critic.stream(f"{cprefix}\n\n{draft}"):
+                if getattr(ev.type, "name", "") == "ANSWER":
+                    critique = ev.content
+                yield _tag(ev, f"critic-{n}")
+            if critique and marker in critique.upper():
+                accepted = True
+                break
+            current = (
+                f"{task}\n\nYour previous attempt:\n{draft}\n\n"
+                f"Critic feedback (please address):\n{critique or ''}"
+            )
+        yield _FakeAgentEvent(
+            _FakeAgentEventType("ANSWER"),
+            last_draft,
+            metadata={"source": "final", "attempts": attempts, "accepted": accepted},
+        )
+        return
+
+    raise ValueError(f"unknown agent kind: {kind!r}")
+
+
 def _fake_plan_and_execute(planner, executor, task, **kwargs):  # noqa: ARG001
     """Stub for ``cyllama.agents.plan_and_execute``. Returns a list of
     per-step AgentResults built from the executor's scripted trace."""
@@ -944,6 +1097,13 @@ def _install_cyllama_stub() -> None:
     # remember/retrieve implementations backed by an in-memory list so
     # round-trip tests can verify wiring without a real vector store.
     agents.SemanticMemory = _FakeSemanticMemory
+    # Phase 7+: cyllama.agents.runner.stream_agent dispatcher. The sidecar
+    # probes ``cyllama.agents.runner`` so the runner needs to live as a
+    # real module entry (not just an attribute on ``cyllama.agents``).
+    runner = types.ModuleType("cyllama.agents.runner")
+    runner.stream_agent = _fake_stream_agent
+    sys.modules["cyllama.agents.runner"] = runner
+    agents.runner = runner
     sys.modules["cyllama.agents"] = agents
     mod.agents = agents
 

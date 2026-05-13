@@ -239,6 +239,14 @@ _AGENT_WORKFLOW_NODE_FN = _resolve_attr((
 _AGENT_AGENT_NODE_FN = _resolve_attr((
     ("cyllama.agents", "agent_node"),
 ))
+# Phase 7+ -- shared agent dispatcher. ``stream_agent(kind, llm, task, ...)``
+# replaces the per-kind orchestration the sidecar used to carry for
+# plan-and-execute and reflection loops. Probed independently so older
+# cyllama builds without ``cyllama.agents.runner`` still surface their
+# legacy plan / reflect helpers via the granular flags below.
+_AGENT_STREAM_AGENT_FN = _resolve_attr((
+    ("cyllama.agents.runner", "stream_agent"),
+))
 
 # Phase 8 -- OpenAI-compatible server. Both flavours (embedded C++
 # server vs. pure-Python http.server-based one) are surfaced; the
@@ -361,8 +369,18 @@ _FEATURE_FLAGS: dict[str, bool] = {
         _AGENT_CONTRACT_CLS is not None
         and _AGENT_CONTRACT_POLICY is not None
     ),
-    "agents.reflect": _AGENT_REFLECTION_LOOP_CLS is not None,
-    "agents.plan": _AGENT_PLAN_AND_EXECUTE_FN is not None,
+    # Reflect/plan are satisfied by either the legacy class/helper or the
+    # newer ``stream_agent`` dispatcher -- the sidecar's plan/reflect
+    # endpoints prefer the runner when present, fall back otherwise.
+    "agents.reflect": (
+        _AGENT_REFLECTION_LOOP_CLS is not None
+        or _AGENT_STREAM_AGENT_FN is not None
+    ),
+    "agents.plan": (
+        _AGENT_PLAN_AND_EXECUTE_FN is not None
+        or _AGENT_STREAM_AGENT_FN is not None
+    ),
+    "agents.runner": _AGENT_STREAM_AGENT_FN is not None,
     "agents.rag_tool": _AGENT_RAG_AS_TOOL_FN is not None,
     "agents.memory": _AGENT_SEMANTIC_MEMORY_CLS is not None,
     "workflow": (
@@ -3160,6 +3178,69 @@ def _build_agent_tools(spec: dict) -> list:
     return out
 
 
+_TOOL_USING_KINDS = {"react", "constrained", "contract"}
+
+
+def _require_tools_for_kind(kind: str, tools: list) -> None:
+    """Reject tool-using agent kinds when no tools are registered.
+
+    ReAct/Constrained/Contract prompt the LLM to choose from a tool
+    catalog; with an empty catalog the model parse-errors, loop-detects,
+    or hallucinates tool names. Surfacing this as a 400 (rather than
+    letting the runner emit its "no tools registered" ANSWER) makes the
+    contract explicit -- the renderer can disable the submit button when
+    no tools are picked, and callers don't pay a model load just to get
+    back a refusal. ``/chat`` is the right endpoint for tool-less runs.
+    """
+    if kind in _TOOL_USING_KINDS and not tools:
+        raise HTTPException(
+            400,
+            f"tools required for kind={kind!r}; use /chat for tool-less generation",
+        )
+
+
+async def _drain_agent_stream(
+    job: "Job", it,
+) -> tuple[list[dict], Optional[dict], Optional[str]]:
+    """Iterate an ``AgentEvent`` stream, emit each as ``trace``, and return
+    ``(events, final_event, last_answer)``.
+
+    - ``final_event`` is the synthetic event ``stream_agent`` stamps with
+      ``metadata.source == "final"`` for composed kinds (``plan`` /
+      ``reflect``); it is held back from the SSE trace stream so the
+      caller can fold its ``content`` / ``metadata`` into the result
+      envelope instead of double-emitting.
+    - ``last_answer`` is the content of the last non-final ``ANSWER``
+      event observed. Single-agent kinds (``react`` / ``constrained`` /
+      ``contract``) don't emit a final-tagged event; the renderer's
+      ``result.answer`` comes from here.
+    """
+    events: list[dict] = []
+    final_event: Optional[dict] = None
+    last_answer: Optional[str] = None
+    try:
+        for ev in it:
+            etype = _agent_event_type_name(ev)
+            content = getattr(ev, "content", "")
+            metadata = getattr(ev, "metadata", {}) or {}
+            md = dict(_jsonify(metadata) or {})
+            ev_dict = {
+                "event_type": etype,
+                "content": str(content) if content is not None else "",
+                "metadata": md,
+            }
+            if md.get("source") == "final":
+                final_event = ev_dict
+                continue
+            events.append(ev_dict)
+            if etype == "ANSWER":
+                last_answer = ev_dict["content"]
+            await _emit(job, {"type": "trace", **ev_dict})
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError(f"agent stream failed: {exc}") from exc
+    return events, final_event, last_answer
+
+
 def _agent_event_type_name(ev) -> str:
     """Coerce an EventType enum (or anything string-y) to a plain name."""
     t = getattr(ev, "type", None)
@@ -3192,46 +3273,23 @@ async def jobs_agent_run(req: Request):
     # tool (e.g. missing sandbox_dir) surfaces as a 400 rather than as an
     # error event mid-trace. The renderer can't fix this from the trace.
     tools = _build_agent_tools(body.get("tools") or {})
+    _require_tools_for_kind("react", tools)
 
     # Cache the LLM the same way /chat does -- avoids reloading the model
     # for back-to-back agent runs against the same target.
     llm = _get_llm(model_path, body.get("params"))
 
     async def producer(job: Job) -> None:
-        agent = _AGENT_REACT_CLS(
-            llm=llm,
-            tools=tools,
-            system_prompt=system_prompt,
-            max_iterations=max_iterations,
-            verbose=False,
-        )
-
-        # cyllama's ``stream`` is synchronous and does its own LLM calls
-        # under the hood. Same TestClient-portal constraint as /image:
-        # offloading to an executor races the request boundary in tests.
-        # The job is already coarse-grained, and per-event awaits below
-        # give the loop room to service SSE consumers.
-        events: list[dict] = []
-        final_answer: Optional[str] = None
         try:
-            it = iter(agent.stream(task))
+            it = _AGENT_STREAM_AGENT_FN(
+                "react", llm, task,
+                tools=tools,
+                system_prompt=system_prompt,
+                max_iterations=max_iterations,
+            )
         except Exception as exc:  # noqa: BLE001
-            raise RuntimeError(f"agent.stream failed: {exc}") from exc
-
-        for ev in it:
-            etype = _agent_event_type_name(ev)
-            content = getattr(ev, "content", "")
-            metadata = getattr(ev, "metadata", {}) or {}
-            ev_dict = {
-                "event_type": etype,
-                "content": str(content) if content is not None else "",
-                "metadata": _jsonify(metadata),
-            }
-            events.append(ev_dict)
-            if etype == "ANSWER":
-                final_answer = ev_dict["content"]
-            await _emit(job, {"type": "trace", **ev_dict})
-
+            raise RuntimeError(f"stream_agent failed: {exc}") from exc
+        events, _, final_answer = await _drain_agent_stream(job, it)
         await _emit(job, {
             "type": "result",
             "result": {
@@ -3283,40 +3341,22 @@ async def jobs_agent_constrained(req: Request):
     allow_reasoning = bool(body.get("allow_reasoning"))
 
     tools = _build_agent_tools(body.get("tools") or {})
+    _require_tools_for_kind("constrained", tools)
     llm = _get_llm(model_path, body.get("params"))
 
     async def producer(job: Job) -> None:
-        agent = _AGENT_CONSTRAINED_CLS(
-            llm=llm,
-            tools=tools,
-            system_prompt=system_prompt,
-            max_iterations=max_iterations,
-            verbose=False,
-            format=fmt,
-            allow_reasoning=allow_reasoning,
-        )
-
-        events: list[dict] = []
-        final_answer: Optional[str] = None
         try:
-            it = iter(agent.stream(task))
+            it = _AGENT_STREAM_AGENT_FN(
+                "constrained", llm, task,
+                tools=tools,
+                system_prompt=system_prompt,
+                max_iterations=max_iterations,
+                format=fmt,
+                allow_reasoning=allow_reasoning,
+            )
         except Exception as exc:  # noqa: BLE001
-            raise RuntimeError(f"agent.stream failed: {exc}") from exc
-
-        for ev in it:
-            etype = _agent_event_type_name(ev)
-            content = getattr(ev, "content", "")
-            metadata = getattr(ev, "metadata", {}) or {}
-            ev_dict = {
-                "event_type": etype,
-                "content": str(content) if content is not None else "",
-                "metadata": _jsonify(metadata),
-            }
-            events.append(ev_dict)
-            if etype == "ANSWER":
-                final_answer = ev_dict["content"]
-            await _emit(job, {"type": "trace", **ev_dict})
-
+            raise RuntimeError(f"stream_agent failed: {exc}") from exc
+        events, _, final_answer = await _drain_agent_stream(job, it)
         await _emit(job, {
             "type": "result",
             "result": {
@@ -3430,39 +3470,22 @@ async def jobs_agent_contract(req: Request):
         raise HTTPException(500, f"cyllama.agents.ContractPolicy missing member {policy_name!r}")
 
     tools = _build_agent_tools(body.get("tools") or {})
+    _require_tools_for_kind("contract", tools)
     llm = _get_llm(model_path, body.get("params"))
 
     async def producer(job: Job) -> None:
-        agent = _AGENT_CONTRACT_CLS(
-            llm=llm,
-            tools=tools,
-            system_prompt=system_prompt,
-            max_iterations=max_iterations,
-            verbose=False,
-            policy=policy,
-            **rules,
-        )
-
-        events: list[dict] = []
-        final_answer: Optional[str] = None
         try:
-            it = iter(agent.stream(task))
+            it = _AGENT_STREAM_AGENT_FN(
+                "contract", llm, task,
+                tools=tools,
+                system_prompt=system_prompt,
+                max_iterations=max_iterations,
+                policy=policy,
+                **rules,
+            )
         except Exception as exc:  # noqa: BLE001
-            raise RuntimeError(f"agent.stream failed: {exc}") from exc
-
-        for ev in it:
-            etype = _agent_event_type_name(ev)
-            content = getattr(ev, "content", "")
-            metadata = getattr(ev, "metadata", {}) or {}
-            ev_dict = {
-                "event_type": etype,
-                "content": str(content) if content is not None else "",
-                "metadata": _jsonify(metadata),
-            }
-            events.append(ev_dict)
-            if etype == "ANSWER":
-                final_answer = ev_dict["content"]
-            await _emit(job, {"type": "trace", **ev_dict})
+            raise RuntimeError(f"stream_agent failed: {exc}") from exc
+        events, _, final_answer = await _drain_agent_stream(job, it)
 
         # Result includes a count of contract events so the renderer
         # can surface "3 violations" summaries without re-walking events.
@@ -3499,43 +3522,15 @@ async def contract_presets_endpoint():
 # ---------------------------------------------------------------------------
 # Phase 7+ -- plan_and_execute: a planner emits steps, an executor runs each.
 #
-# cyllama ships ``plan_and_execute`` as a synchronous helper that uses
-# ``planner.run`` / ``executor.run`` -- no incremental events. To stream
-# the trace we bypass the helper and orchestrate the same two-agent
-# pattern ourselves with ``.stream()``, tagging each event with a
-# ``source`` field ("planner" or ``step-<n>``) so the renderer can
-# render the two phases distinctly.
-#
-# The planner runs without tools (it's a reasoning-only role); the
-# executor inherits the tool catalog from the body the same way
-# ``/jobs/agent/run`` does.
+# Implementation defers entirely to ``cyllama.agents.runner.stream_agent``
+# with ``kind="plan"``. The runner yields events tagged with
+# ``metadata.source`` = ``"planner"`` for the plan-emission phase,
+# ``"step-N"`` for each executor pass, and a final ``"final"``-sourced
+# ANSWER carrying the aggregated answer plus the parsed plan list. The
+# sidecar drops the final event from the SSE trace stream (the renderer
+# already gets the same data in the ``result`` envelope) and groups
+# step-N events into the per-step breakdown the renderer needs.
 # ---------------------------------------------------------------------------
-
-
-_DEFAULT_PLANNER_PROMPT = (
-    "You are a task planner. Break the user's task into a small number "
-    "of clear, ordered steps -- one per line, no numbering or bullets. "
-    "Emit only the steps; do not include any preamble, postscript, or "
-    "explanation. Keep each step short and actionable."
-)
-
-
-def _parse_plan(answer: str) -> list[str]:
-    """Newline-split the planner's answer into step strings.
-
-    Mirrors cyllama's ``_default_plan_parser`` newline fallback (no JSON
-    handling here -- the default planner prompt asks for plain lines).
-    """
-    if not answer:
-        return []
-    out: list[str] = []
-    for line in str(answer).splitlines():
-        s = line.strip()
-        # Strip common bullets / numbering that LLMs add despite the prompt.
-        s = re.sub(r"^\s*(?:[-*+]|\d+[\.\)])\s+", "", s)
-        if s:
-            out.append(s)
-    return out
 
 
 @app.post("/jobs/agent/plan")
@@ -3575,104 +3570,75 @@ async def jobs_agent_plan(req: Request):
     except (TypeError, ValueError):
         max_steps = 10
 
-    planner_prompt = body.get("planner_system_prompt") or _DEFAULT_PLANNER_PROMPT
+    planner_prompt = body.get("planner_system_prompt") or None
     executor_prompt = body.get("executor_system_prompt") or None
     stop_on_error = bool(body.get("stop_on_error", True))
 
     tools = _build_agent_tools(body.get("tools") or {})
     llm = _get_llm(model_path, body.get("params"))
 
-    async def emit_stream(job: Job, agent, task_str: str, source: str) -> tuple[list[dict], Optional[str]]:
-        """Run ``agent.stream(task_str)``, emit each event with a source
-        tag stamped into metadata, and return the (events, answer) tuple.
-        """
-        evs: list[dict] = []
-        answer: Optional[str] = None
-        try:
-            it = iter(agent.stream(task_str))
-        except Exception as exc:  # noqa: BLE001
-            raise RuntimeError(f"agent.stream failed ({source}): {exc}") from exc
-        for ev in it:
-            etype = _agent_event_type_name(ev)
-            content = getattr(ev, "content", "")
-            metadata = getattr(ev, "metadata", {}) or {}
-            md = dict(_jsonify(metadata) or {})
-            md["source"] = source
-            ev_dict = {
-                "event_type": etype,
-                "content": str(content) if content is not None else "",
-                "metadata": md,
-            }
-            evs.append(ev_dict)
-            if etype == "ANSWER":
-                answer = ev_dict["content"]
-            await _emit(job, {"type": "trace", **ev_dict})
-        return evs, answer
-
     async def producer(job: Job) -> None:
-        # Planner: no tools, custom prompt. ReActAgent is fine for plan
-        # emission -- the constrained variant doesn't help here since the
-        # planner output is a freeform list, not a tool call.
-        planner = _AGENT_REACT_CLS(
-            llm=llm,
-            tools=[],
-            system_prompt=planner_prompt,
-            max_iterations=max_iterations,
-            verbose=False,
-        )
-        planner_events, plan_answer = await emit_stream(job, planner, task, "planner")
-        plan_steps = _parse_plan(plan_answer or "")
-        plan_steps = plan_steps[:max_steps]
-
-        if not plan_steps:
-            await _emit(job, {
-                "type": "result",
-                "result": {
-                    "events": planner_events,
-                    "answer": plan_answer or "",
-                    "plan": [],
-                    "steps": [],
-                },
-            })
-            return
-
-        step_results: list[dict] = []
-        all_events: list[dict] = list(planner_events)
-        for idx, step in enumerate(plan_steps, start=1):
-            executor = _AGENT_REACT_CLS(
-                llm=llm,
+        try:
+            it = _AGENT_STREAM_AGENT_FN(
+                "plan", llm, task,
                 tools=tools,
-                system_prompt=executor_prompt,
+                planner_system_prompt=planner_prompt,
+                executor_system_prompt=executor_prompt,
                 max_iterations=max_iterations,
+                max_steps=max_steps,
+                stop_on_error=stop_on_error,
                 verbose=False,
             )
-            evs, step_answer = await emit_stream(job, executor, step, f"step-{idx}")
-            success = step_answer is not None
-            step_results.append({
-                "index": idx,
-                "plan": step,
-                "answer": step_answer or "",
-                "success": success,
-                "events": evs,
-            })
-            all_events.extend(evs)
-            if not success and stop_on_error:
-                break
+        except Exception as exc:  # noqa: BLE001
+            raise RuntimeError(f"stream_agent failed: {exc}") from exc
 
-        # Aggregated answer: numbered list of step results. The
-        # renderer treats this as the user-facing answer; the per-step
-        # breakdown lives in ``result["steps"]`` for richer UIs.
-        final = "\n".join(
-            f"{s['index']}. {s['plan']}\n   -> {s['answer']}" for s in step_results
-        )
+        events, final_ev, _ = await _drain_agent_stream(job, it)
+
+        # The runner stamps the parsed plan list onto the final event's
+        # metadata; fall back to an empty list when the planner answer
+        # was blank (no steps to execute).
+        final_md = (final_ev or {}).get("metadata", {})
+        plan_steps: list[str] = list(final_md.get("plan") or [])
+
+        # Group ``step-N`` events into a per-step breakdown the renderer
+        # can show alongside the aggregated answer.
+        steps_by_idx: dict[int, dict] = {}
+        for e in events:
+            src = str(e["metadata"].get("source") or "")
+            if not src.startswith("step-"):
+                continue
+            try:
+                idx = int(src.split("-", 1)[1])
+            except ValueError:
+                continue
+            bucket = steps_by_idx.setdefault(idx, {
+                "index": idx,
+                "plan": "",
+                "answer": "",
+                "success": False,
+                "events": [],
+            })
+            bucket["events"].append(e)
+            if e["event_type"] == "ANSWER":
+                bucket["answer"] = e["content"]
+                bucket["success"] = True
+        for i, step_text in enumerate(plan_steps, start=1):
+            if i in steps_by_idx:
+                steps_by_idx[i]["plan"] = step_text
+        steps_list = [steps_by_idx[i] for i in sorted(steps_by_idx)]
+
+        # When the plan was empty the runner emits the planner answer as
+        # the final content (no steps to aggregate); otherwise the final
+        # is the numbered step summary it built.
+        final_answer = (final_ev or {}).get("content", "") if final_ev else ""
 
         await _emit(job, {
             "type": "result",
             "result": {
-                "events": all_events,
-                "answer": final,
+                "events": events,
+                "answer": final_answer,
                 "plan": plan_steps,
-                "steps": step_results,
+                "steps": steps_list,
             },
         })
 
@@ -3683,32 +3649,13 @@ async def jobs_agent_plan(req: Request):
 # ---------------------------------------------------------------------------
 # Phase 7+ -- ReflectionLoop: worker draft + critic accept/revise.
 #
-# As with plan_and_execute, we orchestrate the loop in the sidecar (not
-# via cyllama's ``ReflectionLoop`` wrapper) so worker and critic events
-# stream incrementally with ``metadata.source`` set to ``worker-<n>`` /
-# ``critic-<n>``. The wrapper's loop semantics are preserved: substring
-# match on ``acceptance_marker`` (case-insensitive) decides acceptance;
-# on non-acceptance the worker re-runs with a revision-template task.
+# Implementation defers to ``cyllama.agents.runner.stream_agent`` with
+# ``kind="reflect"``. The runner yields worker / critic events tagged
+# with ``metadata.source = "worker-<n>" / "critic-<n>"`` and emits a
+# final ``"final"``-sourced ANSWER whose metadata carries ``attempts``
+# and ``accepted``. The sidecar groups events into per-round buckets
+# the renderer needs and folds the final event into the result envelope.
 # ---------------------------------------------------------------------------
-
-
-_DEFAULT_CRITIC_PROMPT = (
-    "You are a careful reviewer. Read the draft answer the user supplies. "
-    "If it is correct and complete, reply with exactly 'ACCEPT' (one word). "
-    "Otherwise list the specific issues that need to be fixed in the next "
-    "revision -- be concrete and brief."
-)
-
-_DEFAULT_CRITIQUE_PREFIX = "Critique this draft:"
-
-
-def _reflection_revision(task: str, draft: str, critique: str) -> str:
-    """Same shape as cyllama.agents.composition._default_revision_template."""
-    return (
-        f"{task}\n\n"
-        f"Your previous attempt:\n{draft}\n\n"
-        f"Critic feedback (please address):\n{critique}"
-    )
 
 
 @app.post("/jobs/agent/reflect")
@@ -3752,112 +3699,74 @@ async def jobs_agent_reflect(req: Request):
         max_attempts = 3
 
     worker_prompt = body.get("worker_system_prompt") or None
-    critic_prompt = body.get("critic_system_prompt") or _DEFAULT_CRITIC_PROMPT
+    critic_prompt = body.get("critic_system_prompt") or None
     acceptance_marker = (body.get("acceptance_marker") or "ACCEPT").upper()
-    critique_prefix = body.get("critique_prefix") or _DEFAULT_CRITIQUE_PREFIX
+    critique_prefix = body.get("critique_prefix") or None
 
     tools = _build_agent_tools(body.get("tools") or {})
     llm = _get_llm(model_path, body.get("params"))
 
-    async def emit_stream(job: Job, agent, task_str: str, source: str) -> tuple[list[dict], Optional[str]]:
-        evs: list[dict] = []
-        answer: Optional[str] = None
-        try:
-            it = iter(agent.stream(task_str))
-        except Exception as exc:  # noqa: BLE001
-            raise RuntimeError(f"agent.stream failed ({source}): {exc}") from exc
-        for ev in it:
-            etype = _agent_event_type_name(ev)
-            content = getattr(ev, "content", "")
-            metadata = getattr(ev, "metadata", {}) or {}
-            md = dict(_jsonify(metadata) or {})
-            md["source"] = source
-            ev_dict = {
-                "event_type": etype,
-                "content": str(content) if content is not None else "",
-                "metadata": md,
-            }
-            evs.append(ev_dict)
-            if etype == "ANSWER":
-                answer = ev_dict["content"]
-            await _emit(job, {"type": "trace", **ev_dict})
-        return evs, answer
-
     async def producer(job: Job) -> None:
-        current_task = task
-        last_draft: str = ""
-        accepted = False
-        attempts_run = 0
-        all_events: list[dict] = []
-        per_attempt: list[dict] = []
-
-        for n in range(1, max_attempts + 1):
-            attempts_run = n
-            # Worker pass.
-            worker = _AGENT_REACT_CLS(
-                llm=llm,
+        try:
+            it = _AGENT_STREAM_AGENT_FN(
+                "reflect", llm, task,
                 tools=tools,
-                system_prompt=worker_prompt,
+                worker_system_prompt=worker_prompt,
+                critic_system_prompt=critic_prompt,
                 max_iterations=max_iterations,
+                max_attempts=max_attempts,
+                acceptance_marker=acceptance_marker,
+                critique_prefix=critique_prefix,
                 verbose=False,
             )
-            w_evs, draft = await emit_stream(job, worker, current_task, f"worker-{n}")
-            all_events.extend(w_evs)
-            if draft is None:
-                # Worker produced no ANSWER; ReflectionLoop treats this
-                # as a hard failure -- emit ERROR and stop.
-                await _emit(job, {
-                    "type": "trace",
-                    "event_type": "ERROR",
-                    "content": "worker produced no answer",
-                    "metadata": {"source": f"worker-{n}"},
-                })
-                per_attempt.append({
-                    "index": n, "draft": "", "critique": "",
-                    "accepted": False, "worker_events": w_evs, "critic_events": [],
-                })
-                break
-            last_draft = draft
+        except Exception as exc:  # noqa: BLE001
+            raise RuntimeError(f"stream_agent failed: {exc}") from exc
 
-            # Critic pass.
-            critic = _AGENT_REACT_CLS(
-                llm=llm,
-                tools=[],  # critic has no tools by default
-                system_prompt=critic_prompt,
-                max_iterations=max_iterations,
-                verbose=False,
-            )
-            critic_task = f"{critique_prefix}\n\n{draft}"
-            c_evs, critic_answer = await emit_stream(job, critic, critic_task, f"critic-{n}")
-            all_events.extend(c_evs)
+        events, final_ev, _ = await _drain_agent_stream(job, it)
 
-            this_attempt = {
-                "index": n,
-                "draft": draft,
-                "critique": critic_answer or "",
+        final_md = (final_ev or {}).get("metadata", {})
+        attempts_run = int(final_md.get("attempts") or 0)
+        accepted = bool(final_md.get("accepted"))
+        last_draft = (final_ev or {}).get("content", "") if final_ev else ""
+
+        # Group worker-N / critic-N events into round buckets so the
+        # renderer can show each draft/critique pair distinctly.
+        rounds_by_idx: dict[int, dict] = {}
+        for e in events:
+            src = str(e["metadata"].get("source") or "")
+            if src.startswith("worker-"):
+                phase, list_key, ans_key = "worker", "worker_events", "draft"
+            elif src.startswith("critic-"):
+                phase, list_key, ans_key = "critic", "critic_events", "critique"
+            else:
+                continue
+            try:
+                idx = int(src.split("-", 1)[1])
+            except ValueError:
+                continue
+            bucket = rounds_by_idx.setdefault(idx, {
+                "index": idx,
+                "draft": "",
+                "critique": "",
                 "accepted": False,
-                "worker_events": w_evs,
-                "critic_events": c_evs,
-            }
-
-            if critic_answer and acceptance_marker in critic_answer.upper():
-                this_attempt["accepted"] = True
-                accepted = True
-                per_attempt.append(this_attempt)
-                break
-
-            per_attempt.append(this_attempt)
-            # Not accepted -- build the next worker task.
-            current_task = _reflection_revision(task, draft, critic_answer or "")
+                "worker_events": [],
+                "critic_events": [],
+            })
+            bucket[list_key].append(e)
+            if e["event_type"] == "ANSWER":
+                bucket[ans_key] = e["content"]
+        if accepted and rounds_by_idx:
+            rounds_by_idx[max(rounds_by_idx)]["accepted"] = True
+        rounds_list = [rounds_by_idx[i] for i in sorted(rounds_by_idx)]
 
         await _emit(job, {
             "type": "result",
             "result": {
-                "events": all_events,
+                "events": events,
                 "answer": last_draft,
                 "accepted": accepted,
                 "attempts": attempts_run,
-                "rounds": per_attempt,
+                "rounds": rounds_list,
             },
         })
 
