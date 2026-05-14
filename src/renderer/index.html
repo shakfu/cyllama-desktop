@@ -134,10 +134,10 @@
             <div id="composerAttachments" class="composer-attachments" hidden></div>
             <textarea id="prompt" rows="1" placeholder="Send a message to the model..." autofocus></textarea>
             <div class="composer-row">
-              <button id="attach" class="composer-attach-btn" type="button" title="Attach image (multimodal)" hidden>
+              <button id="attach" class="composer-attach-btn" type="button" title="Attach file (image or document)" hidden>
                 <svg><use href="#i-paperclip"/></svg>
               </button>
-              <input id="attachInput" type="file" accept="image/png,image/jpeg,image/webp,image/gif,image/bmp" multiple hidden />
+              <input id="attachInput" type="file" accept="image/png,image/jpeg,image/webp,image/gif,image/bmp,.pdf,.txt,.md,.markdown,.json,.jsonl" multiple hidden />
               <span class="hint">Enter to send &middot; Shift+Enter for newline</span>
               <div class="composer-spacer"></div>
               <button id="send" class="send-btn" type="button" title="Send">

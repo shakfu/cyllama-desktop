@@ -271,6 +271,29 @@ _TOOL_SEARCH_WIKIPEDIA = _resolve_attr((
     ("cyllama.agents.tools", "search_wikipedia"),
 ))
 
+# Document loaders. ``load_document`` covers plain-text formats
+# (txt / md / markdown / csv / json / etc.) with no extra deps; PDF
+# routes through ``PDFLoader``'s backend registry (pypdf bundled,
+# docling/pymupdf/pdfminer opt-in by the user). The
+# ``available_pdf_backends`` / ``pdf_backend_info`` helpers feed
+# ``/info.features.pdf_backends`` so the renderer can gate the
+# composer attachment UI.
+_LOAD_DOCUMENT_FN = _resolve_attr((
+    ("cyllama.rag.loaders", "load_document"),
+))
+_PDFLOADER_CLS = _resolve_attr((
+    ("cyllama.rag.loaders", "PDFLoader"),
+))
+_AVAILABLE_PDF_BACKENDS_FN = _resolve_attr((
+    ("cyllama.rag.loaders", "available_pdf_backends"),
+))
+_PDF_BACKEND_INFO_FN = _resolve_attr((
+    ("cyllama.rag.loaders", "pdf_backend_info"),
+))
+_PDF_BACKENDS_REGISTRY = _resolve_attr((
+    ("cyllama.rag.loaders", "_PDF_BACKENDS"),
+))
+
 # Phase 8 -- OpenAI-compatible server. Both flavours (embedded C++
 # server vs. pure-Python http.server-based one) are surfaced; the
 # renderer picks. ``ServerConfig`` is shared between them.
@@ -317,6 +340,45 @@ _MTMD_IMAGE_ANALYZER = _resolve_attr((
 # for the chat path to actually use them. Until cyllama threads these
 # through ``LLM.chat()``, the flags are False even when the classes
 # exist, which is correct -- the UI hides rows that wouldn't take effect.
+def _probe_pdf_backends() -> list[dict]:
+    """Walk cyllama's PDF backend registry and return JSON-friendly info.
+
+    Each entry: ``{name, available, capabilities, install_hint}``.
+    Order matches cyllama's ``_PDF_BACKEND_PRIORITY`` when accessible
+    (so the renderer can show "best-first" in a picker); falls back to
+    registry-insertion order otherwise. Returns ``[]`` for older
+    cyllama bundles that don't expose the registry yet.
+    """
+    if _PDF_BACKENDS_REGISTRY is None or _PDF_BACKEND_INFO_FN is None:
+        return []
+    try:
+        names = list(_PDF_BACKENDS_REGISTRY.keys())
+        priority = _resolve_attr((("cyllama.rag.loaders", "_PDF_BACKEND_PRIORITY"),))
+        if priority:
+            # Stable sort: priority order first, then any unknown
+            # backends appended in registry order.
+            seen = set(priority)
+            names = list(priority) + [n for n in names if n not in seen]
+    except Exception:
+        return []
+    out: list[dict] = []
+    for name in names:
+        try:
+            info = _PDF_BACKEND_INFO_FN(name)
+        except Exception:
+            continue
+        # ``pdf_backend_info`` already returns name / available /
+        # capabilities / install_hint -- normalise types defensively
+        # in case cyllama starts returning frozensets etc.
+        out.append({
+            "name": str(info.get("name", name)),
+            "available": bool(info.get("available", False)),
+            "capabilities": sorted(info.get("capabilities") or []),
+            "install_hint": str(info.get("install_hint", "")),
+        })
+    return out
+
+
 def _probe_devices() -> list[dict]:
     """Best-effort enumeration of ggml backend devices.
 
@@ -407,6 +469,16 @@ _FEATURE_FLAGS: dict[str, bool] = {
     # search_wikipedia is opt-in (network) -- renderer hides the toggle
     # when the cyllama bundle doesn't provide the @tool.
     "agents.search_wikipedia": _TOOL_SEARCH_WIKIPEDIA is not None,
+    # Composer document attachment. ``documents.extract`` covers the
+    # text-format fast path (txt / md / etc.) which doesn't need a PDF
+    # backend at all. ``documents.pdf`` is true only when at least one
+    # PDF backend is installed -- renderer disables the PDF drop
+    # affordance otherwise, with the install_hint as a tooltip.
+    "documents.extract": _LOAD_DOCUMENT_FN is not None,
+    "documents.pdf": bool(
+        _AVAILABLE_PDF_BACKENDS_FN is not None
+        and _AVAILABLE_PDF_BACKENDS_FN()
+    ),
     "agents.rag_tool": _AGENT_RAG_AS_TOOL_FN is not None,
     "agents.memory": _AGENT_SEMANTIC_MEMORY_CLS is not None,
     "workflow": (
@@ -790,6 +862,10 @@ _INFO_CACHE: dict = {
     "devices": list(_DEVICES),
     # Phase 8: which OpenAI-server flavours this cyllama build offers.
     "server_kinds": list(_SERVER_KINDS_AVAILABLE),
+    # Composer document attachment: per-backend info for the renderer
+    # to surface "install <foo> for richer extraction" affordances.
+    # Empty when the installed cyllama predates the loader refactor.
+    "pdf_backends": _probe_pdf_backends(),
 }
 
 
@@ -1303,6 +1379,142 @@ def chat_upload_serve(name: str):
     if not target.is_file():
         raise HTTPException(404, "upload not found")
     return FileResponse(str(target))
+
+
+# Composer document attachment. v1 covers extensions cyllama's
+# ``load_document`` natively dispatches on -- text formats need no
+# extra deps; PDF routes through the backend registry (pypdf bundled).
+_DOC_ALLOWED_EXTS = {".pdf", ".txt", ".md", ".markdown", ".json", ".jsonl"}
+_DOC_UPLOAD_MAX_BYTES = 32 * 1024 * 1024  # 32 MiB raw cap
+_DOC_EXTRACT_MAX_CHARS = 200_000  # post-extract cap to keep context safe
+
+
+def _extract_document_text(path: Path, *, display_name: Optional[str] = None) -> dict:
+    """Run a path through cyllama's loaders and shape the result.
+
+    ``display_name`` overrides the ``filename`` field in the response
+    -- callers serving uploads stash files under a uuid name in
+    ``UPLOADS_DIR`` but want to surface the user's original filename
+    in the result.
+
+    Returns ``{text, filename, filetype, backend, char_count,
+    truncated, pages}``. PDFs surface ``backend`` (the cyllama
+    ``PDFLoader`` records it in ``Document.metadata["backend"]``);
+    non-PDFs leave it as ``""``. ``pages`` is the document count
+    cyllama returned -- 1 for monolithic loaders, page count for
+    PDFs when the backend supports per-page splitting.
+
+    Raises ``HTTPException`` for the renderer-actionable failure
+    modes (unsupported extension, missing PDF backend, parse error).
+    """
+    if _LOAD_DOCUMENT_FN is None:
+        raise HTTPException(
+            501,
+            "cyllama.rag.loaders.load_document not available in this cyllama build",
+        )
+    suffix = path.suffix.lower()
+    if suffix not in _DOC_ALLOWED_EXTS:
+        raise HTTPException(415, f"unsupported document type: {suffix or '(none)'}")
+    if suffix == ".pdf":
+        # Surface the "install a PDF backend" path as a 501 with the
+        # hint cyllama provides for each registered backend. Renderer
+        # can show the hint as a toast / settings prompt.
+        installed = (
+            _AVAILABLE_PDF_BACKENDS_FN() if _AVAILABLE_PDF_BACKENDS_FN else []
+        )
+        if not installed:
+            hints = ", ".join(
+                f"{b['name']} ({b['install_hint']})"
+                for b in _probe_pdf_backends() if b["install_hint"]
+            ) or "pip install pypdf"
+            raise HTTPException(
+                501,
+                f"no PDF backend installed; install one of: {hints}",
+            )
+    try:
+        docs = _LOAD_DOCUMENT_FN(str(path))
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(500, f"document extraction failed: {exc}") from exc
+    text = "\n\n".join(d.text for d in docs if getattr(d, "text", ""))
+    truncated = False
+    if len(text) > _DOC_EXTRACT_MAX_CHARS:
+        text = text[:_DOC_EXTRACT_MAX_CHARS]
+        truncated = True
+    # ``backend`` is stamped on every PDF Document's metadata by
+    # cyllama (loaders.py:952). Non-PDF loaders don't set it, so
+    # default to "" for those.
+    backend = ""
+    for d in docs:
+        b = (getattr(d, "metadata", {}) or {}).get("backend")
+        if b:
+            backend = str(b)
+            break
+    return {
+        "filename": display_name or path.name,
+        "filetype": suffix.lstrip("."),
+        "backend": backend,
+        "text": text,
+        "char_count": len(text),
+        "truncated": truncated,
+        "pages": len(docs),
+    }
+
+
+@app.post("/documents/extract")
+async def documents_extract(req: Request):
+    """Extract text from an uploaded document for inlining into a chat.
+
+    Body: multipart/form-data with a single ``file`` field. Supported
+    extensions: .pdf / .txt / .md / .markdown / .json / .jsonl.
+
+    Response: ``{filename, filetype, backend, text, char_count,
+    truncated, pages}``. ``backend`` names the cyllama PDF backend that
+    extracted the text (empty for non-PDF). ``truncated`` is true when
+    the extracted text exceeded the sidecar cap and was clipped --
+    renderer should warn the user before sending it as context.
+
+    Failure shapes:
+      400 -- missing ``file`` field
+      413 -- file body exceeds ``_DOC_UPLOAD_MAX_BYTES``
+      415 -- unsupported extension
+      501 -- ``.pdf`` dropped but no PDF backend installed
+      500 -- backend raised during extraction
+    """
+    form = await req.form()
+    upload = form.get("file")
+    if upload is None:
+        raise HTTPException(400, "file field required")
+    raw_name = (getattr(upload, "filename", "") or "document.bin").strip()
+    suffix = Path(raw_name).suffix.lower()
+    if suffix not in _DOC_ALLOWED_EXTS:
+        raise HTTPException(415, f"unsupported document type: {suffix or '(none)'}")
+
+    body = bytearray()
+    while True:
+        chunk = await upload.read(64 * 1024)
+        if not chunk:
+            break
+        body.extend(chunk)
+        if len(body) > _DOC_UPLOAD_MAX_BYTES:
+            raise HTTPException(413, f"upload exceeds {_DOC_UPLOAD_MAX_BYTES} bytes")
+
+    # cyllama's loaders take a path -- stash the body in UPLOADS_DIR
+    # under a uuid name so the extraction call has something to read.
+    # The file lingers in uploads (cleaned up by the existing image
+    # eviction TTL) so a follow-up reference (e.g. the renderer wanting
+    # to redisplay the doc on chat reload) can hit it.
+    upload_id = uuid.uuid4().hex
+    dest = (UPLOADS_DIR / f"{upload_id}{suffix}").resolve()
+    try:
+        dest.relative_to(UPLOADS_DIR.resolve())
+    except ValueError:
+        raise HTTPException(400, "path escape")
+    with open(dest, "wb") as f:
+        f.write(bytes(body))
+
+    out = _extract_document_text(dest, display_name=raw_name)
+    out["path"] = str(dest)
+    return out
 
 
 def _latest_user_image_path(messages: list[dict]) -> Optional[str]:

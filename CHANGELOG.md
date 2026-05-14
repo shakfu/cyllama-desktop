@@ -6,6 +6,59 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added (composer document attachment -- PDF / text / markdown)
+- **Drop any of `.pdf` / `.txt` / `.md` / `.markdown` / `.json`
+  / `.jsonl` on the composer card** (or pick via the paperclip
+  button) to attach a document to the next message. The sidecar
+  extracts the text and the renderer inlines it as a
+  ``[Document: foo.pdf]\n<content>`` block into the message
+  ``content`` the model sees. Image attachment (already shipped)
+  works unchanged alongside.
+- **Paperclip button surfaces on either path** -- previously
+  gated on multimodal + mmproj, now also surfaces when
+  ``features["documents.extract"]`` is true. Tooltip names the
+  attachment types the current config supports.
+- **Drag-and-drop on the composer** (`drag-active` outline
+  highlight while hovering). Files-only filter; rejects text
+  drags and other non-file payloads.
+- **Folded chips in chat render**: instead of dumping a 50k-char
+  PDF into the user-message body, each attached doc renders as a
+  collapsed chip (filetype badge · filename · char count). The
+  expanded chip shows metadata only (backend, page count, file
+  path under ``UPLOADS_DIR``, "Full content was inlined into the
+  message sent to the model."); the full text is in the message
+  ``content`` field, not duplicated in the chip body. Model-facing
+  context unchanged; regenerate replays the composed content
+  verbatim.
+- **Per-message persisted shape** for docs:
+  ``message.content`` is the composed string (typed + inlined
+  docs), ``message.prompt`` is the typed-only portion the chat
+  log displays, ``message.documents`` is metadata only
+  (``{filename, filetype, char_count, truncated, backend,
+  pages, path}``, no ``text`` field). Old chats from before this
+  change have neither ``prompt`` nor ``documents`` and fall back
+  to rendering ``content`` directly -- no regression.
+- **New sidecar endpoint `POST /documents/extract`** (multipart
+  ``file`` field). Returns ``{filename, filetype, backend, text,
+  char_count, truncated, pages, path}``. v1 caps: 32 MiB raw
+  upload, 200k chars extracted with a ``truncated`` flag.
+  Failure modes: 400 (missing file), 413 (oversize), 415
+  (unsupported extension), 501 (.pdf dropped but no PDF backend
+  installed; surfaces the cyllama install_hint).
+- **New `/info.features.documents.{extract,pdf}` capability
+  flags** and **`/info.pdf_backends`** array with per-backend
+  ``{name, available, capabilities, install_hint}`` shaped from
+  cyllama's registry. Renderer uses ``documents.extract`` to gate
+  the paperclip; ``documents.pdf`` and the backend list will gate
+  a future "install pypdf for PDF support" affordance.
+- **Sidecar dependency: `pypdf>=4.0`** added to
+  `python-sidecar/pyproject.toml`. Bundled builds
+  (`scripts/build-python-env.sh`) install it via the existing
+  ``pip install ./python-sidecar`` step; smoke test extended to
+  import it. Pure Python, MIT licensed, first in cyllama's
+  ``_PDF_BACKEND_PRIORITY``. Richer extraction (docling for OCR
+  / tables) is opt-in by the user via a future Settings action.
+
 ### Changed (agent jobs consolidated behind `cyllama.agents.runner.stream_agent`)
 - **All five `/jobs/agent/*` endpoints now dispatch through
   `cyllama.agents.runner.stream_agent(kind, ...)`** -- the

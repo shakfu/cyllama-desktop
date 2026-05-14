@@ -411,6 +411,28 @@ let pendingAttachments = [];
 // chat-log replay (or the regenerate path) reuses the same blob.
 const attachmentBlobCache = new Map();
 
+// Pending document attachments for the next send. Each entry is the
+// /documents/extract response: ``{filename, filetype, backend, text,
+// char_count, truncated, pages, path}``. Cleared on commit. Unlike
+// images, documents don't persist on user messages -- their text is
+// inlined into the prompt as ``[Document: foo.pdf]\n<text>`` blocks
+// at send time, becoming part of the message ``content``. Future
+// regenerations see the same context without us having to re-fetch
+// the file.
+let pendingDocuments = [];
+
+// Extension -> route. Image extensions go through /chat/upload (the
+// multimodal/MTMD path); document extensions go through
+// /documents/extract and are inlined as prompt text. Source of truth
+// for the composer's drag-drop affordance and the file picker accept.
+const IMAGE_EXTS = new Set([".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"]);
+const DOC_EXTS = new Set([".pdf", ".txt", ".md", ".markdown", ".json", ".jsonl"]);
+
+function fileExt(name) {
+  const i = (name || "").lastIndexOf(".");
+  return i >= 0 ? name.slice(i).toLowerCase() : "";
+}
+
 function getMmprojPath() {
   try { return localStorage.getItem(MMPROJ_PATH_KEY) || ""; } catch { return ""; }
 }
@@ -458,10 +480,32 @@ async function uploadAttachmentFile(file) {
   return res.json();
 }
 
+async function extractDocumentFile(file) {
+  // Multipart POST to /documents/extract. Returns the extracted text
+  // shape ({filename, filetype, backend, text, char_count, truncated,
+  // pages, path}). The sidecar caps body at 32 MiB and extracted text
+  // at 200k chars (sets truncated=true when clipped).
+  const url = await cyllamaSidecar.sidecarUrl("/documents/extract");
+  const info = await cyllamaSidecar.getSidecarInfo();
+  const fd = new FormData();
+  fd.append("file", file);
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "authorization": `Bearer ${info.token}` },
+    body: fd,
+  });
+  if (!res.ok) {
+    const detail = await res.text().catch(() => "");
+    throw new Error(`extract failed: ${res.status} ${detail}`);
+  }
+  return res.json();
+}
+
 function renderPendingAttachments() {
   const host = document.getElementById("composerAttachments");
   if (!host) return;
-  if (!pendingAttachments.length) {
+  const empty = !pendingAttachments.length && !pendingDocuments.length;
+  if (empty) {
     host.replaceChildren();
     host.hidden = true;
     return;
@@ -489,7 +533,90 @@ function renderPendingAttachments() {
     card.appendChild(remove);
     host.appendChild(card);
   });
+  pendingDocuments.forEach((d, i) => {
+    // Doc chip: filetype badge + filename + char count. Tooltip
+    // surfaces the chosen PDF backend + truncation flag so the user
+    // can tell when context was clipped.
+    const card = document.createElement("div");
+    card.className = "attachment-chip attachment-chip-doc";
+    const badge = document.createElement("span");
+    badge.className = "attachment-doc-badge";
+    badge.textContent = (d.filetype || "doc").toUpperCase();
+    const name = document.createElement("span");
+    name.className = "attachment-doc-name";
+    name.textContent = d.filename || "(document)";
+    const meta = document.createElement("span");
+    meta.className = "attachment-doc-meta";
+    const k = Math.round((d.char_count || 0) / 1000);
+    meta.textContent = d.truncated ? `${k}k chars (truncated)` : `${k}k chars`;
+    const titleBits = [d.filename || "(document)"];
+    if (d.backend) titleBits.push(`backend: ${d.backend}`);
+    if (d.pages && d.pages > 1) titleBits.push(`${d.pages} pages`);
+    if (d.truncated) titleBits.push("text was truncated to fit context cap");
+    card.title = titleBits.join(" · ");
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "attachment-remove";
+    remove.title = "Remove";
+    remove.innerHTML = '<svg><use href="#i-x"/></svg>';
+    remove.addEventListener("click", () => {
+      pendingDocuments.splice(i, 1);
+      renderPendingAttachments();
+    });
+    card.appendChild(badge);
+    card.appendChild(name);
+    card.appendChild(meta);
+    card.appendChild(remove);
+    host.appendChild(card);
+  });
 }
+
+function renderMessageDocuments(documents, host) {
+  // Render the per-message doc list as folded chips so a 50k-char
+  // inlined doc doesn't bury the conversation. Click toggles a
+  // collapsible region; expanded view shows metadata only -- the full
+  // text isn't redisplayed because (a) it's already in the message's
+  // ``content`` field that the model saw, (b) the user typically
+  // attached the doc to give the model context, not to re-read it
+  // themselves. Future enhancement: chip click could open the original
+  // file via ``d.path`` (still in UPLOADS_DIR).
+  if (!Array.isArray(documents) || !documents.length) return;
+  const strip = document.createElement("div");
+  strip.className = "msg-documents";
+  for (const d of documents) {
+    const det = document.createElement("details");
+    det.className = "msg-doc-chip";
+    const sum = document.createElement("summary");
+    const badge = document.createElement("span");
+    badge.className = "msg-doc-badge";
+    badge.textContent = (d.filetype || "doc").toUpperCase();
+    const name = document.createElement("span");
+    name.className = "msg-doc-name";
+    name.textContent = d.filename || "(document)";
+    const meta = document.createElement("span");
+    meta.className = "msg-doc-meta";
+    const k = Math.round((d.char_count || 0) / 1000);
+    meta.textContent = d.truncated ? `${k}k chars · truncated` : `${k}k chars`;
+    sum.appendChild(badge);
+    sum.appendChild(name);
+    sum.appendChild(meta);
+    det.appendChild(sum);
+
+    const body = document.createElement("div");
+    body.className = "msg-doc-body";
+    const lines = [];
+    if (d.backend) lines.push(`Backend: ${d.backend}`);
+    if (d.pages && d.pages > 1) lines.push(`Pages: ${d.pages}`);
+    if (d.path) lines.push(`Path: ${d.path}`);
+    lines.push("Full content was inlined into the message sent to the model.");
+    body.textContent = lines.join("\n");
+    det.appendChild(body);
+
+    strip.appendChild(det);
+  }
+  host.appendChild(strip);
+}
+
 
 function renderMessageAttachments(images, host) {
   // ``images`` is the persisted ``[{id, name, url, path}, ...]`` list.
@@ -511,9 +638,23 @@ async function onAttachFiles(files) {
   if (!files || !files.length) return;
   const errors = [];
   for (const f of files) {
+    const ext = fileExt(f.name);
     try {
-      const upload = await uploadAttachmentFile(f);
-      pendingAttachments.push(upload);
+      if (IMAGE_EXTS.has(ext)) {
+        // Image: requires multimodal model + mmproj. Surface the
+        // user-actionable mismatch as a clear error rather than
+        // letting the upload succeed but the chat silently drop it.
+        if (!getMmprojPath()) {
+          throw new Error("no mmproj pinned -- attach images via the Models tab first");
+        }
+        const upload = await uploadAttachmentFile(f);
+        pendingAttachments.push(upload);
+      } else if (DOC_EXTS.has(ext)) {
+        const doc = await extractDocumentFile(f);
+        pendingDocuments.push(doc);
+      } else {
+        throw new Error(`unsupported file type: ${ext || "(none)"}`);
+      }
     } catch (e) {
       errors.push(`${f.name}: ${e.message}`);
     }
@@ -522,13 +663,15 @@ async function onAttachFiles(files) {
   renderPendingAttachments();
 }
 
-function makeExchange(prompt, images) {
+function makeExchange(displayText, images, documents, composedContent) {
   dismissEmpty();
   const wrap = document.createElement("article");
   wrap.className = "exchange";
-  // Stash the raw user prompt on the DOM so regenerate can re-send it
-  // without re-parsing the rendered markdown.
-  wrap.dataset.userPrompt = prompt;
+  // ``composedContent`` is what the model actually saw (typed prompt +
+  // inlined document text). Regenerate replays exactly that.
+  // ``displayText`` is the typed-only portion the chat log shows.
+  // When no docs are attached the two are identical.
+  wrap.dataset.userPrompt = composedContent != null ? composedContent : displayText;
 
   const userBlock = document.createElement("div");
   userBlock.className = "user-block";
@@ -537,8 +680,10 @@ function makeExchange(prompt, images) {
   userRole.textContent = "You";
   const userText = document.createElement("div");
   userText.className = "user-text";
-  // Render the user prompt through markdown + KaTeX (one-shot).
-  renderStatic(userText, prompt);
+  // Render only the typed portion as visible text -- doc bodies live
+  // inside their folded chips, not in the message body, so a 50k-char
+  // PDF doesn't push the conversation off-screen.
+  renderStatic(userText, displayText);
   userBlock.appendChild(userRole);
   // Multimodal attachments sit between the role label and the text so
   // the visual order matches what the model "sees" -- image first,
@@ -546,6 +691,10 @@ function makeExchange(prompt, images) {
   if (Array.isArray(images) && images.length) {
     renderMessageAttachments(images, userBlock);
     try { wrap.dataset.userImages = JSON.stringify(images); } catch {}
+  }
+  if (Array.isArray(documents) && documents.length) {
+    renderMessageDocuments(documents, userBlock);
+    try { wrap.dataset.userDocuments = JSON.stringify(documents); } catch {}
   }
   userBlock.appendChild(userText);
 
@@ -1077,19 +1226,30 @@ async function applySupportedParams() {
   agentsPane.applyVisibility(features);
   batchPane.applyVisibility(features);
   applyAgentsPaneVisibility(features);
-  // Composer paperclip is gated on the multimodal capability AND a
-  // pinned mmproj path. The /info.features check alone isn't enough
-  // -- attaching an image without an mmproj would 200 OK but the
-  // sidecar would route through llm.chat() and silently drop the
-  // attachment, so we hide the button until both pieces are in place.
+  // Composer paperclip surfaces when EITHER attachment path is
+  // wired: multimodal images (multimodal + mmproj pinned), or
+  // document extraction (``documents.extract``). Hidden when
+  // neither -- there's nothing useful to attach. See
+  // ``applyAttachButtonVisibility`` for the full gating + tooltip.
   applyAttachButtonVisibility(features);
 }
 
 function applyAttachButtonVisibility(features) {
   const btn = document.getElementById("attach");
   if (!btn) return;
-  const ok = !!(features && features.multimodal) && !!getMmprojPath();
-  btn.hidden = !ok;
+  // Paperclip enables when EITHER path is wired: multimodal images
+  // (needs mmproj pinned), OR document extraction (always-on once
+  // cyllama exposes the loaders). Hidden when neither -- there's no
+  // useful attachment to make.
+  const canImage = !!(features && features.multimodal) && !!getMmprojPath();
+  const canDoc = !!(features && features["documents.extract"]);
+  btn.hidden = !(canImage || canDoc);
+  // Tooltip surfaces what's currently supported so the user knows
+  // which file types will succeed.
+  const supports = [];
+  if (canImage) supports.push("images");
+  if (canDoc) supports.push("documents (.pdf, .md, .txt, .json)");
+  if (supports.length) btn.title = `Attach ${supports.join(" or ")}`;
 }
 
 // Agents pane nav-rail button surfaces when /info.features.agents is
@@ -1488,17 +1648,27 @@ function replayMessages(msgs) {
 
     const wrap = document.createElement("article");
     wrap.className = "exchange";
+    // Regenerate replays the composed content (what the model saw);
+    // chat log shows only the typed-only prompt + folded doc chips.
+    // Old chats persisted before the docs feature have no ``prompt``
+    // / ``documents`` fields -- fall back to ``content`` for display.
     wrap.dataset.userPrompt = u.content;
+    const hasDocs = Array.isArray(u.documents) && u.documents.length;
+    const displayText = hasDocs ? (u.prompt || "") : u.content;
 
     // user
     const ub = document.createElement("div"); ub.className = "user-block";
     const ur = document.createElement("div"); ur.className = "role-label"; ur.textContent = "You";
     const ut = document.createElement("div"); ut.className = "user-text";
-    renderStatic(ut, u.content);
+    renderStatic(ut, displayText);
     ub.appendChild(ur);
     if (Array.isArray(u.images) && u.images.length) {
       renderMessageAttachments(u.images, ub);
       try { wrap.dataset.userImages = JSON.stringify(u.images); } catch {}
+    }
+    if (hasDocs) {
+      renderMessageDocuments(u.documents, ub);
+      try { wrap.dataset.userDocuments = JSON.stringify(u.documents); } catch {}
     }
     ub.appendChild(ut);
     wrap.appendChild(ub);
@@ -1753,6 +1923,40 @@ window.addEventListener("mmproj:changed", () => {
     applyAttachButtonVisibility(info && info.features);
   }).catch(() => applyAttachButtonVisibility({ multimodal: true }));
 });
+
+// Composer drag-drop: accept image + document drops anywhere on the
+// composer card. dragover must be cancelled for drop to fire (default
+// action would refuse). drag-active class toggles a subtle highlight
+// without rebuilding the card layout. Files are routed through the
+// same per-extension dispatch as the paperclip.
+const composerCard = document.querySelector(".composer-card");
+if (composerCard) {
+  let dragDepth = 0;
+  const setDragActive = (on) => composerCard.classList.toggle("drag-active", on);
+  composerCard.addEventListener("dragenter", (e) => {
+    if (!e.dataTransfer || !Array.from(e.dataTransfer.types).includes("Files")) return;
+    e.preventDefault();
+    dragDepth += 1;
+    setDragActive(true);
+  });
+  composerCard.addEventListener("dragover", (e) => {
+    if (!e.dataTransfer || !Array.from(e.dataTransfer.types).includes("Files")) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "copy";
+  });
+  composerCard.addEventListener("dragleave", () => {
+    dragDepth = Math.max(0, dragDepth - 1);
+    if (dragDepth === 0) setDragActive(false);
+  });
+  composerCard.addEventListener("drop", async (e) => {
+    if (!e.dataTransfer || !Array.from(e.dataTransfer.types).includes("Files")) return;
+    e.preventDefault();
+    dragDepth = 0;
+    setDragActive(false);
+    const files = Array.from(e.dataTransfer.files || []);
+    if (files.length) await onAttachFiles(files);
+  });
+}
 
 sendBtn.addEventListener("click", () => {
   if (inFlight) {
@@ -2237,10 +2441,10 @@ async function sendContractAgent(task, rawPrompt) {
 }
 
 async function send() {
-  const prompt = promptEl.value.trim();
-  if (!prompt) return;
+  const typedPrompt = promptEl.value.trim();
+  if (!typedPrompt && !pendingDocuments.length) return;
 
-  const cmd = slash.parse(prompt, SLASH_NAMES);
+  const cmd = slash.parse(typedPrompt, SLASH_NAMES);
   if (cmd) {
     const entry = getSlashCommand(cmd.name);
     if (entry) return entry.run(cmd.body, cmd.raw);
@@ -2249,24 +2453,59 @@ async function send() {
   if (!modelPath) { errorLine("Pick a model first"); return; }
   if (!sidecar)   { errorLine("Sidecar not connected"); return; }
 
+  // Inline any attached documents into the prompt as
+  // ``[Document: filename]\n<content>`` blocks before the user's
+  // typed text. The composed string becomes the model-facing message
+  // ``content`` so future regenerations see exactly the same context.
+  // The visible chat log renders only ``typedPrompt`` plus folded doc
+  // chips -- a 50k-char PDF doesn't bury the conversation, but the
+  // model still sees it verbatim.
+  const docBlocks = pendingDocuments.map((d) => {
+    const header = `[Document: ${d.filename || "untitled"}]`;
+    return `${header}\n${d.text || ""}`;
+  });
+  const composed = docBlocks.length
+    ? `${docBlocks.join("\n\n")}${typedPrompt ? "\n\n" + typedPrompt : ""}`
+    : typedPrompt;
+
   promptEl.value = "";
   autoGrow();
   stickyScroll = true;
-  bumpTokens(prompt);
+  bumpTokens(composed);
 
   // Snapshot the current attachments so we can append them to this
   // turn's user message and clear the composer strip atomically.
   const turnImages = pendingAttachments.slice();
+  // Strip the bulky ``text`` field from the persisted doc list -- the
+  // full text already lives in ``content``, and we don't redisplay it
+  // in the chip body. Keeping metadata only avoids doubling the chat
+  // history's on-disk size for every doc attachment.
+  const turnDocs = pendingDocuments.map((d) => ({
+    filename: d.filename,
+    filetype: d.filetype,
+    char_count: d.char_count,
+    truncated: !!d.truncated,
+    backend: d.backend || "",
+    pages: d.pages || 1,
+    path: d.path || "",
+  }));
   pendingAttachments = [];
+  pendingDocuments = [];
   renderPendingAttachments();
 
   // Append the user turn to history before rendering so the outgoing
   // payload reflects the new turn even if the request fails.
-  const userMsg = { role: "user", content: prompt };
+  // ``prompt`` is the typed-only portion for display; ``content`` is
+  // the composed string the model sees.
+  const userMsg = { role: "user", content: composed };
   if (turnImages.length) userMsg.images = turnImages;
+  if (turnDocs.length) {
+    userMsg.documents = turnDocs;
+    userMsg.prompt = typedPrompt;
+  }
   messages.push(userMsg);
 
-  const exchange = makeExchange(prompt, turnImages);
+  const exchange = makeExchange(typedPrompt || " ", turnImages, turnDocs, composed);
   const { asstText } = exchange;
   const render = createIncrementalRenderer(asstText);
 

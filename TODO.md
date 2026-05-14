@@ -44,13 +44,52 @@ or move them to `CHANGELOG.md` under `[Unreleased]`.
 
 ## Multimodal
 
-- [ ] Voice prompts: capture audio in the composer, run Whisper,
-      drop transcribed text into the prompt textarea.
-- [ ] Audio decode fallback for Transcribe: shell out to `ffmpeg`
-      when input is non-WAV. Detect ffmpeg at probe time, surface
-      via `/info.features.audio_decode`.
-- [ ] Streaming-token multimodal answers (`VisionLanguageChat`
-      generator) so long answers don't block.
+### Composer attachments + speech I/O (priority-sorted)
+
+Composer-level UX. The underlying primitives -- Whisper transcription,
+MTMD vision, RAG ingest -- already ship in dedicated panes; the gap is
+in-composer plumbing. Image attachment already works via the
+paperclip button when an MTMD model + mmproj are loaded; everything
+else below is still missing.
+
+- [ ] **1. Document attachment in composer** (.pdf, .md, .txt,
+      .docx). Drop into the messagebox, sidecar parses to text
+      via the existing `load_document` primitive in cyllama.rag
+      (no collection persisted -- one-shot extraction). Resulting
+      text inlined as a ``[Document: foo.pdf]\n<content>`` block
+      before the user prompt. Decision needed for files that
+      would blow the context window (~10k+ tokens): truncate with
+      a warning, or fall back to an ephemeral in-memory RAG
+      collection scoped to the chat. Highest user-value gap;
+      "summarise this PDF" is the dominant request once a chat
+      flow is established.
+- [ ] **2. Voice prompts** (microphone button in composer).
+      Record via the renderer's MediaRecorder API, ship to the
+      sidecar via the existing transcribe path, drop the text
+      into the prompt textarea on completion. Red-dot + duration
+      indicator while capturing; Esc cancels. Whisper machinery
+      is already shipped; this is purely composer plumbing.
+- [ ] **3. Audio file attachment in composer**. Drop a .wav (and,
+      after the ffmpeg fallback lands, .mp3/.m4a/.flac/.ogg) into
+      the messagebox, sidecar transcribes via Whisper, transcript
+      becomes the message text. Largely shares code with the
+      voice-prompts item minus the MediaRecorder front-end.
+- [ ] **4. Text-to-speech of assistant replies**. Speaker icon
+      on each assistant message; click to read aloud. Use the
+      browser `speechSynthesis` Web Speech API for v1 -- offline
+      on macOS/Windows, no model load, picks up system voices.
+      Per-voice + rate picker in Preferences. v2 could route to a
+      local TTS GGUF once cyllama exposes one.
+- [ ] **5. Streaming-token multimodal answers**
+      (`VisionLanguageChat` generator) so long vision answers
+      don't block. Lower urgency than the composer-attachment
+      items; users rarely hit the blocking window with single-image
+      Q&A but it bites with long-form description.
+- [ ] **6. Audio decode fallback for Transcribe**: shell out to
+      `ffmpeg` when input is non-WAV. Detect at probe time,
+      surface via `/info.features.audio_decode`. Strictly a
+      prerequisite for item 3 covering non-WAV audio drops; can
+      ship before or after the in-composer attachment.
 
 ## Agents
 

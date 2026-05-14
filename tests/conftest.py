@@ -1202,6 +1202,49 @@ def _install_cyllama_stub() -> None:
     sys.modules["cyllama.rag"] = rag
     mod.rag = rag
 
+    # cyllama.rag.loaders submodule. The sidecar probes this directly
+    # for the document-extract path; needs its own module entry. Stub
+    # mirrors the public surface the sidecar relies on: load_document,
+    # PDFLoader, the registry + helpers, and the priority list.
+    def _stub_loaders_load_document(path, **kwargs):  # noqa: ARG001
+        from pathlib import Path as _P
+        p = _P(path)
+        suffix = p.suffix.lower()
+        if suffix == ".pdf":
+            # Pretend pypdf-stub extracted two pages worth of text.
+            return [
+                _FakeDocument(
+                    text=f"[pdf body of {p.name}]",
+                    metadata={"source": str(p), "filename": p.name,
+                              "filetype": "pdf", "backend": "pypdf-stub"},
+                ),
+            ]
+        if suffix not in {".txt", ".md", ".markdown", ".json", ".jsonl"}:
+            raise ValueError(f"Unsupported file type: {suffix}")
+        return [_FakeDocument(
+            text=p.read_text(errors="ignore"),
+            metadata={"source": str(p), "filename": p.name},
+        )]
+    class _StubPDFLoader:
+        def __init__(self, backend="auto", per_page=False, require=(), **_):
+            self.backend_name = "pypdf-stub"
+        def load(self, path):
+            return _stub_loaders_load_document(path)
+    loaders = types.ModuleType("cyllama.rag.loaders")
+    loaders.load_document = _stub_loaders_load_document
+    loaders.PDFLoader = _StubPDFLoader
+    loaders._PDF_BACKENDS = {"pypdf-stub": _StubPDFLoader}
+    loaders._PDF_BACKEND_PRIORITY = ["pypdf-stub"]
+    loaders.available_pdf_backends = lambda require=(): ["pypdf-stub"]
+    loaders.pdf_backend_info = lambda name: {
+        "name": name,
+        "available": True,
+        "capabilities": ["per_page"],
+        "install_hint": "pip install pypdf",
+    }
+    sys.modules["cyllama.rag.loaders"] = loaders
+    rag.loaders = loaders
+
 
 _install_cyllama_stub()
 

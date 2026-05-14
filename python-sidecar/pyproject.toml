@@ -11,4 +11,9 @@ dependencies = [
   "python-multipart>=0.0.9",
   "openai>=1.50",
   "anthropic>=0.40",
+  # Document attachment in composer (TODO Multimodal #1). pypdf is the
+  # MIT-licensed v1 PDF backend -- first in cyllama's auto-priority
+  # order, pure Python, small. Richer extraction (docling for OCR /
+  # tables / images) is opt-in by the user via a future Settings action.
+  "pypdf>=4.0",
 ]
