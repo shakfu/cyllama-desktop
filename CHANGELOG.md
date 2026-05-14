@@ -6,6 +6,123 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed (right-pane polish: Hardware label, Sampling default-closed, preset semantics)
+- **Right-pane section renamed.** The collapsible block holding
+  ``GPU layers / Context / Batch / Main GPU / Split mode /
+  Tensor split`` was titled "Settings", which collided with the
+  ``Cmd+,`` macOS-style Preferences window. Now reads
+  **"Hardware"** to match the underlying form id (``hwForm``) and
+  the section's actual content. n_ctx / n_batch are CPU-relevant
+  too so "Hardware" is more accurate than "GPU Settings".
+- **Sampling section starts collapsed** in the right pane (it was
+  ``<details open>``). Most users tweak a preset rather than the
+  individual sliders; the long list pushed System Prompt off
+  screen on smaller windows.
+- **Presets no longer clobber the system prompt by default.**
+  Built-in presets (``Default``, ``Creative``, ``Precise``,
+  ``Long-context``) now carry ``system_prompt: null`` ("don't
+  touch") rather than ``""`` ("set to empty"), so switching among
+  them leaves whatever the user typed alone. ``Code`` continues
+  to set its coding-assistant prompt explicitly. ``applyPreset``
+  was already guarded with ``typeof === "string"`` so ``null``
+  short-circuits cleanly. User-created presets keep capturing as
+  a string -- saving with an empty textarea + applying later is
+  still a valid way to deliberately wipe the prompt.
+
+### Added (voice prompts, Quarto render, local-file link opener)
+- **Voice prompts in the composer** (TODO Multimodal #2). Mic
+  button next to the paperclip; click to record, click again or
+  press Esc to stop. Recording state shows a pulsing red icon
+  with an ``MM:SS`` elapsed counter. The renderer captures audio
+  via ``MediaRecorder`` (webm/opus on Chromium), decodes +
+  resamples to 16 kHz mono in-browser via ``OfflineAudioContext``,
+  packs as a canonical RIFF/PCM WAV blob, uploads to a new
+  ``POST /audio/upload`` endpoint, then fires ``/jobs/transcribe``
+  and appends the transcript to whatever was already typed. No
+  ffmpeg dependency -- the conversion is pure JS. The whisper
+  model is resolved in priority order:
+  ``localStorage["voice_whisper_model"]`` (set by the Transcribe
+  pane) ⇒ first whisper-classified model from
+  ``/models?kinds=whisper`` ⇒ actionable error.
+- **Quarto render as an opt-in agent tool** wired alongside
+  ``search_wikipedia``. New ``agents.quarto_render`` capability
+  flag gated on both the cyllama ``@tool`` resolving AND the
+  ``quarto`` CLI being on PATH; either missing → renderer hides
+  the toggle. Toggle in the Agents pane below "Search Wikipedia"
+  with a confirm dialog ("can write files and run the quarto
+  CLI") matching the strong-side-effect trust posture.
+  ``_build_agent_tools`` surfaces "tool missing" vs "CLI missing"
+  as distinct 501s so the renderer can show the right install
+  hint.
+- **Local-file link opener.** Clicking a ``file://`` (or absolute
+  ``/...``) link in the chat log -- e.g. the markdown link
+  ``quarto_render`` pastes pointing at the generated .pptx --
+  now opens the file in its OS default app via ``shell.openPath``
+  instead of triggering Electron's default Save-As download
+  dialog. Implemented as a delegated click listener on ``#log``
+  (reads ``getAttribute("href")`` to avoid bundle-relative
+  re-anchoring), an ``ipcMain.handle("shell:openPath", ...)``
+  wrapper, and ``window.cyllama.openPath(path)`` exposed via
+  preload. http/https/mailto fall through to Electron's defaults
+  (untouched).
+
+### Changed (stock cyllama tools as a group toggle, not a misleading per-tool one)
+- **The Agents pane's "Calculator" checkbox is replaced by
+  "Stock cyllama tools"** (hint: ``calculator · current_time ·
+  word_count``). The old single toggle was misleading after the
+  auto-injection landed -- unchecking it didn't actually remove
+  calculator from the catalog, and the other two stock tools
+  weren't even surfaced. Now the toggle accurately controls the
+  whole group. Default on. Useful to flip off when a task-specific
+  tool like ``quarto_render`` is the real target and small models
+  get tempted by the stock distractors.
+- New ``stock_tools: false`` spec key on agent runs suppresses
+  the stock auto-injection. ``stock_tools: true`` (or omitted)
+  preserves the current behavior. Legacy ``calculator: true``
+  still works as a fallback when the cyllama stock ``@tool`` is
+  missing (older bundles); otherwise it dedups against the stock
+  group by name.
+
+### Fixed (whisper feature flag was silently false in bundled builds)
+- ``numpy>=1.26`` added to ``python-sidecar/pyproject.toml``.
+  Cyllama's ``cyllama.whisper.cli.load_wav_file`` returns numpy
+  arrays of audio samples; without numpy the probe failed and
+  ``/info.features.whisper`` was reported as ``False`` -- which
+  silently hid the Transcribe pane *and* the new composer mic
+  button. Bundled builds (``scripts/build-python-env.sh``) now
+  install it via the existing ``pip install ./python-sidecar``
+  step; smoke test extended to import it.
+- ``mainWindow.webContents.session.setPermissionRequestHandler``
+  added so the renderer's ``getUserMedia`` call for the mic
+  button is granted (and only ``media`` is granted; every other
+  permission is denied by default). Without this Electron silently
+  rejects the request.
+
+### Added (context-window warning for document attachments)
+- **Doc chips now flag context-window pressure.** Renderer
+  computes a rough ``chars / 4`` token estimate against the active
+  model's context window; chip border + background turn amber at
+  ``≥40%`` of the window (``ctx-tight``) and red at ``≥100%``
+  (``ctx-over``). Same styling applies to composer-pending chips
+  (before send) and folded chips in the chat log (after send), so
+  old conversations with overflowing docs flag visually on replay.
+- **Active context resolution** (`getActiveContextWindow`, in
+  priority order): user override on the ``n_ctx`` Parameters input
+  ⇒ GGUF ``<arch>.context_length`` from a cached
+  ``/models/inspect`` response (fetched on ``setModel``) ⇒ a
+  pessimistic ``4096`` fallback so unknown / probe-failed models
+  trip the warning rather than silently overflow.
+- **Live re-evaluation.** Pending doc chips re-render when the
+  user types into the ``n_ctx`` override and when ``setModel``
+  swaps the active model (the inspect fetch dispatches a refresh
+  on success). Tunables (``APPROX_CHARS_PER_TOKEN = 4``,
+  ``DOC_CONTEXT_WARN_FRACTION = 0.4``) live next to the helper.
+- Caveats called out in the chip's expanded-body text: the
+  estimate is directional (English-prose-tuned), and the warning
+  doesn't yet account for chat history + system prompt +
+  ``max_tokens`` already in flight -- it just says "this doc
+  consumes X% of context".
+
 ### Added (composer document attachment -- PDF / text / markdown)
 - **Drop any of `.pdf` / `.txt` / `.md` / `.markdown` / `.json`
   / `.jsonl` on the composer card** (or pick via the paperclip

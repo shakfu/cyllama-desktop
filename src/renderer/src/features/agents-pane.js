@@ -49,10 +49,11 @@ const state = {
   // Shared across every agent-type's invocation:
   maxIterations: 10,
   tools: {
-    calculator: true,
+    stock_tools: true,
     read_file: { enabled: false, sandbox_dir: "" },
     web_fetch: false,
     search_wikipedia: false,
+    quarto_render: false,
     rag_query: { enabled: false, collection_id: "", top_k: 3 },
     semantic_memory: { enabled: false, collection_id: "", namespace: "default", top_k: 5 },
   },
@@ -125,13 +126,18 @@ function ragCollectionSelect(targetTool /* "rag_query" | "semantic_memory" */) {
 }
 
 function buildToolsBlock() {
-  const calc = el("label", { class: "ag-tool-row" },
+  // Stock cyllama tools group: calculator + current_time + word_count.
+  // Auto-injected as a baseline so the agent always has cheap primitives
+  // available. Turn off when a task-specific tool (e.g. quarto_render)
+  // is the real target -- the stock tools can tempt small models away
+  // from it.
+  const stock = el("label", { class: "ag-tool-row" },
     el("input", {
-      type: "checkbox", checked: state.tools.calculator,
-      onchange: (e) => { state.tools.calculator = e.target.checked; },
+      type: "checkbox", checked: state.tools.stock_tools,
+      onchange: (e) => { state.tools.stock_tools = e.target.checked; },
     }),
-    el("span", {}, "Calculator"),
-    el("span", { class: "ag-tool-hint" }, "arithmetic"),
+    el("span", {}, "Stock cyllama tools"),
+    el("span", { class: "ag-tool-hint" }, "calculator · current_time · word_count"),
   );
 
   const sandboxLabel = el("span", { class: "ag-tool-path mono" },
@@ -191,6 +197,26 @@ function buildToolsBlock() {
     el("span", { class: "ag-tool-hint" }, "en.wikipedia.org only"),
   );
 
+  // quarto_render: writes files + runs the ``quarto`` CLI. Strongest
+  // trust posture of the lot -- a confirm dialog matches the
+  // web_fetch pattern. The model picks the output path at decode
+  // time; renderer doesn't sandbox that today.
+  const quartoRender = el("label", { class: "ag-tool-row" },
+    el("input", {
+      type: "checkbox", checked: state.tools.quarto_render,
+      onchange: (e) => {
+        if (e.target.checked) {
+          if (!confirm("Enable Quarto rendering? The agent can write files to your filesystem and run the quarto CLI.")) {
+            e.target.checked = false; return;
+          }
+        }
+        state.tools.quarto_render = e.target.checked;
+      },
+    }),
+    el("span", {}, "Quarto render"),
+    el("span", { class: "ag-tool-hint" }, "writes files · off by default"),
+  );
+
   const ragQuery = el("div", { class: "ag-tool-row-stack" },
     el("label", { class: "ag-tool-row" },
       el("input", {
@@ -204,9 +230,12 @@ function buildToolsBlock() {
     el("div", { class: "ag-tool-sub" }, ragCollectionSelect("rag_query")),
   );
 
-  const children = [calc, readFile, webFetch];
+  const children = [stock, readFile, webFetch];
   if (state.features["agents.search_wikipedia"]) {
     children.push(searchWikipedia);
+  }
+  if (state.features["agents.quarto_render"]) {
+    children.push(quartoRender);
   }
   children.push(ragQuery);
   if (state.features["agents.memory"]) {
@@ -749,12 +778,16 @@ async function runSelectedWorkflow() {
 function buildToolsSpec() {
   const t = state.tools;
   const out = {};
-  if (t.calculator) out.calculator = true;
+  // ``stock_tools`` defaults true on the sidecar; only send when off
+  // so old chats persisted with no stock_tools key still get the
+  // sensible default. Off means "drop the auto-injected stock group".
+  if (t.stock_tools === false) out.stock_tools = false;
   if (t.read_file.enabled && t.read_file.sandbox_dir) {
     out.read_file = { sandbox_dir: t.read_file.sandbox_dir };
   }
   if (t.web_fetch) out.web_fetch = true;
   if (t.search_wikipedia) out.search_wikipedia = true;
+  if (t.quarto_render) out.quarto_render = true;
   if (t.rag_query.enabled && t.rag_query.collection_id) {
     out.rag_query = { collection_id: t.rag_query.collection_id, top_k: t.rag_query.top_k || 3 };
   }

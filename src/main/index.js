@@ -466,6 +466,16 @@ function createWindow() {
       sandbox: true,
     },
   });
+  // Grant the renderer's getUserMedia request for the composer mic
+  // button. We allow ``media`` for our own file:// origin only and
+  // deny everything else by default -- Electron's permission model
+  // requires an explicit grant per (origin, permission) pair, and
+  // without this handler the recording request errors silently.
+  mainWindow.webContents.session.setPermissionRequestHandler(
+    (_webContents, permission, callback) => {
+      callback(permission === "media");
+    },
+  );
   mainWindow.loadFile(path.join(__dirname, "..", "renderer", "index.html"));
 }
 
@@ -577,6 +587,23 @@ ipcMain.handle("shell:revealItem", async (_e, p) => {
     return true;
   } catch {
     return false;
+  }
+});
+
+ipcMain.handle("shell:openPath", async (_e, p) => {
+  // Open a local file with the OS default app. Used by the renderer's
+  // chat-log click delegator when an agent emits a ``file://`` link
+  // (e.g. quarto_render's "click to view your .pptx"). Without this,
+  // Electron falls through to its download handler for any non-web
+  // MIME type and the user gets a Save dialog instead of the file
+  // opening. Returns "" on success, an error string on failure --
+  // matches shell.openPath's contract.
+  if (typeof p !== "string" || !p) return "invalid path";
+  try {
+    const err = await shell.openPath(p);
+    return err || "";
+  } catch (e) {
+    return String(e && e.message || e);
   }
 });
 

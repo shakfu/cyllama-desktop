@@ -42,6 +42,30 @@ shipped.
   design + taxonomy. How commands are registered, how autocomplete
   works, what kinds of commands exist.
 
+### Composer capabilities
+
+The chat messagebox accepts more than text:
+
+- **Images** -- drop a `.png` / `.jpg` / `.webp` / `.gif` / `.bmp`
+  onto the composer (or use the paperclip) when a multimodal model
+  + mmproj are loaded. Routed through cyllama's `ImageAnalyzer`.
+- **Documents** -- drop a `.pdf` / `.md` / `.txt` / `.markdown` /
+  `.json` / `.jsonl`; the sidecar extracts text via
+  `cyllama.rag.loaders.load_document` (PDFs use the `pypdf` backend
+  bundled by default; install `pymupdf` / `docling` for richer
+  extraction). The text is inlined into the message the model sees
+  and the chat log shows a folded chip with a context-window
+  warning when the doc is large.
+- **Voice prompts** -- mic button next to the paperclip records
+  via `MediaRecorder`, transcribes via Whisper, appends the text
+  to the typed prompt. Requires a whisper model in the Transcribe
+  pane.
+- **Quarto rendering** -- the `quarto_render` agent tool (opt-in
+  in the Agents pane) lets the model generate `.pptx` / `.pdf` /
+  `.docx` / `.html` files. Requires the `quarto` CLI on PATH. The
+  resulting `file://` link in the assistant reply opens in your
+  OS default app.
+
 ## Build
 
 Quick path: `make` builds an installer for the host platform (macOS arm64 -> `.dmg`). Other targets:

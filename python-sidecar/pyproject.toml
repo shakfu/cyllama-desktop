@@ -16,4 +16,11 @@ dependencies = [
   # order, pure Python, small. Richer extraction (docling for OCR /
   # tables / images) is opt-in by the user via a future Settings action.
   "pypdf>=4.0",
+  # Whisper transcription (Transcribe pane + composer mic). cyllama's
+  # ``cyllama.whisper.cli.load_wav_file`` returns numpy arrays of audio
+  # samples, so without numpy the load_wav probe fails and
+  # /info.features.whisper is reported as False -- which silently hides
+  # the Transcribe pane and the composer mic button. Pinned >=1.26 to
+  # match cyllama's expectations.
+  "numpy>=1.26",
 ]

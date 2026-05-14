@@ -33,6 +33,7 @@
         <symbol id="i-sidebar-l" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="9" y1="3" x2="9" y2="21"/></symbol>
         <symbol id="i-sidebar-r" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="15" y1="3" x2="15" y2="21"/></symbol>
         <symbol id="i-paperclip" viewBox="0 0 24 24"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></symbol>
+        <symbol id="i-mic" viewBox="0 0 24 24"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 11a7 7 0 0 0 14 0"/><line x1="12" y1="18" x2="12" y2="22"/><line x1="8" y1="22" x2="16" y2="22"/></symbol>
         <symbol id="i-x" viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></symbol>
         <symbol id="i-list" viewBox="0 0 24 24"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><circle cx="4" cy="6" r="1"/><circle cx="4" cy="12" r="1"/><circle cx="4" cy="18" r="1"/></symbol>
         <symbol id="i-server" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="6" rx="1.5"/><rect x="3" y="14" width="18" height="6" rx="1.5"/><line x1="7" y1="7" x2="7" y2="7.01"/><line x1="7" y1="17" x2="7" y2="17.01"/></symbol>
@@ -138,6 +139,10 @@
                 <svg><use href="#i-paperclip"/></svg>
               </button>
               <input id="attachInput" type="file" accept="image/png,image/jpeg,image/webp,image/gif,image/bmp,.pdf,.txt,.md,.markdown,.json,.jsonl" multiple hidden />
+              <button id="micBtn" class="composer-attach-btn composer-mic-btn" type="button" title="Record voice prompt" hidden>
+                <svg><use href="#i-mic"/></svg>
+                <span id="micTimer" class="composer-mic-timer" hidden></span>
+              </button>
               <span class="hint">Enter to send &middot; Shift+Enter for newline</span>
               <div class="composer-spacer"></div>
               <button id="send" class="send-btn" type="button" title="Send">
@@ -195,7 +200,7 @@
               <div class="rt-section-head"><h3>Preset</h3></div>
             </div>
 
-            <details class="rt-section rt-collapsible" open>
+            <details class="rt-section rt-collapsible">
               <summary class="rt-section-head"><h3>System Prompt</h3></summary>
               <div class="param">
                 <textarea id="p-system_prompt" rows="3" placeholder="Optional. e.g. You are a concise, technical assistant."></textarea>
@@ -203,7 +208,7 @@
               </div>
             </details>
 
-            <details class="rt-section rt-collapsible" open>
+            <details class="rt-section rt-collapsible">
               <summary class="rt-section-head">
                 <h3>Sampling</h3>
                 <button class="icon-btn" id="resetParams" title="Reset to defaults" onclick="event.preventDefault();event.stopPropagation()"><svg><use href="#i-refresh"/></svg></button>
@@ -334,7 +339,7 @@
 
             <details class="rt-section rt-collapsible">
               <summary class="rt-section-head">
-                <h3>Settings</h3>
+                <h3>Hardware</h3>
               </summary>
               <div id="hwForm">
                 <div class="param">

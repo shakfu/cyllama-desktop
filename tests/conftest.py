@@ -1143,6 +1143,9 @@ def _install_cyllama_stub() -> None:
             for i in range(1, min(limit, 3) + 1)
         ]
     tools_mod.search_wikipedia = _stock("search_wikipedia", _stock_search_wikipedia)
+    def _stock_quarto_render(input="", content="", to="html", output_dir=""):  # noqa: ARG001
+        return f"stub: rendered to {to}"
+    tools_mod.quarto_render = _stock("quarto_render", _stock_quarto_render)
     sys.modules["cyllama.agents.tools"] = tools_mod
     agents.tools = tools_mod
 

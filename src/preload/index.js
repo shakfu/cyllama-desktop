@@ -13,6 +13,7 @@ contextBridge.exposeInMainWorld("cyllama", {
   openPreferences: () => ipcRenderer.invoke("prefs:open"),
   fileExists: (path) => ipcRenderer.invoke("fs:exists", path),
   revealItem: (path) => ipcRenderer.invoke("shell:revealItem", path),
+  openPath: (path) => ipcRenderer.invoke("shell:openPath", path),
   chats: {
     list:   () => ipcRenderer.invoke("chats:list"),
     load:   (id) => ipcRenderer.invoke("chats:load", id),

@@ -22,6 +22,12 @@ const SAMPLING_KEYS = new Set([
   "max_tokens", "seed", "stop_sequences",
 ]);
 
+// ``system_prompt: null`` means "this preset doesn't touch the system
+// prompt -- leave whatever the user typed alone." An empty string
+// would actively *clear* it. Built-ins that don't have an opinion
+// default to null; user-created presets always capture as a string
+// (possibly empty), so saving with the textarea cleared and applying
+// it later is a valid way to deliberately wipe the prompt.
 const BUILTINS = {
   Default: {
     builtin: true,
@@ -31,7 +37,7 @@ const BUILTINS = {
       mirostat: 0, mirostat_tau: 5.0, mirostat_eta: 0.1,
       max_tokens: 512, seed: "", stop_sequences: "",
     },
-    system_prompt: "",
+    system_prompt: null,
   },
   Creative: {
     builtin: true,
@@ -41,7 +47,7 @@ const BUILTINS = {
       mirostat: 0, mirostat_tau: 5.0, mirostat_eta: 0.1,
       max_tokens: 1024, seed: "", stop_sequences: "",
     },
-    system_prompt: "",
+    system_prompt: null,
   },
   Precise: {
     builtin: true,
@@ -51,7 +57,7 @@ const BUILTINS = {
       mirostat: 0, mirostat_tau: 5.0, mirostat_eta: 0.1,
       max_tokens: 512, seed: "", stop_sequences: "",
     },
-    system_prompt: "",
+    system_prompt: null,
   },
   Code: {
     builtin: true,
@@ -71,7 +77,7 @@ const BUILTINS = {
       mirostat: 0, mirostat_tau: 5.0, mirostat_eta: 0.1,
       max_tokens: 4096, seed: "", stop_sequences: "",
     },
-    system_prompt: "",
+    system_prompt: null,
   },
 };
 

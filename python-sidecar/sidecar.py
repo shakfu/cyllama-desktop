@@ -14,6 +14,7 @@ import inspect
 import json
 import os
 import re
+import shutil
 import signal
 import sys
 import threading
@@ -270,6 +271,14 @@ _TOOL_WORD_COUNT = _resolve_attr((
 _TOOL_SEARCH_WIKIPEDIA = _resolve_attr((
     ("cyllama.agents.tools", "search_wikipedia"),
 ))
+# Opt-in: quarto_render writes files and shells out to the ``quarto``
+# CLI. Same dual gate as multimodal -- the cyllama @tool must exist
+# AND the CLI must be on PATH; either missing → toggle hidden in the
+# renderer rather than failing at first invocation.
+_TOOL_QUARTO_RENDER = _resolve_attr((
+    ("cyllama.agents.tools", "quarto_render"),
+))
+_QUARTO_CLI = shutil.which("quarto")
 
 # Document loaders. ``load_document`` covers plain-text formats
 # (txt / md / markdown / csv / json / etc.) with no extra deps; PDF
@@ -469,6 +478,13 @@ _FEATURE_FLAGS: dict[str, bool] = {
     # search_wikipedia is opt-in (network) -- renderer hides the toggle
     # when the cyllama bundle doesn't provide the @tool.
     "agents.search_wikipedia": _TOOL_SEARCH_WIKIPEDIA is not None,
+    # quarto_render is opt-in (writes files + shells out to ``quarto``).
+    # Gated on BOTH the cyllama @tool being present AND the ``quarto``
+    # CLI being on PATH -- either missing makes the tool a runtime
+    # error, so we hide the renderer toggle in that case.
+    "agents.quarto_render": bool(
+        _TOOL_QUARTO_RENDER is not None and _QUARTO_CLI
+    ),
     # Composer document attachment. ``documents.extract`` covers the
     # text-format fast path (txt / md / etc.) which doesn't need a PDF
     # backend at all. ``documents.pdf`` is true only when at least one
@@ -1311,6 +1327,12 @@ def _get_image_analyzer(mmproj_path: str, llm) -> object:
 _UPLOAD_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 _UPLOAD_ALLOWED_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"}
 _UPLOAD_MAX_BYTES = 16 * 1024 * 1024  # 16 MiB cap; LLAVA inputs rarely need more
+# Audio uploads from the composer's mic button: WAV only for now
+# (Whisper requires 16k mono WAV; the renderer encodes locally before
+# sending). Bigger cap because longer voice prompts produce sizeable
+# WAVs even at 16k mono -- 64 MiB is ~70 minutes of speech.
+_AUDIO_UPLOAD_ALLOWED_EXTS = {".wav", ".wave"}
+_AUDIO_UPLOAD_MAX_BYTES = 64 * 1024 * 1024
 
 
 @app.post("/chat/upload")
@@ -1357,6 +1379,50 @@ async def chat_upload(req: Request):
     with open(dest, "wb") as f:
         f.write(bytes(body))
 
+    return {
+        "id": upload_id,
+        "name": raw_name,
+        "size": len(body),
+        "path": str(dest),
+        "url": f"/chat/upload/{dest.name}",
+    }
+
+
+@app.post("/audio/upload")
+async def audio_upload(req: Request):
+    """Accept a WAV blob from the composer's mic-button capture.
+
+    Same shape as ``/chat/upload`` but with the audio extension
+    whitelist and a larger size cap (voice prompts grow quickly even
+    at 16 kHz mono). The renderer encodes browser-captured audio to
+    16 kHz mono WAV locally via OfflineAudioContext before posting,
+    so the sidecar can hand the file straight to
+    ``/jobs/transcribe``. Returns ``{id, name, size, path, url}``.
+    """
+    form = await req.form()
+    upload = form.get("file")
+    if upload is None:
+        raise HTTPException(400, "file field required")
+    raw_name = (getattr(upload, "filename", "") or "recording.wav").strip()
+    suffix = Path(raw_name).suffix.lower()
+    if suffix not in _AUDIO_UPLOAD_ALLOWED_EXTS:
+        raise HTTPException(400, f"unsupported audio type: {suffix or '(none)'}")
+    body = bytearray()
+    while True:
+        chunk = await upload.read(64 * 1024)
+        if not chunk:
+            break
+        body.extend(chunk)
+        if len(body) > _AUDIO_UPLOAD_MAX_BYTES:
+            raise HTTPException(413, f"upload exceeds {_AUDIO_UPLOAD_MAX_BYTES} bytes")
+    upload_id = uuid.uuid4().hex
+    dest = (UPLOADS_DIR / f"{upload_id}{suffix}").resolve()
+    try:
+        dest.relative_to(UPLOADS_DIR.resolve())
+    except ValueError:
+        raise HTTPException(400, "path escape")
+    with open(dest, "wb") as f:
+        f.write(bytes(body))
     return {
         "id": upload_id,
         "name": raw_name,
@@ -3370,22 +3436,31 @@ def _build_agent_tools(spec: dict) -> list:
     Unknown keys are ignored. Empty tool list is allowed -- the agent
     then runs as a plain reasoning loop without tool calls.
 
-    Stock cyllama tools (``current_time``, ``calculator``, ``word_count``)
-    are auto-injected when available -- the renderer shouldn't reimplement
-    primitives the library already ships. The ``calculator`` key in the
-    spec is honoured for backwards compatibility but is a no-op when the
-    cyllama auto-tool is already present (deduped by name).
+    Stock cyllama tools (``current_time``, ``calculator``,
+    ``word_count``) are auto-injected when available -- the renderer
+    shouldn't reimplement primitives the library already ships.
+    ``spec["stock_tools"]`` controls this group: defaults to true
+    (auto-injected); set to false to suppress them entirely, useful
+    when a task-specific tool like ``quarto_render`` is in play and
+    the stock tools would tempt the model away from the real target.
+
+    The legacy ``calculator: true`` key is honoured for backwards
+    compatibility but is a no-op when the cyllama stock @tool is
+    already present (deduped by name).
     """
     out: list = []
     seen: set[str] = set()
-    for stock in (_TOOL_CURRENT_TIME, _TOOL_CALCULATOR, _TOOL_WORD_COUNT):
-        if stock is not None:
-            out.append(stock)
-            seen.add(getattr(stock, "name", ""))
+    include_stock = spec.get("stock_tools", True)
+    if include_stock:
+        for stock in (_TOOL_CURRENT_TIME, _TOOL_CALCULATOR, _TOOL_WORD_COUNT):
+            if stock is not None:
+                out.append(stock)
+                seen.add(getattr(stock, "name", ""))
     if spec.get("calculator") and "calculator" not in seen:
-        # Older cyllama without the stock ``calculator`` @tool: fall back
-        # to the sidecar's local AST-sandboxed impl so the renderer's
-        # existing ``{calculator: true}`` flow still works.
+        # Older cyllama without the stock ``calculator`` @tool, or
+        # the user explicitly opted into calculator while opting out
+        # of the stock group: fall back to the sidecar's local
+        # AST-sandboxed calculator so an explicit ask still resolves.
         out.append(_make_calculator_tool())
     if "read_file" in spec:
         # Treat key-present as intent to enable -- a misconfigured tool
@@ -3405,6 +3480,21 @@ def _build_agent_tools(spec: dict) -> list:
         # the agent passes it through as a structured argument, so no
         # wrapping is needed here.
         out.append(_TOOL_SEARCH_WIKIPEDIA)
+    if spec.get("quarto_render"):
+        # File-writing + subprocess tool. Surface "tool missing" vs
+        # "CLI missing" as distinct 400s so the renderer can show a
+        # useful action ("install quarto from quarto.org" vs "update
+        # cyllama"). Spec shape ``true`` enables; per-call args
+        # (``input`` / ``content`` / ``to`` / ``output_dir``) come
+        # from the model at decode time, not from the spec.
+        if _TOOL_QUARTO_RENDER is None:
+            raise HTTPException(501, "quarto_render not available in this cyllama build")
+        if not _QUARTO_CLI:
+            raise HTTPException(
+                501,
+                "quarto CLI not found on PATH; install from https://quarto.org/docs/get-started/",
+            )
+        out.append(_TOOL_QUARTO_RENDER)
     if "rag_query" in spec:
         rq = spec["rag_query"] if isinstance(spec["rag_query"], dict) else {}
         coll_id = rq.get("collection_id") or ""

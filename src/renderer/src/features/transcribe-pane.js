@@ -104,6 +104,16 @@ async function modelSelect() {
   // "Browse..." sentinel falls back to the OS file picker (whisper
   // .bin files often live outside MODELS_DIR; covers that case).
   sel.appendChild(el("option", { value: "__browse__" }, "Browse..."));
+  // Restore prior pick from localStorage so the composer mic button
+  // gets a default. State + storage stay in sync: every change writes
+  // through (empty string clears, matching the picker's "Pick a..."
+  // sentinel selection).
+  if (!state.modelPath) {
+    try {
+      const cached = localStorage.getItem("voice_whisper_model");
+      if (cached) state.modelPath = cached;
+    } catch {}
+  }
   sel.value = state.modelPath || "";
   sel.addEventListener("change", async () => {
     if (sel.value === "__browse__") {
@@ -113,6 +123,10 @@ async function modelSelect() {
     } else {
       state.modelPath = sel.value;
     }
+    try {
+      if (state.modelPath) localStorage.setItem("voice_whisper_model", state.modelPath);
+      else localStorage.removeItem("voice_whisper_model");
+    } catch {}
     updateRunEnabled();
   });
   return sel;

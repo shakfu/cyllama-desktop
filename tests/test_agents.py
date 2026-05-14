@@ -133,6 +133,71 @@ def test_agent_rag_query_400_on_invalid_collection_id(client, auth, fake_model):
     assert r.status_code == 400
 
 
+def test_agent_stock_tools_default_on(client, auth, fake_model, sidecar_app):
+    """Stock cyllama tools (calculator / current_time / word_count) are
+    auto-injected by default -- the renderer doesn't have to opt in."""
+    r = client.post("/jobs/agent/run", json={
+        "model_path": fake_model, "task": "x",
+        "tools": {"web_fetch": True},
+    }, headers=auth)
+    _drain(client, auth, r.json()["job_id"])
+    inst = sidecar_app.cyllama.agents.ReActAgent.instances[-1]
+    names = {t.name for t in inst.tools}
+    assert {"calculator", "current_time", "word_count"}.issubset(names)
+
+
+def test_agent_stock_tools_suppressed_when_off(client, auth, fake_model, sidecar_app):
+    """``stock_tools: false`` drops the auto-injected group -- useful
+    when a task-specific tool would tempt the model otherwise."""
+    r = client.post("/jobs/agent/run", json={
+        "model_path": fake_model, "task": "x",
+        "tools": {"stock_tools": False, "web_fetch": True},
+    }, headers=auth)
+    _drain(client, auth, r.json()["job_id"])
+    inst = sidecar_app.cyllama.agents.ReActAgent.instances[-1]
+    names = {t.name for t in inst.tools}
+    assert "calculator" not in names
+    assert "current_time" not in names
+    assert "word_count" not in names
+    assert "web_fetch" in names
+
+
+def test_agent_quarto_render_opt_in(client, auth, fake_model, sidecar_app, monkeypatch):
+    """``quarto_render: true`` adds the stock cyllama @tool. Gated on
+    both the tool resolving AND the ``quarto`` CLI being on PATH; we
+    monkeypatch the CLI flag so the test doesn't depend on quarto
+    being installed in the CI runner."""
+    monkeypatch.setattr(sidecar_app, "_QUARTO_CLI", "/usr/local/bin/quarto")
+    # Default off.
+    r = client.post("/jobs/agent/run", json={
+        "model_path": fake_model, "task": "x",
+        "tools": {"calculator": True},
+    }, headers=auth)
+    _drain(client, auth, r.json()["job_id"])
+    inst = sidecar_app.cyllama.agents.ReActAgent.instances[-1]
+    assert "quarto_render" not in {t.name for t in inst.tools}
+
+    # Opt-in: present.
+    r = client.post("/jobs/agent/run", json={
+        "model_path": fake_model, "task": "x",
+        "tools": {"quarto_render": True},
+    }, headers=auth)
+    _drain(client, auth, r.json()["job_id"])
+    inst = sidecar_app.cyllama.agents.ReActAgent.instances[-1]
+    assert "quarto_render" in {t.name for t in inst.tools}
+
+
+def test_agent_quarto_render_501_when_cli_missing(client, auth, fake_model, sidecar_app, monkeypatch):
+    """Tool resolved, CLI absent → 501 with the install hint."""
+    monkeypatch.setattr(sidecar_app, "_QUARTO_CLI", None)
+    r = client.post("/jobs/agent/run", json={
+        "model_path": fake_model, "task": "x",
+        "tools": {"quarto_render": True},
+    }, headers=auth)
+    assert r.status_code == 501
+    assert "quarto" in r.json()["detail"].lower()
+
+
 def test_agent_search_wikipedia_opt_in(client, auth, fake_model, sidecar_app):
     """``search_wikipedia: true`` adds the stock cyllama @tool. Not in
     the auto-injected set (network side effect)."""

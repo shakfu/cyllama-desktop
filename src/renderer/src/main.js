@@ -378,7 +378,88 @@ function setModel(path) {
     else localStorage.removeItem(LAST_MODEL_KEY);
   } catch {}
   updateSendEnabled();
+  refreshActiveModelMeta();
   window.dispatchEvent(new CustomEvent("cyllama:model-changed", { detail: { modelPath } }));
+}
+
+// Cached GGUF metadata for the active model. Populated asynchronously
+// when ``setModel`` runs. Used by the doc-attachment chips to warn
+// when an extracted document would overflow the active model's
+// training context. ``null`` means "unknown" (no model picked, or
+// /models/inspect failed); callers should fall back to a pessimistic
+// default rather than treat null as "all good".
+let activeModelMeta = null;
+
+async function refreshActiveModelMeta() {
+  activeModelMeta = null;
+  if (!modelPath) return;
+  try {
+    const url = await cyllamaSidecar.sidecarUrl("/models/inspect");
+    const info = await cyllamaSidecar.getSidecarInfo();
+    const res = await fetch(url, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "authorization": `Bearer ${info.token}`,
+      },
+      body: JSON.stringify({ path: modelPath }),
+    });
+    if (!res.ok) return;
+    activeModelMeta = await res.json();
+    // Re-render any pending doc chips so the warning state updates
+    // when the model changes mid-attachment.
+    renderPendingAttachments();
+  } catch {
+    activeModelMeta = null;
+  }
+}
+
+// ~chars/token for English. Real ratio varies (code denser, prose
+// looser); this is a defensible average used only for the soft
+// warning -- the model itself counts tokens at decode time.
+const APPROX_CHARS_PER_TOKEN = 4;
+// Fraction of the context window the user's documents are allowed to
+// consume before we warn. Leaves the other half for system prompt +
+// typed prompt + chat history + response.
+const DOC_CONTEXT_WARN_FRACTION = 0.4;
+// Fallback context size when neither the user nor the GGUF metadata
+// supplies one. Conservative so older / smaller models trip the
+// warning rather than silently overflow.
+const DEFAULT_CONTEXT_FALLBACK = 4096;
+
+function getActiveContextWindow() {
+  // 1) Explicit user override on the n_ctx param wins -- if they
+  //    bumped n_ctx in the right panel they know what they're doing.
+  const overrideEl = paramEl("n_ctx");
+  if (overrideEl && overrideEl.value !== "" && overrideEl.value != null) {
+    const n = Number(overrideEl.value);
+    if (Number.isFinite(n) && n > 0) return n;
+  }
+  // 2) GGUF metadata: ``<arch>.context_length`` is what cyllama uses
+  //    when n_ctx is unset. Mirrors the models pane's pickInfoFields.
+  const md = (activeModelMeta && activeModelMeta.metadata) || null;
+  if (md) {
+    const arch = md["general.architecture"];
+    if (arch) {
+      const trained = Number(md[`${arch}.context_length`]);
+      if (Number.isFinite(trained) && trained > 0) return trained;
+    }
+  }
+  // 3) Unknown -- assume small so we warn rather than overflow.
+  return DEFAULT_CONTEXT_FALLBACK;
+}
+
+function docContextStatus(charCount) {
+  // Returns ``{tokensApprox, contextWindow, fraction, level}``.
+  // ``level`` ∈ ``"ok" | "tight" | "over"``. Renderer maps these to
+  // the chip's warning styling.
+  const tokens = Math.max(0, Math.round((charCount || 0) / APPROX_CHARS_PER_TOKEN));
+  const ctx = getActiveContextWindow();
+  const fraction = ctx > 0 ? tokens / ctx : 0;
+  let level = "ok";
+  if (fraction >= 1.0) level = "over";
+  else if (fraction >= DOC_CONTEXT_WARN_FRACTION) level = "tight";
+  return { tokensApprox: tokens, contextWindow: ctx, fraction, level };
 }
 function bumpTokens(text) {
   // Maintained for streaming-time updates; the persisted total is
@@ -539,6 +620,8 @@ function renderPendingAttachments() {
     // can tell when context was clipped.
     const card = document.createElement("div");
     card.className = "attachment-chip attachment-chip-doc";
+    const status = docContextStatus(d.char_count);
+    if (status.level !== "ok") card.classList.add(`ctx-${status.level}`);
     const badge = document.createElement("span");
     badge.className = "attachment-doc-badge";
     badge.textContent = (d.filetype || "doc").toUpperCase();
@@ -553,6 +636,21 @@ function renderPendingAttachments() {
     if (d.backend) titleBits.push(`backend: ${d.backend}`);
     if (d.pages && d.pages > 1) titleBits.push(`${d.pages} pages`);
     if (d.truncated) titleBits.push("text was truncated to fit context cap");
+    // Context-fit hint. ``approx`` is a rough chars/4 heuristic; real
+    // tokens vary by content type, so we cap precision at "~Nk".
+    const ctxPct = Math.round(status.fraction * 100);
+    if (status.level === "over") {
+      titleBits.push(
+        `~${Math.round(status.tokensApprox / 1000)}k tokens vs ${
+          Math.round(status.contextWindow / 1000)}k ctx — exceeds context window`,
+      );
+    } else if (status.level === "tight") {
+      titleBits.push(
+        `~${ctxPct}% of the model's context window (~${
+          Math.round(status.tokensApprox / 1000)}k of ~${
+          Math.round(status.contextWindow / 1000)}k tokens)`,
+      );
+    }
     card.title = titleBits.join(" · ");
     const remove = document.createElement("button");
     remove.type = "button";
@@ -586,6 +684,8 @@ function renderMessageDocuments(documents, host) {
   for (const d of documents) {
     const det = document.createElement("details");
     det.className = "msg-doc-chip";
+    const status = docContextStatus(d.char_count);
+    if (status.level !== "ok") det.classList.add(`ctx-${status.level}`);
     const sum = document.createElement("summary");
     const badge = document.createElement("span");
     badge.className = "msg-doc-badge";
@@ -608,6 +708,17 @@ function renderMessageDocuments(documents, host) {
     if (d.backend) lines.push(`Backend: ${d.backend}`);
     if (d.pages && d.pages > 1) lines.push(`Pages: ${d.pages}`);
     if (d.path) lines.push(`Path: ${d.path}`);
+    if (status.level === "over") {
+      lines.push(
+        `Warning: ~${Math.round(status.tokensApprox / 1000)}k tokens exceeds the model's ~${
+          Math.round(status.contextWindow / 1000)}k context window. Earlier turns and the typed prompt may be evicted.`,
+      );
+    } else if (status.level === "tight") {
+      lines.push(
+        `Heads up: ~${Math.round(status.fraction * 100)}% of the model's context window (~${
+          Math.round(status.tokensApprox / 1000)}k of ~${Math.round(status.contextWindow / 1000)}k tokens). Little room for chat history + response.`,
+      );
+    }
     lines.push("Full content was inlined into the message sent to the model.");
     body.textContent = lines.join("\n");
     det.appendChild(body);
@@ -807,6 +918,39 @@ logEl.addEventListener("scroll", () => {
   const nearBottom = logEl.scrollHeight - logEl.scrollTop - logEl.clientHeight < 40;
   stickyScroll = nearBottom;
 }, { passive: true });
+
+// Intercept clicks on local-file links in the chat log. Agents like
+// quarto_render emit ``[name](file:///abs/path)`` markdown links; the
+// markdown renderer turns those into plain ``<a href="file://...">``
+// which Electron's default handler treats as a download (Save As...
+// dialog for any non-web MIME type). Route them through the main
+// process's ``shell.openPath`` so the file opens in its default app
+// instead. We read ``getAttribute("href")`` rather than the resolved
+// ``.href`` property so relative paths the model emitted don't get
+// silently re-anchored to the renderer's bundle dir.
+logEl.addEventListener("click", async (e) => {
+  const a = e.target && e.target.closest && e.target.closest("a[href]");
+  if (!a) return;
+  const raw = a.getAttribute("href") || "";
+  let fsPath = "";
+  if (raw.startsWith("file://")) {
+    try { fsPath = decodeURIComponent(raw.slice("file://".length)); } catch { fsPath = raw.slice("file://".length); }
+  } else if (raw.startsWith("/")) {
+    // Plain absolute filesystem path -- the markdown renderer leaves
+    // these untouched and the browser would resolve them against the
+    // app:// origin, ending up at a non-existent path.
+    fsPath = raw;
+  } else {
+    return;  // http(s) / mailto / etc. -- leave Electron's default
+  }
+  e.preventDefault();
+  try {
+    const err = await window.cyllama.openPath(fsPath);
+    if (err) errorLine(`open: ${err}`);
+  } catch (err) {
+    errorLine(`open: ${err.message || err}`);
+  }
+});
 
 /* ----------------------------------------------------------------
    Console (sidecar log) panel
@@ -1232,6 +1376,10 @@ async function applySupportedParams() {
   // neither -- there's nothing useful to attach. See
   // ``applyAttachButtonVisibility`` for the full gating + tooltip.
   applyAttachButtonVisibility(features);
+  // Composer mic button surfaces when the sidecar reports whisper
+  // support. The "no whisper model picked yet" case is handled at
+  // record time (runtime error), not via visibility.
+  applyMicButtonVisibility(features);
 }
 
 function applyAttachButtonVisibility(features) {
@@ -1445,6 +1593,9 @@ function bindParams() {
       saveParams();
       if (key === "mirostat") applyMirostatVisibility();
       if (key === "spec_draft_model") applySpeculativeVisibility();
+      // Doc chips' context-fit warning depends on the active n_ctx
+      // override; re-render so the chip styling tracks the input.
+      if (key === "n_ctx") renderPendingAttachments();
     });
   }
   const sysEl = document.getElementById("p-system_prompt");
@@ -1956,6 +2107,286 @@ if (composerCard) {
     const files = Array.from(e.dataTransfer.files || []);
     if (files.length) await onAttachFiles(files);
   });
+}
+
+// Voice prompts: mic button captures audio via MediaRecorder, encodes
+// to 16 kHz mono WAV in-browser (Whisper's required shape), uploads
+// to the sidecar, fires /jobs/transcribe, and appends the transcript
+// to whatever the user already typed. No ffmpeg dependency -- the
+// renderer's OfflineAudioContext handles decode + resample. Persisted
+// whisper-model pick is read from localStorage (set by the Transcribe
+// pane); if absent, falls back to the first whisper model in /models.
+const VOICE_WHISPER_MODEL_KEY = "voice_whisper_model";
+const micBtn = document.getElementById("micBtn");
+const micTimer = document.getElementById("micTimer");
+let micRecorder = null;
+let micChunks = [];
+let micStream = null;
+let micStartedAt = 0;
+let micTimerHandle = 0;
+let micCancelled = false;
+
+function setMicState(on) {
+  if (!micBtn) return;
+  micBtn.classList.toggle("recording", on);
+  micBtn.title = on ? "Stop recording (Esc to cancel)" : "Record voice prompt";
+  if (micTimer) {
+    micTimer.hidden = !on;
+    if (!on) micTimer.textContent = "";
+  }
+}
+
+function tickMicTimer() {
+  if (!micTimer || !micStartedAt) return;
+  const sec = Math.floor((Date.now() - micStartedAt) / 1000);
+  const mm = String(Math.floor(sec / 60)).padStart(2, "0");
+  const ss = String(sec % 60).padStart(2, "0");
+  micTimer.textContent = `${mm}:${ss}`;
+}
+
+async function pickWhisperModel() {
+  // Prefer the user's last Transcribe-pane pick; fall back to the
+  // first whisper-classified model in MODELS_DIR.
+  try {
+    const cached = localStorage.getItem(VOICE_WHISPER_MODEL_KEY);
+    if (cached) return cached;
+  } catch {}
+  try {
+    const r = await cyllamaModels.listModels({ kinds: ["whisper"] });
+    const first = (r.models || [])[0];
+    return first ? first.path : "";
+  } catch {
+    return "";
+  }
+}
+
+// In-browser 16 kHz mono WAV encoder. Takes an arbitrary audio Blob
+// (whatever MediaRecorder produced -- webm/opus on Chromium / Electron),
+// decodes it via AudioContext, downmixes + resamples to 16 kHz mono
+// using OfflineAudioContext, and packs the resulting Float32 PCM into
+// a canonical RIFF WAVE / 16-bit signed integer container. cyllama's
+// load_wav_file consumes this directly.
+async function blobToWav16kMono(blob) {
+  const arr = await blob.arrayBuffer();
+  // decodeAudioData wants the buffer to live for the duration of the
+  // call; we copy into a typed array up front to dodge a Firefox bug
+  // where transferred ArrayBuffers get rejected.
+  const buf = arr.slice(0);
+  const tmpCtx = new (window.AudioContext || window.webkitAudioContext)();
+  let decoded;
+  try {
+    decoded = await tmpCtx.decodeAudioData(buf);
+  } finally {
+    tmpCtx.close().catch(() => {});
+  }
+  const targetRate = 16000;
+  const length = Math.max(1, Math.ceil(decoded.duration * targetRate));
+  const offline = new OfflineAudioContext(1, length, targetRate);
+  const src = offline.createBufferSource();
+  src.buffer = decoded;
+  // Downmix to mono if the decoded source has multiple channels.
+  // The default destination is mono here (channels=1 above), so the
+  // browser handles the mixdown.
+  src.connect(offline.destination);
+  src.start(0);
+  const rendered = await offline.startRendering();
+  const samples = rendered.getChannelData(0);
+
+  // RIFF WAVE header + 16-bit PCM data section.
+  const numSamples = samples.length;
+  const bytesPerSample = 2;
+  const dataSize = numSamples * bytesPerSample;
+  const headerSize = 44;
+  const out = new ArrayBuffer(headerSize + dataSize);
+  const dv = new DataView(out);
+  // "RIFF" chunk descriptor
+  dv.setUint8(0, 0x52); dv.setUint8(1, 0x49); dv.setUint8(2, 0x46); dv.setUint8(3, 0x46); // 'RIFF'
+  dv.setUint32(4, 36 + dataSize, true);
+  dv.setUint8(8, 0x57); dv.setUint8(9, 0x41); dv.setUint8(10, 0x56); dv.setUint8(11, 0x45); // 'WAVE'
+  // "fmt " sub-chunk
+  dv.setUint8(12, 0x66); dv.setUint8(13, 0x6d); dv.setUint8(14, 0x74); dv.setUint8(15, 0x20); // 'fmt '
+  dv.setUint32(16, 16, true);    // PCM subchunk size
+  dv.setUint16(20, 1, true);     // audio format = 1 (PCM)
+  dv.setUint16(22, 1, true);     // num channels = 1
+  dv.setUint32(24, targetRate, true);
+  dv.setUint32(28, targetRate * bytesPerSample, true);  // byte rate
+  dv.setUint16(32, bytesPerSample, true);               // block align
+  dv.setUint16(34, 16, true);                           // bits per sample
+  // "data" sub-chunk
+  dv.setUint8(36, 0x64); dv.setUint8(37, 0x61); dv.setUint8(38, 0x74); dv.setUint8(39, 0x61); // 'data'
+  dv.setUint32(40, dataSize, true);
+  // Float32 [-1, 1] -> Int16 little-endian.
+  let off = headerSize;
+  for (let i = 0; i < numSamples; i++) {
+    const s = Math.max(-1, Math.min(1, samples[i]));
+    dv.setInt16(off, s < 0 ? s * 0x8000 : s * 0x7fff, true);
+    off += 2;
+  }
+  return new Blob([out], { type: "audio/wav" });
+}
+
+async function uploadWav(wavBlob) {
+  const url = await cyllamaSidecar.sidecarUrl("/audio/upload");
+  const info = await cyllamaSidecar.getSidecarInfo();
+  const fd = new FormData();
+  fd.append("file", new File([wavBlob], "voice.wav", { type: "audio/wav" }));
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "authorization": `Bearer ${info.token}` },
+    body: fd,
+  });
+  if (!res.ok) {
+    const detail = await res.text().catch(() => "");
+    throw new Error(`upload failed: ${res.status} ${detail}`);
+  }
+  return res.json();
+}
+
+async function transcribeUpload(audioPath, modelPath) {
+  const job = await cyllamaJobs.startJob("transcribe", {
+    audio_path: audioPath,
+    model_path: modelPath,
+  });
+  const segments = [];
+  const off = job.onEvent((ev) => {
+    if (ev.type === "segment" && ev.text) segments.push(ev.text);
+  });
+  try {
+    await job.done;
+  } finally {
+    off();
+  }
+  // Per-segment text already has leading spaces from whisper; join
+  // verbatim and trim outer whitespace so the prompt textarea gets
+  // tidy input.
+  return segments.join("").trim();
+}
+
+async function startMicRecording() {
+  if (micRecorder) return;
+  try {
+    micStream = await navigator.mediaDevices.getUserMedia({
+      audio: { channelCount: 1, sampleRate: 16000 },
+    });
+  } catch (e) {
+    errorLine(`mic: ${e.message || e}`);
+    return;
+  }
+  // Pick the best available MIME type. Chromium honours webm/opus on
+  // every platform; we don't request a specific bitrate -- defaults
+  // are reasonable and Whisper doesn't care.
+  let mimeType = "";
+  for (const m of ["audio/webm;codecs=opus", "audio/webm", "audio/ogg;codecs=opus"]) {
+    if (window.MediaRecorder && MediaRecorder.isTypeSupported(m)) { mimeType = m; break; }
+  }
+  micChunks = [];
+  micCancelled = false;
+  try {
+    micRecorder = mimeType
+      ? new MediaRecorder(micStream, { mimeType })
+      : new MediaRecorder(micStream);
+  } catch (e) {
+    micStream.getTracks().forEach((t) => t.stop());
+    micStream = null;
+    errorLine(`mic: ${e.message || e}`);
+    return;
+  }
+  micRecorder.addEventListener("dataavailable", (ev) => {
+    if (ev.data && ev.data.size) micChunks.push(ev.data);
+  });
+  micRecorder.addEventListener("stop", async () => {
+    const tracks = micStream ? micStream.getTracks() : [];
+    tracks.forEach((t) => t.stop());
+    micStream = null;
+    if (micTimerHandle) { clearInterval(micTimerHandle); micTimerHandle = 0; }
+    setMicState(false);
+    micRecorder = null;
+    if (micCancelled || !micChunks.length) { micChunks = []; return; }
+    const blob = new Blob(micChunks, { type: mimeType || "audio/webm" });
+    micChunks = [];
+    await handleRecordedAudio(blob);
+  });
+  micStartedAt = Date.now();
+  setMicState(true);
+  tickMicTimer();
+  micTimerHandle = setInterval(tickMicTimer, 1000);
+  micRecorder.start();
+}
+
+function stopMicRecording({ cancel } = { cancel: false }) {
+  if (!micRecorder) return;
+  micCancelled = !!cancel;
+  try { micRecorder.stop(); } catch {}
+}
+
+async function handleRecordedAudio(blob) {
+  // Three failure modes worth surfacing distinctly: no whisper model
+  // (user hasn't picked one + no auto-pick available), encode/upload
+  // network error, transcribe job error. Each becomes its own line so
+  // the user can tell what to fix.
+  const modelPath = await pickWhisperModel();
+  if (!modelPath) {
+    errorLine("voice: no whisper model available. Pick one in the Transcribe pane.");
+    return;
+  }
+  let wav;
+  try {
+    wav = await blobToWav16kMono(blob);
+  } catch (e) {
+    errorLine(`voice: encode failed: ${e.message || e}`);
+    return;
+  }
+  let uploaded;
+  try {
+    uploaded = await uploadWav(wav);
+  } catch (e) {
+    errorLine(`voice: upload failed: ${e.message || e}`);
+    return;
+  }
+  let text;
+  try {
+    text = await transcribeUpload(uploaded.path, modelPath);
+  } catch (e) {
+    errorLine(`voice: transcribe failed: ${e.message || e}`);
+    return;
+  }
+  if (!text) {
+    errorLine("voice: no speech recognised.");
+    return;
+  }
+  // Append to whatever the user already typed rather than overwrite.
+  // Mirrors how voice dictation feels in other apps (start typing,
+  // hit mic, transcript continues).
+  const existing = promptEl.value.trim();
+  promptEl.value = existing ? `${existing} ${text}` : text;
+  autoGrow();
+  promptEl.focus();
+}
+
+if (micBtn) {
+  micBtn.addEventListener("click", () => {
+    if (micRecorder) stopMicRecording({ cancel: false });
+    else startMicRecording();
+  });
+  // Esc while recording cancels (drops the audio, no transcribe).
+  // Listening on the button + the textarea covers the two focus
+  // states the user is likely in when they want to bail.
+  const onEsc = (e) => {
+    if (e.key === "Escape" && micRecorder) {
+      e.preventDefault();
+      stopMicRecording({ cancel: true });
+    }
+  };
+  document.addEventListener("keydown", onEsc);
+}
+
+function applyMicButtonVisibility(features) {
+  if (!micBtn) return;
+  // Same gate as the Transcribe pane: whisper machinery must be
+  // available. The "no whisper model installed" case is left to a
+  // runtime error rather than hiding the button -- the user can install
+  // one via the Models pane and try again without restarting.
+  micBtn.hidden = !(features && features.whisper);
 }
 
 sendBtn.addEventListener("click", () => {

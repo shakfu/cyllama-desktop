@@ -90,7 +90,7 @@ fi
 "$PY" -m pip install ./python-sidecar
 
 # Smoke test
-"$PY" -c "import cyllama, fastapi, uvicorn, openai, anthropic, pypdf; print('cyllama', cyllama.__version__, '| pypdf', pypdf.__version__)"
+"$PY" -c "import cyllama, fastapi, uvicorn, openai, anthropic, pypdf, numpy; print('cyllama', cyllama.__version__, '| pypdf', pypdf.__version__, '| numpy', numpy.__version__)"
 
 # Prune to shrink the bundle.
 PYLIB_GLOB="$OUT/lib/python${PY_VERSION%.*}"

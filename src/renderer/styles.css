@@ -2086,6 +2086,59 @@ details.rt-collapsible > summary > .icon-btn { margin-right: 4px; }
   line-height: 1.45;
 }
 
+/* Context-window warning states for doc chips. ``ctx-tight`` =
+   doc consumes >=50% of the active model's context (cramped but
+   workable); ``ctx-over`` = doc exceeds the window outright. Same
+   classes work on both composer-pending chips and in-chat chips. */
+.attachment-chip-doc.ctx-tight,
+.msg-doc-chip.ctx-tight {
+  border-color: #d2a437;
+  background: rgba(210, 164, 55, 0.08);
+}
+.attachment-chip-doc.ctx-over,
+.msg-doc-chip.ctx-over {
+  border-color: #c0394d;
+  background: rgba(192, 57, 77, 0.10);
+}
+.attachment-chip-doc.ctx-tight .attachment-doc-meta,
+.attachment-chip-doc.ctx-over  .attachment-doc-meta,
+.msg-doc-chip.ctx-tight  .msg-doc-meta,
+.msg-doc-chip.ctx-over   .msg-doc-meta {
+  color: #d2a437;
+}
+.attachment-chip-doc.ctx-over .attachment-doc-meta,
+.msg-doc-chip.ctx-over .msg-doc-meta {
+  color: #c0394d;
+}
+
+/* Voice prompts: mic button states. Idle inherits paperclip styling;
+   ``.recording`` flips to a red filled circle + pulsing glow so the
+   user can't miss that the mic is hot. The inline duration counter
+   uses tabular-nums so digit advance doesn't reflow the row. */
+.composer-mic-btn {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.composer-mic-btn.recording {
+  color: #c0394d;
+}
+.composer-mic-btn.recording svg {
+  filter: drop-shadow(0 0 4px rgba(192, 57, 77, 0.6));
+  animation: mic-pulse 1.2s ease-in-out infinite;
+}
+@keyframes mic-pulse {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.55; }
+}
+.composer-mic-timer {
+  font-variant-numeric: tabular-nums;
+  font-size: 11px;
+  color: #c0394d;
+  letter-spacing: 0.02em;
+}
+
 /* Drop target highlight while a file is being dragged over the
    composer. Subtle outline + tint keeps the cursor anchored without
    resizing the card. */
