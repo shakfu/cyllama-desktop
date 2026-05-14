@@ -52,6 +52,7 @@ const state = {
     calculator: true,
     read_file: { enabled: false, sandbox_dir: "" },
     web_fetch: false,
+    search_wikipedia: false,
     rag_query: { enabled: false, collection_id: "", top_k: 3 },
     semantic_memory: { enabled: false, collection_id: "", namespace: "default", top_k: 5 },
   },
@@ -179,6 +180,17 @@ function buildToolsBlock() {
     el("span", { class: "ag-tool-hint" }, "network · off by default"),
   );
 
+  // search_wikipedia: scoped network access (Wikipedia API only). Less
+  // dangerous than free-form web_fetch but still off by default.
+  const searchWikipedia = el("label", { class: "ag-tool-row" },
+    el("input", {
+      type: "checkbox", checked: state.tools.search_wikipedia,
+      onchange: (e) => { state.tools.search_wikipedia = e.target.checked; },
+    }),
+    el("span", {}, "Search Wikipedia"),
+    el("span", { class: "ag-tool-hint" }, "en.wikipedia.org only"),
+  );
+
   const ragQuery = el("div", { class: "ag-tool-row-stack" },
     el("label", { class: "ag-tool-row" },
       el("input", {
@@ -192,7 +204,11 @@ function buildToolsBlock() {
     el("div", { class: "ag-tool-sub" }, ragCollectionSelect("rag_query")),
   );
 
-  const children = [calc, readFile, webFetch, ragQuery];
+  const children = [calc, readFile, webFetch];
+  if (state.features["agents.search_wikipedia"]) {
+    children.push(searchWikipedia);
+  }
+  children.push(ragQuery);
   if (state.features["agents.memory"]) {
     const memNs = el("input", {
       type: "text", class: "dp-input", id: "ag-memory-ns",
@@ -738,6 +754,7 @@ function buildToolsSpec() {
     out.read_file = { sandbox_dir: t.read_file.sandbox_dir };
   }
   if (t.web_fetch) out.web_fetch = true;
+  if (t.search_wikipedia) out.search_wikipedia = true;
   if (t.rag_query.enabled && t.rag_query.collection_id) {
     out.rag_query = { collection_id: t.rag_query.collection_id, top_k: t.rag_query.top_k || 3 };
   }

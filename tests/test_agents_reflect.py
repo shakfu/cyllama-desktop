@@ -168,10 +168,13 @@ def test_reflect_critic_runs_without_tools(
     assert r.status_code == 200
     _drain(client, auth, r.json()["job_id"])
 
-    # Two agent instances were created: worker-1 (tools=[calc]) and
+    # Two agent instances were created: worker-1 (tools=[stock cyllama
+    # tools + nothing extra; calculator is auto-injected via the @tool
+    # stock catalog, so the spec's {calculator: true} dedups]) and
     # critic-1 (tools=[]).
     instances = sidecar_app.cyllama.agents.ReActAgent.instances
     assert len(instances) >= 2
     worker, critic = instances[-2], instances[-1]
-    assert len(worker.tools) == 1
+    assert len(worker.tools) >= 1
+    assert "calculator" in {t.name for t in worker.tools}
     assert len(critic.tools) == 0

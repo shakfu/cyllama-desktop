@@ -45,17 +45,6 @@ def test_agent_400_on_blank_task(client, auth, fake_model):
     assert r.status_code == 400
 
 
-def test_agent_400_on_empty_tools(client, auth, fake_model):
-    """ReAct without tools is structurally pointless -- the prompt asks
-    the model to pick from an empty catalog. Reject up front; /chat is
-    the right endpoint for tool-less generation."""
-    r = client.post("/jobs/agent/run", json={
-        "model_path": fake_model, "task": "x",
-    }, headers=auth)
-    assert r.status_code == 400
-    assert "tools required" in r.json()["detail"]
-
-
 def test_agent_501_when_missing(client, auth, fake_model, sidecar_app, monkeypatch):
     monkeypatch.setitem(sidecar_app._FEATURE_FLAGS, "agents", False)
     r = client.post("/jobs/agent/run", json={
@@ -144,6 +133,28 @@ def test_agent_rag_query_400_on_invalid_collection_id(client, auth, fake_model):
     assert r.status_code == 400
 
 
+def test_agent_search_wikipedia_opt_in(client, auth, fake_model, sidecar_app):
+    """``search_wikipedia: true`` adds the stock cyllama @tool. Not in
+    the auto-injected set (network side effect)."""
+    # Default off: stock tools include calculator/time/word_count only.
+    r = client.post("/jobs/agent/run", json={
+        "model_path": fake_model, "task": "x",
+        "tools": {"calculator": True},
+    }, headers=auth)
+    _drain(client, auth, r.json()["job_id"])
+    inst = sidecar_app.cyllama.agents.ReActAgent.instances[-1]
+    assert "search_wikipedia" not in {t.name for t in inst.tools}
+
+    # Opt-in: now present.
+    r = client.post("/jobs/agent/run", json={
+        "model_path": fake_model, "task": "x",
+        "tools": {"search_wikipedia": True},
+    }, headers=auth)
+    _drain(client, auth, r.json()["job_id"])
+    inst = sidecar_app.cyllama.agents.ReActAgent.instances[-1]
+    assert "search_wikipedia" in {t.name for t in inst.tools}
+
+
 def test_agent_passes_selected_tools_to_react_agent(client, auth, fake_model, sidecar_app, tmp_path):
     sandbox = tmp_path / "sandbox"
     sandbox.mkdir()
@@ -159,4 +170,9 @@ def test_agent_passes_selected_tools_to_react_agent(client, auth, fake_model, si
     _drain(client, auth, job_id)
     inst = sidecar_app.cyllama.agents.ReActAgent.instances[-1]
     names = sorted(t.name for t in inst.tools)
-    assert names == ["calculator", "read_file", "web_fetch"]
+    # Auto-injected stock cyllama tools always sit alongside whatever
+    # the renderer picked. The ``calculator`` entry in the spec is a
+    # no-op because the stock @tool already provides it (dedup by name).
+    assert names == [
+        "calculator", "current_time", "read_file", "web_fetch", "word_count",
+    ]

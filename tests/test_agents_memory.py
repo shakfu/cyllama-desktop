@@ -102,7 +102,9 @@ def test_semantic_memory_attaches_two_tools_to_agent(
     names = sorted(t.name for t in inst.tools)
     assert "remember" in names
     assert "recall" in names
-    assert len(inst.tools) == 2  # no other tools requested
+    # Stock cyllama tools (current_time / calculator / word_count) are
+    # auto-injected on top of whatever the renderer requested.
+    assert {"remember", "recall"}.issubset(set(names))
 
 
 def test_semantic_memory_round_trip_via_tool_functions(

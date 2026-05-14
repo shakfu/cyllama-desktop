@@ -53,14 +53,6 @@ def test_constrained_400_on_bad_format(client, auth, fake_model):
     assert r.status_code == 400
 
 
-def test_constrained_400_on_empty_tools(client, auth, fake_model):
-    r = client.post("/jobs/agent/constrained", json={
-        "model_path": fake_model, "task": "x",
-    }, headers=auth)
-    assert r.status_code == 400
-    assert "tools required" in r.json()["detail"]
-
-
 def test_constrained_501_when_missing(client, auth, fake_model, sidecar_app, monkeypatch):
     monkeypatch.setitem(sidecar_app._FEATURE_FLAGS, "agents.constrained", False)
     r = client.post("/jobs/agent/constrained", json={

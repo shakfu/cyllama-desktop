@@ -248,6 +248,29 @@ _AGENT_STREAM_AGENT_FN = _resolve_attr((
     ("cyllama.agents.runner", "stream_agent"),
 ))
 
+# Phase 7+ -- stock cyllama tools (``@tool``-decorated callables in
+# ``cyllama.agents.tools``). These are auto-injected into every agent's
+# tool catalog so the renderer doesn't reimplement primitives the
+# library already ships. Each is probed independently so older cyllama
+# builds (missing a tool) don't disable the others.
+#
+# Inclusion rule: pure / sandboxed only. ``search_wikipedia`` hits the
+# public web -- treat it as opt-in alongside web_fetch, not auto.
+_TOOL_CURRENT_TIME = _resolve_attr((
+    ("cyllama.agents.tools", "current_time"),
+))
+_TOOL_CALCULATOR = _resolve_attr((
+    ("cyllama.agents.tools", "calculator"),
+))
+_TOOL_WORD_COUNT = _resolve_attr((
+    ("cyllama.agents.tools", "word_count"),
+))
+# Opt-in: search_wikipedia hits en.wikipedia.org. Same trust posture as
+# web_fetch -- the renderer enables it explicitly per agent run.
+_TOOL_SEARCH_WIKIPEDIA = _resolve_attr((
+    ("cyllama.agents.tools", "search_wikipedia"),
+))
+
 # Phase 8 -- OpenAI-compatible server. Both flavours (embedded C++
 # server vs. pure-Python http.server-based one) are surfaced; the
 # renderer picks. ``ServerConfig`` is shared between them.
@@ -381,6 +404,9 @@ _FEATURE_FLAGS: dict[str, bool] = {
         or _AGENT_STREAM_AGENT_FN is not None
     ),
     "agents.runner": _AGENT_STREAM_AGENT_FN is not None,
+    # search_wikipedia is opt-in (network) -- renderer hides the toggle
+    # when the cyllama bundle doesn't provide the @tool.
+    "agents.search_wikipedia": _TOOL_SEARCH_WIKIPEDIA is not None,
     "agents.rag_tool": _AGENT_RAG_AS_TOOL_FN is not None,
     "agents.memory": _AGENT_SEMANTIC_MEMORY_CLS is not None,
     "workflow": (
@@ -3131,9 +3157,23 @@ def _build_agent_tools(spec: dict) -> list:
 
     Unknown keys are ignored. Empty tool list is allowed -- the agent
     then runs as a plain reasoning loop without tool calls.
+
+    Stock cyllama tools (``current_time``, ``calculator``, ``word_count``)
+    are auto-injected when available -- the renderer shouldn't reimplement
+    primitives the library already ships. The ``calculator`` key in the
+    spec is honoured for backwards compatibility but is a no-op when the
+    cyllama auto-tool is already present (deduped by name).
     """
     out: list = []
-    if spec.get("calculator"):
+    seen: set[str] = set()
+    for stock in (_TOOL_CURRENT_TIME, _TOOL_CALCULATOR, _TOOL_WORD_COUNT):
+        if stock is not None:
+            out.append(stock)
+            seen.add(getattr(stock, "name", ""))
+    if spec.get("calculator") and "calculator" not in seen:
+        # Older cyllama without the stock ``calculator`` @tool: fall back
+        # to the sidecar's local AST-sandboxed impl so the renderer's
+        # existing ``{calculator: true}`` flow still works.
         out.append(_make_calculator_tool())
     if "read_file" in spec:
         # Treat key-present as intent to enable -- a misconfigured tool
@@ -3147,6 +3187,12 @@ def _build_agent_tools(spec: dict) -> list:
         out.append(_make_read_file_tool(Path(sandbox)))
     if spec.get("web_fetch"):
         out.append(_make_web_fetch_tool())
+    if spec.get("search_wikipedia") and _TOOL_SEARCH_WIKIPEDIA is not None:
+        # Stock cyllama tool. Spec shape: ``true`` (defaults) or
+        # ``{"limit": N}``. The @tool's own signature handles ``limit``;
+        # the agent passes it through as a structured argument, so no
+        # wrapping is needed here.
+        out.append(_TOOL_SEARCH_WIKIPEDIA)
     if "rag_query" in spec:
         rq = spec["rag_query"] if isinstance(spec["rag_query"], dict) else {}
         coll_id = rq.get("collection_id") or ""

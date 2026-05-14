@@ -6,7 +6,48 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-### Added (Agents pane -- full-area config + workflow management, Phase F)
+### Changed (agent jobs consolidated behind `cyllama.agents.runner.stream_agent`)
+- **All five `/jobs/agent/*` endpoints now dispatch through
+  `cyllama.agents.runner.stream_agent(kind, ...)`** -- the
+  per-class branching and the duplicated plan / reflect
+  orchestration loops in the sidecar are gone. Plan and reflect
+  alone dropped ~140 lines of hand-rolled planner / executor /
+  worker / critic scaffolding (and helpers `_DEFAULT_PLANNER_PROMPT`,
+  `_DEFAULT_CRITIC_PROMPT`, `_DEFAULT_CRITIQUE_PREFIX`,
+  `_parse_plan`, `_reflection_revision`). Endpoint URLs and
+  response shapes preserved.
+- **New `_drain_agent_stream` helper** centralises the SSE
+  trace-emission loop used by every endpoint. Holds back the
+  runner's synthetic ``metadata.source == "final"`` event so its
+  content / metadata fold into the ``result`` envelope rather
+  than double-emitting on the trace stream.
+- **`/info.features.agents.runner`** capability flag added.
+  `agents.plan` / `agents.reflect` flags now satisfied by either
+  the legacy class/helper or the new runner, so older cyllama
+  bundles still see the endpoints work via the legacy path while
+  modern bundles transparently upgrade.
+
+### Added (stock cyllama tool auto-injection + search_wikipedia opt-in)
+- **Stock cyllama `@tool` catalog auto-injected** into every
+  agent run when present in `cyllama.agents.tools`:
+  `current_time`, `calculator`, `word_count`. The renderer no
+  longer has to opt into these per-call -- `_build_agent_tools`
+  prepends them to the resolved Tool list and dedupes by name,
+  so the existing `{calculator: true}` spec key becomes a no-op
+  (the stock @tool already provides it). Each tool is probed
+  independently; older cyllama builds missing one don't lose
+  the others. The sidecar's local `_make_calculator_tool` is
+  retained as a fallback when the stock @tool is absent.
+- **`search_wikipedia` opt-in tool** wired through
+  `tools: {search_wikipedia: true}`. Sources cyllama's stock
+  `@tool` directly (query + limit pass through as structured
+  args). New `/info.features.agents.search_wikipedia` capability
+  flag gates the renderer toggle; **"Search Wikipedia" checkbox
+  added to the Agents pane** below "Web fetch", hidden when the
+  flag is false. Off by default (network side effect, even if
+  scoped to en.wikipedia.org).
+
+
 - **`Agents` nav-rail pane** (network-graph icon, gated on
   `/info.features.agents`). Three-column layout mirroring the
   Models pane: left subnav lists six agent types

@@ -51,14 +51,6 @@ def test_contract_400_on_unknown_policy(client, auth, fake_model):
     assert "policy" in r.json()["detail"]
 
 
-def test_contract_400_on_empty_tools(client, auth, fake_model):
-    r = client.post("/jobs/agent/contract", json={
-        "model_path": fake_model, "task": "x",
-    }, headers=auth)
-    assert r.status_code == 400
-    assert "tools required" in r.json()["detail"]
-
-
 def test_contract_501_when_missing(client, auth, fake_model, sidecar_app, monkeypatch):
     monkeypatch.setitem(sidecar_app._FEATURE_FLAGS, "agents.contract", False)
     r = client.post("/jobs/agent/contract", json={

@@ -1097,6 +1097,55 @@ def _install_cyllama_stub() -> None:
     # remember/retrieve implementations backed by an in-memory list so
     # round-trip tests can verify wiring without a real vector store.
     agents.SemanticMemory = _FakeSemanticMemory
+
+    # Phase 7+: cyllama.agents.tools stock @tool catalog. The sidecar
+    # auto-injects current_time / calculator / word_count when available,
+    # so the stub needs to provide them as Tool-shaped objects (name +
+    # func) -- the agent classes only read these two fields.
+    def _stock(name, fn, description=""):
+        return _FakeAgentTool(name=name, description=description, func=fn)
+    def _stock_current_time(timezone="UTC"):
+        return {"timezone": timezone, "iso": "2026-05-13T00:00:00Z"}
+    def _stock_calculator(expression: str) -> str:
+        # Stub mirrors the real one: arithmetic only, raises on bad input.
+        import ast as _ast
+        import operator as _op
+        OPS = {_ast.Add: _op.add, _ast.Sub: _op.sub, _ast.Mult: _op.mul,
+               _ast.Div: _op.truediv, _ast.FloorDiv: _op.floordiv,
+               _ast.Mod: _op.mod, _ast.Pow: _op.pow,
+               _ast.USub: _op.neg, _ast.UAdd: _op.pos}
+        def ev(node):
+            if isinstance(node, _ast.Expression): return ev(node.body)
+            if isinstance(node, _ast.Constant) and isinstance(node.value, (int, float)):
+                return node.value
+            if isinstance(node, _ast.BinOp) and type(node.op) in OPS:
+                return OPS[type(node.op)](ev(node.left), ev(node.right))
+            if isinstance(node, _ast.UnaryOp) and type(node.op) in OPS:
+                return OPS[type(node.op)](ev(node.operand))
+            raise ValueError(f"disallowed: {type(node).__name__}")
+        return str(ev(_ast.parse(expression, mode="eval")))
+    def _stock_word_count(text: str):
+        return {
+            "characters": len(text),
+            "words": len(text.split()),
+            "lines": 0 if not text else text.count("\n") + (0 if text.endswith("\n") else 1),
+        }
+    tools_mod = types.ModuleType("cyllama.agents.tools")
+    tools_mod.current_time = _stock("current_time", _stock_current_time)
+    tools_mod.calculator = _stock("calculator", _stock_calculator)
+    tools_mod.word_count = _stock("word_count", _stock_word_count)
+    def _stock_search_wikipedia(query: str, limit: int = 3):
+        # Stub: returns a fixed result set sized by ``limit`` so tests
+        # can assert the tool was wired without hitting the network.
+        return [
+            {"title": f"Result {i}", "snippet": f"about {query}",
+             "url": f"https://en.wikipedia.org/wiki/Result_{i}"}
+            for i in range(1, min(limit, 3) + 1)
+        ]
+    tools_mod.search_wikipedia = _stock("search_wikipedia", _stock_search_wikipedia)
+    sys.modules["cyllama.agents.tools"] = tools_mod
+    agents.tools = tools_mod
+
     # Phase 7+: cyllama.agents.runner.stream_agent dispatcher. The sidecar
     # probes ``cyllama.agents.runner`` so the runner needs to live as a
     # real module entry (not just an attribute on ``cyllama.agents``).
