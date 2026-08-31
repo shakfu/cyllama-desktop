@@ -61,7 +61,7 @@ _ALLOWED_PARAMS = {
     "n_ctx":             int,
     "n_batch":           int,
     # Phase 2 grammar / GBNF. Passed as a raw GBNF string. Forward-
-    # looking: cyllama 0.2.15's GenerationConfig doesn't accept it, so
+    # looking: cyllama 0.4.2's GenerationConfig doesn't accept it, so
     # the _GC_ACCEPTED gate drops it on the floor for now and the UI
     # hides the row. When cyllama exposes the field this becomes live
     # without further changes.
@@ -231,14 +231,20 @@ _AGENT_RAG_AS_TOOL_FN = _resolve_attr((
 _AGENT_SEMANTIC_MEMORY_CLS = _resolve_attr((
     ("cyllama.agents", "SemanticMemory"),
 ))
+# ``cyllama.agents.__init__`` re-exports the agent classes but not the
+# graph API, so the submodule is the only place these three resolve as
+# of 0.4.2. Both paths are probed so a future re-export still works.
 _AGENT_WORKFLOW_CLS = _resolve_attr((
     ("cyllama.agents", "Workflow"),
+    ("cyllama.agents.workflow", "Workflow"),
 ))
 _AGENT_WORKFLOW_NODE_FN = _resolve_attr((
     ("cyllama.agents", "workflow_node"),
+    ("cyllama.agents.workflow", "workflow_node"),
 ))
 _AGENT_AGENT_NODE_FN = _resolve_attr((
     ("cyllama.agents", "agent_node"),
+    ("cyllama.agents.workflow", "agent_node"),
 ))
 # Phase 7+ -- shared agent dispatcher. ``stream_agent(kind, llm, task, ...)``
 # replaces the per-kind orchestration the sidecar used to carry for
@@ -2105,9 +2111,9 @@ _GGUF_CONTEXT_RESOLVED = False
 def _resolve_gguf_context():
     """Find ``GGUFContext`` across cyllama versions.
 
-    0.2.15 doesn't re-export it at the top-level ``cyllama`` namespace; it
-    lives at ``cyllama.llama.llama_cpp``. Older / newer versions may
-    expose it elsewhere. Resolve once and cache (including the negative
+    The top-level ``cyllama`` namespace doesn't re-export it (still true
+    at 0.4.2); it lives at ``cyllama.llama.llama_cpp``. Older / newer
+    versions may expose it elsewhere. Resolve once and cache (including the negative
     case) so we don't repeatedly walk the import graph.
     """
     global _GGUF_CONTEXT, _GGUF_CONTEXT_RESOLVED

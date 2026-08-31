@@ -13,7 +13,7 @@ or move them to `CHANGELOG.md` under `[Unreleased]`.
 
 - [ ] **Forward-looking sampler fields** still waiting on cyllama for
       `grammar`, `speculative`, `ngram` (as `GenerationConfig` kwargs).
-      0.2.17 rejects all three as unexpected keyword arguments. UI +
+      0.4.2 rejects all three as unexpected keyword arguments. UI +
       sidecar whitelist are already in place; rows surface
       automatically once `/info.supported_params` and `/info.features`
       advertise them. (Penalty + mirostat fields landed in 0.2.17 and

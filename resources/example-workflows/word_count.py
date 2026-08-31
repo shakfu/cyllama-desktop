@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import re
 
-from cyllama.agents import Workflow
+from cyllama.agents.workflow import Workflow
 
 
 flow = Workflow()

@@ -16,20 +16,26 @@ test.afterEach(async () => {
   }
 });
 
-test("composer paperclip surfaces when an mmproj is pinned", async () => {
+test("composer paperclip tooltip picks up a pinned mmproj", async () => {
   ctx = await launchApp();
   const { window } = ctx;
-  // Hidden until an mmproj path is pinned, even though
-  // /info.features.multimodal is true under the conftest stub.
-  await expect(window.locator("#attach")).toBeHidden();
+  // The paperclip covers two independent paths: document extraction
+  // (on under the conftest stub, no pinning needed) and multimodal
+  // images (needs an mmproj pinned). So it starts visible, advertising
+  // documents only.
+  const attach = window.locator("#attach");
+  await expect(attach).toBeVisible();
+  await expect(attach).toHaveAttribute("title", /documents/i);
+  await expect(attach).not.toHaveAttribute("title", /images/i);
   // Pin a stub path via localStorage and dispatch the same custom
   // event the Models tab fires; the chat init listener should
-  // re-evaluate and reveal the paperclip.
+  // re-evaluate and add the image path to the tooltip.
   await window.evaluate(() => {
     localStorage.setItem("mmproj_path", "/stub/path/mmproj.gguf");
     window.dispatchEvent(new CustomEvent("mmproj:changed", { detail: "/stub/path/mmproj.gguf" }));
   });
-  await expect(window.locator("#attach")).toBeVisible({ timeout: 5_000 });
+  await expect(attach).toHaveAttribute("title", /images/i, { timeout: 5_000 });
+  await expect(attach).toBeVisible();
 });
 
 test("Chat pane renders by default", async () => {
@@ -116,15 +122,21 @@ test("Parameters right-tab renders LMStudio-style sections", async () => {
   // openRightTab(window, "models") still hits this pane.
   await expect(window.locator('.rt-tab[data-tab="models"]')).toContainText("Parameters");
   await openRightTab(window, "models");
-  // System Prompt + Sampling stay open by default; the rest are
-  // collapsed. Asserting on a known-open one and a known-closed
-  // one keeps the test pinned to the LMStudio-style accordion IA.
-  await expect(window.locator("#p-system_prompt")).toBeVisible();
-  await expect(window.locator("#p-temperature")).toBeVisible();
-  // Speculative section is collapsed; its draft-model picker is
-  // inside <details> so it shouldn't be in the accessibility tree
-  // until the user expands.
+  // Every section starts collapsed, so the tab opens as a list of
+  // section heads rather than a wall of sliders. Their fields live
+  // inside <details> and so aren't in the accessibility tree until
+  // the user expands.
+  await expect(window.locator("#p-system_prompt")).toBeHidden();
+  await expect(window.locator("#p-temperature")).toBeHidden();
   await expect(window.locator("#p-spec_draft_model")).toBeHidden();
+  // The heads themselves are the load-bearing content, and expanding
+  // one reveals its fields.
+  const sampling = window.locator(".rt-section-head", { hasText: "Sampling" });
+  await expect(sampling).toBeVisible();
+  await sampling.click();
+  await expect(window.locator("#p-temperature")).toBeVisible();
+  // Sections are independent -- expanding Sampling leaves the rest shut.
+  await expect(window.locator("#p-system_prompt")).toBeHidden();
 });
 
 test("Models pane: full-area layout with subnav + table + detail", async () => {

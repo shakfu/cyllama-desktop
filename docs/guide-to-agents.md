@@ -385,7 +385,7 @@ Minimal example:
 
 ```python
 '''Count words in the input text.'''
-from cyllama.agents import Workflow
+from cyllama.agents.workflow import Workflow
 
 flow = Workflow()
 

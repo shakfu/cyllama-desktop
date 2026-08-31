@@ -45,7 +45,7 @@ def _write_workflow(dir_: Path, name: str, body: str) -> Path:
 # ANSWER -> WORKFLOW_END sequence.
 _MIN_FLOW = """
 '''Minimal test workflow.'''
-from cyllama.agents import Workflow
+from cyllama.agents.workflow import Workflow
 
 flow = Workflow()
 flow.add_node("greet", lambda s: {"greet": "hello " + s.get("name", "world")})
@@ -57,7 +57,7 @@ flow.declare_inputs("name")
 
 _FACTORY_FLOW = """
 '''Factory-form workflow.'''
-from cyllama.agents import Workflow
+from cyllama.agents.workflow import Workflow
 
 def make_flow():
     f = Workflow()
@@ -309,3 +309,18 @@ def test_resources_example_workflows_directory_exists():
     # alongside it.
     names = {p.name for p in py_files}
     assert "word_count.py" in names
+
+
+def test_resources_example_workflows_import_and_compile(sidecar_app):
+    """Every shipped example must load through the same path the pane
+    uses. The conftest stub mirrors cyllama 0.4.2's module layout (the
+    graph API lives on ``cyllama.agents.workflow``, not ``cyllama.agents``),
+    so an example importing a symbol the released package doesn't expose
+    fails here instead of on the user's first launch."""
+    repo = Path(__file__).resolve().parent.parent
+    examples = sorted((repo / "resources" / "example-workflows").glob("*.py"))
+    sidecar_app._WORKFLOW_CACHE.clear()
+    for path in examples:
+        compiled = sidecar_app._resolve_workflow(path)
+        assert compiled is not None, path.name
+    sidecar_app._WORKFLOW_CACHE.clear()

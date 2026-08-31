@@ -725,6 +725,18 @@ class _FakeWorkflow:
         node_name = name if isinstance(name, str) else getattr(name, "__name__", "node")
         self._nodes[node_name] = fn
 
+    def node(self, fn=None, *, name=None, timeout=None):  # noqa: ARG002
+        """Layer-C decorator form, as used by the shipped examples.
+
+        Mirrors the real signature (bare ``@flow.node`` and
+        ``@flow.node(name=...)``); dependency inference from parameter
+        names is the runtime's job and irrelevant to the fake.
+        """
+        def register(func):
+            self._nodes[name or func.__name__] = func
+            return func
+        return register if fn is None else register(fn)
+
     def add_edge(self, from_node, to_node):
         self._edges.append((from_node, to_node))
 
@@ -1087,10 +1099,17 @@ def _install_cyllama_stub() -> None:
     agents.ReflectionLoop = type("_FakeReflectionLoop", (), {})
     # Phase D: Workflow / workflow_node / agent_node. The sidecar imports
     # workflow files at runtime and calls compile().dry_run() +
-    # compile().astream(); the fakes implement just that surface.
-    agents.Workflow = _FakeWorkflow
-    agents.workflow_node = lambda *a, **kw: None  # marker for feature flag
-    agents.agent_node = lambda *a, **kw: None     # marker for feature flag
+    # compile().astream(); the fakes implement just that surface. They
+    # live on ``cyllama.agents.workflow`` and NOT on ``cyllama.agents``,
+    # matching cyllama 0.4.2 -- its package __init__ re-exports the agent
+    # classes but not the graph API, so a stub that exported them one
+    # level up would hide broken imports in workflow files.
+    workflow_mod = types.ModuleType("cyllama.agents.workflow")
+    workflow_mod.Workflow = _FakeWorkflow
+    workflow_mod.workflow_node = lambda *a, **kw: None  # feature-flag marker
+    workflow_mod.agent_node = lambda *a, **kw: None     # feature-flag marker
+    sys.modules["cyllama.agents.workflow"] = workflow_mod
+    agents.workflow = workflow_mod
     # Phase E: SemanticMemory. The sidecar constructs an instance with a
     # rag-shaped shim + namespace, then wraps ``remember`` / ``retrieve``
     # as Tools. The fake records the rag + namespace and provides minimal

@@ -2,9 +2,11 @@
 name = "cyllama-sidecar"
 version = "0.1.0"
 description = "FastAPI sidecar that exposes cyllama over localhost HTTP/SSE"
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 dependencies = [
-  "cyllama",
+  # 0.4.2 is what scripts/build-python-env.sh bundles; the floor also
+  # matches cyllama's own cp312-abi3 wheel tag.
+  "cyllama>=0.4.2",
   "fastapi>=0.115",
   "uvicorn[standard]>=0.32",
   # Required for FastAPI multipart parsing (POST /chat/upload).

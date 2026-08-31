@@ -6,7 +6,48 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-### Changed (right-pane polish: Hardware label, Sampling default-closed, preset semantics)
+### Changed (bundled cyllama 0.2.15 -> 0.4.2)
+
+- **Bundled cyllama bumped to 0.4.2.**
+  ``scripts/build-python-env.sh`` pinned ``0.2.15``; the last three
+  cyllama minor releases (llama.cpp ``b9352`` -> ``v0.3.0``,
+  stable-diffusion.cpp ``master-652`` -> ``master-816``, whisper.cpp
+  ``v1.8.4`` -> ``v1.9.2``) shipped only additively for the API the
+  sidecar calls -- ``LLM`` / ``GenerationConfig`` / ``text_to_image`` /
+  ``RAG`` / ``estimate_gpu_layers`` / ``WhisperFullParams`` /
+  ``stream_agent`` all keep their signatures, and the removals
+  (``LlamaModelParams.use_mmap`` and friends, the SD
+  ``keep_*_on_cpu`` flags, ``Prediction.FLUX2_FLOW``) are on api the
+  sidecar never touched. ``PY_VERSION`` stays at 3.12.7: from 0.3.0
+  cyllama publishes ``cp312-abi3`` wheels only. Verified against a
+  real 0.4.2 install -- chat streaming, ``/tokenize``,
+  ``/models/inspect``, ``/hardware/estimate-layers``,
+  ``/grammar/from-schema``, ``/jobs/agent/run`` and
+  ``/jobs/workflow/run``. ``python-sidecar/pyproject.toml`` gains the
+  matching ``cyllama>=0.4.2`` floor and raises ``requires-python`` to
+  ``>=3.12``.
+
+### Fixed (agent-workflow row was unreachable on every released cyllama)
+
+- **``Workflow`` / ``workflow_node`` / ``agent_node`` were probed at a
+  path no released cyllama has.** ``cyllama.agents`` re-exports the
+  agent classes but not the graph api, which lives at
+  ``cyllama.agents.workflow``. All three probes therefore resolved to
+  ``None``, ``/info.features.workflow`` reported ``false``, and the
+  agent-workflow row in the Agents pane rendered its "unavailable"
+  placeholder. Both paths are probed now.
+
+- **The shipped example workflow imported ``Workflow`` from the same
+  wrong path**, so ``/workflows`` would have listed
+  ``word_count.py`` with an ``ImportError`` once the flag flipped;
+  ``docs/guide-to-agents.md`` taught users the same import. The
+  conftest cyllama stub is what hid both: it exported the graph api one
+  level up, from a namespace the real package never had. It now mirrors
+  0.4.2's module layout, and
+  ``test_resources_example_workflows_import_and_compile`` loads every
+  shipped example through the ``_resolve_workflow`` path the pane uses.
+
+### Changed (right-pane polish: Hardware label, sections default-closed, preset semantics)
 - **Right-pane section renamed.** The collapsible block holding
   ``GPU layers / Context / Batch / Main GPU / Split mode /
   Tensor split`` was titled "Settings", which collided with the
@@ -14,10 +55,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   **"Hardware"** to match the underlying form id (``hwForm``) and
   the section's actual content. n_ctx / n_batch are CPU-relevant
   too so "Hardware" is more accurate than "GPU Settings".
-- **Sampling section starts collapsed** in the right pane (it was
-  ``<details open>``). Most users tweak a preset rather than the
-  individual sliders; the long list pushed System Prompt off
-  screen on smaller windows.
+- **System Prompt and Sampling start collapsed** in the right pane
+  (both were ``<details open>``). Every section in the tab is closed
+  now, so it opens as a list of section heads: most users pick a
+  preset rather than tweaking individual sliders, and the open
+  sampling list pushed the sections under it off screen on smaller
+  windows. ``Parameters right-tab renders LMStudio-style sections``
+  (e2e) asserts the closed default and that expanding one section
+  leaves its siblings shut.
 - **Presets no longer clobber the system prompt by default.**
   Built-in presets (``Default``, ``Creative``, ``Precise``,
   ``Long-context``) now carry ``system_prompt: null`` ("don't
@@ -134,7 +179,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Paperclip button surfaces on either path** -- previously
   gated on multimodal + mmproj, now also surfaces when
   ``features["documents.extract"]`` is true. Tooltip names the
-  attachment types the current config supports.
+  attachment types the current config supports. The e2e spec that
+  asserted "hidden until an mmproj is pinned" now asserts the
+  tooltip instead: documents-only before pinning, images after the
+  ``mmproj:changed`` event.
 - **Drag-and-drop on the composer** (`drag-active` outline
   highlight while hovering). Files-only filter; rejects text
   drags and other non-file payloads.
@@ -793,7 +841,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   surface (Chat, Documents, Transcribe, Image, Server, Batch,
   Models tab, Agents tab, General tab). Each boots Electron via
   `_electron.launch`, switches into the pane, and asserts the
-  primary content rendered (header / form fields / load-bearing
+  primary content rendered (header / form fields / structural
   buttons). Catches the layer pytest can't reach: the IPC bridge,
   the sidecar handshake, the `/info.features` → nav-button visibility
   wiring, and per-pane lifecycle hooks.
