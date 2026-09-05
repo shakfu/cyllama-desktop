@@ -6,9 +6,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-### Changed (bundled cyllama 0.2.15 -> 0.4.2)
+### Changed (bundled cyllama 0.2.15 -> 0.4.4)
 
-- **Bundled cyllama bumped to 0.4.2.**
+- **Bundled cyllama bumped to 0.4.4.**
   ``scripts/build-python-env.sh`` pinned ``0.2.15``; the last three
   cyllama minor releases (llama.cpp ``b9352`` -> ``v0.3.0``,
   stable-diffusion.cpp ``master-652`` -> ``master-816``, whisper.cpp
@@ -24,8 +24,163 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   ``/models/inspect``, ``/hardware/estimate-layers``,
   ``/grammar/from-schema``, ``/jobs/agent/run`` and
   ``/jobs/workflow/run``. ``python-sidecar/pyproject.toml`` gains the
-  matching ``cyllama>=0.4.2`` floor and raises ``requires-python`` to
+  matching ``cyllama>=0.4.4`` floor and raises ``requires-python`` to
   ``>=3.12``.
+
+- **0.4.2 -> 0.4.4 is additive for the sidecar.** Re-verified against a
+  real 0.4.4 install (built from source): every ``/info.features`` flag
+  resolves exactly as it did on 0.4.2 -- ``grammar`` / ``speculative`` /
+  ``ngram`` stay ``false`` because ``GenerationConfig`` still rejects
+  those kwargs (the standing TODO), and all twenty others stay ``true``,
+  so no probe was silently orphaned by a rename. Smoke-tested end to
+  end: chat streaming, ``/tokenize``, ``/models/cached``,
+  ``/models/inspect``, ``/hardware/estimate-layers``,
+  ``/grammar/from-schema``, ``/jobs/transcribe``, ``/jobs/agent/run``,
+  ``/jobs/workflow/run`` and RAG ingest + retrieve. The one behavioural
+  change on the sidecar's path is 0.4.3's numpy removal:
+  ``load_wav_file`` returns a stdlib ``array('f')`` instead of an
+  ``ndarray``, which ``/jobs/transcribe`` hands straight to
+  ``WhisperContext.full()`` unchanged -- jfk.wav transcribes correctly.
+
+### Added (per-GPU build variants)
+
+- **The app can be built against any of cyllama's per-backend
+  distributions.** cyllama ships the same import package under five
+  distribution names -- ``cyllama`` (CPU, and Metal on macOS arm64),
+  ``cyllama-cuda12``, ``cyllama-vulkan``, ``cyllama-rocm``,
+  ``cyllama-sycl`` -- but ``scripts/build-python-env.sh`` only ever
+  installed the one *named* ``cyllama``, so every Linux and Windows
+  bundle was CPU-only with no way to ask for anything else. On the
+  numbers in this project's own 0.4.2 Windows entry that is 10.6 tok/s
+  where the GPU build gives 53.1.
+
+  ``make variant-cuda`` (and ``-cpu`` / ``-vulkan`` / ``-rocm`` /
+  ``-sycl``) now switches the bundled distribution and rebuilds the
+  Python env; ``make app-<backend>`` goes on to build the installer;
+  ``make variant`` prints the current selection. The choice is recorded
+  in a single line of ``python-sidecar/pyproject.toml`` by
+  ``scripts/set-cyllama-variant.py``, and ``build-python-env.sh`` reads
+  the distribution name back out of that same line -- so the wheel that
+  gets installed and the sidecar's own dependency metadata cannot drift
+  apart. That matters more than it sounds: two cyllama distributions own
+  the same ``site-packages/cyllama/`` directory, so a disagreement would
+  have ``pip install ./python-sidecar`` quietly install the *other*
+  backend over the one just installed. For the same reason a switch
+  wipes the env instead of upgrading in place.
+
+  The selector refuses combinations cyllama does not publish (CUDA on
+  macOS, ROCm or SYCL on Windows) rather than failing later at pip, and
+  says where each backend *is* available; ``--platform`` targets a host
+  other than the current one. It also refuses a variant pin combined
+  with ``CYLLAMA_SOURCE``, since a local source build installs as plain
+  ``cyllama`` whatever backend it was compiled with. Both checks run
+  before the ~30 MB runtime download and before the env is wiped, so a
+  bad combination costs 8 ms and leaves the existing env intact.
+
+  Variants get their own installer filename
+  (``artifactName: ${productName}-${version}-<backend>-${arch}.${ext}``)
+  so a CUDA build and a CPU build coexist in ``dist/``. ``appId`` and
+  ``productName`` are deliberately untouched: these are one application
+  with a different accelerator, not competing apps, so they share config
+  and user data. Which backend a given bundle actually has is visible at
+  runtime in General -> backends, now that that row reports cyllama's
+  build config (see below).
+
+  Apple silicon needs none of this and the tooling says so: the default
+  distribution's macOS arm64 wheel already has ``metal: true`` compiled
+  in, so ``cpu`` is the GPU build there.
+
+  The targets are written out one per backend rather than as
+  ``variant-%`` / ``app-%`` pattern rules. A pattern rule is the obvious
+  way to write ten near-identical targets and it does not work here:
+  GNU make excludes ``.PHONY`` targets from implicit-rule search, so
+  every one of them matched nothing and reported "Nothing to be done"
+  while appearing to succeed. The recipes share two canned recipes
+  (``switch_variant`` and ``BUILD_APP``) instead.
+
+  20 tests in ``tests/test_variants.py`` cover the round trip, that the
+  version floor and every other line survive a switch, that installer
+  names don't accumulate backend suffixes, that refusals leave both
+  files untouched, and two that exist because the obvious test would
+  have missed the real failure: that the ``sed`` in
+  ``build-python-env.sh`` and the selector's own regex still agree on
+  which line they are reading, and that every ``variant-*`` / ``app-*``
+  target actually resolves to a recipe -- asked of ``make --dry-run``
+  itself, since being listed in ``.PHONY`` is not the same as being
+  buildable, and the ``.PHONY`` check alone passed against targets that
+  did nothing.
+
+  Verified end to end on Linux + CUDA (RTX 4060, driver 595.84):
+  ``make variant-cuda`` installs ``cyllama_cuda12-0.4.4``, ``cyllama
+  info`` reports ``built: CUDA`` and ``registries: CUDA, CPU``,
+  ``/info.backends`` reports ``cuda: true``, and Qwen3-4B-Q8 runs at
+  54.4 tok/s against 9.7 on the CPU path of the same bundle -- within
+  noise of cyllama's own 53.1/10.6 figures for that model. The packaged
+  AppImage loads ``libggml-cuda-*.so`` from its own
+  ``cyllama_cuda12.libs``, so the accelerator ships inside the bundle
+  and needs only the host's NVIDIA driver.
+
+### Fixed (backends row was empty on every build; numpy dropped)
+
+- **``/info.backends`` was always ``{}``.** ``_backend_flags()`` probed
+  ``cyllama._backend`` / ``cyllama.backend``, and no released cyllama
+  has ever exported either -- so the "backends" row in the General tab
+  and the Preferences window read "(none enabled)" on every build,
+  CUDA and Metal ones included. It now reads
+  ``cyllama._internal.build_config.backend()``, the generated build
+  config, reporting ``hip`` under its common name ``rocm`` and adding
+  ``blas``; ``openmp`` is skipped (the config reports it as ``None``,
+  not a backend entry). The import is guarded, so a cyllama without
+  the module degrades to ``{}`` instead of taking ``/info`` down.
+  Same root cause as the workflow-path bug below, and hidden the same
+  way: **the conftest cyllama stub exported ``_backend``, a namespace
+  the real package never had**, so the test asserting a populated
+  backends dict passed against a shape that only existed in the stub.
+  The stub now mirrors 0.4.4's ``cyllama._internal.build_config``,
+  including its ``{name: {"enabled": bool, ...}}`` detail-dict shape.
+
+- **``numpy`` dropped from the sidecar's dependencies.** It was there
+  only because ``cyllama.whisper.cli.load_wav_file`` used to return
+  ``ndarray``; cyllama 0.4.3 removed its own numpy import and the
+  helper now returns a stdlib ``array('f')``. The sidecar never
+  imported numpy itself (``_jsonify`` is duck-typed on ``.item()``),
+  so this removes ~30 MB from the bundle with no code change.
+  Verified numpy-free end to end: ``/jobs/transcribe`` returns the
+  correct jfk.wav transcript and ``/models/inspect`` still coerces
+  GGUF metadata.
+
+### Added (libgomp backstop for local source builds on Linux)
+
+- **``make python-local`` can produce an env that cannot import
+  cyllama, and now repairs itself.** On a host where the prebuilt ggml
+  archives in ``thirdparty/*/lib`` were compiled with OpenMP but the
+  extension's own CMake configure could not detect it, the extensions
+  are left with undefined ``omp_*`` / ``GOMP_*`` symbols and no
+  matching ``DT_NEEDED``, and every entry point dies at
+  ``import cyllama`` with ``undefined symbol: omp_get_thread_num``.
+  cyllama's CMake links ``OpenMP::OpenMP_CXX`` on Linux only when
+  ``find_package(OpenMP)`` succeeds and degrades silently when it does
+  not; the trigger seen here was CMake selecting ``clang`` on a host
+  with no ``libomp-dev`` while the archives had been built with gcc
+  (``OpenMP_CXX_FLAGS:STRING=NOTFOUND`` in the cache). The published
+  wheels cannot land in this state -- they are built where OpenMP is
+  detected, link libgomp themselves, and auditwheel then vendors it as
+  ``libgomp-<hash>.so.1``. (auditwheel rewrites existing ``DT_NEEDED``
+  entries and never adds a missing one, so it would not have rescued
+  such a build either.)
+
+  The actual fix is to give the compiler CMake picks its OpenMP dev
+  headers and rebuild cyllama. ``scripts/build-python-env.sh`` now
+  carries a backstop for hosts in that state: it vendors the host
+  ``libgomp.so.1`` into ``cyllama/.libs-local/`` and patches each
+  affected extension with ``--add-needed`` plus an ``$ORIGIN``-relative
+  RPATH (prepended, so the build's own RPATH survives), keeping the env
+  self-contained rather than dependent on the build host at run time.
+  Runs only for ``CYLLAMA_SOURCE`` builds on Linux, is a no-op on a
+  correctly linked build (it skips extensions that reference no
+  OpenMP), and warns rather than fails if ``patchelf`` is absent.
+  Verified on a clean rebuild of an affected host: four extensions
+  patched, ``import cyllama`` clean with no ``LD_PRELOAD``.
 
 ### Fixed (agent-workflow row was unreachable on every released cyllama)
 

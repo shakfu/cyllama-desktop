@@ -1,5 +1,6 @@
 appId: com.shakfu.cyllama-desktop
 productName: Cyllama Desktop
+artifactName: ${productName}-${version}-cpu-${arch}.${ext}
 directories:
   output: dist
   buildResources: resources

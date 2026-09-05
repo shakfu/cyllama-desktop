@@ -825,27 +825,55 @@ def health():
     return {"ok": True}
 
 
-def _backend_flags() -> dict[str, bool]:
-    """Best-effort introspection of which GPU backends cyllama has linked.
+# Backends the General tab / Preferences window lists, in display order.
+# ``hip`` is cyllama's key for what everyone else calls ROCm; it is
+# reported under the familiar name.
+_BACKEND_NAMES = ("cuda", "hip", "metal", "vulkan", "sycl", "opencl", "blas")
+_BACKEND_ALIASES = {"hip": "rocm"}
 
-    cyllama's backend module name and attribute set has shifted across
-    versions; rather than hard-coding one shape, probe for several known
-    forms and report what we find. Missing attribute => False. Static for
-    the lifetime of the process so the result is computed once and
+
+def _backend_flags() -> dict[str, bool]:
+    """Report which GPU backends the installed cyllama was built with.
+
+    Source of truth is the generated build config
+    (``cyllama._internal.build_config.backend()``), which returns
+    ``{name: {"enabled": bool, ...}}`` -- one entry per backend, with
+    extra per-backend detail we don't surface. It is a private module
+    today and slated to become public, so the import is guarded and a
+    failure degrades to ``{}`` (the renderer prints "(none reported)")
+    rather than taking ``/info`` down.
+
+    The pre-0.4.3 probe looked for ``cyllama._backend`` / ``cyllama.backend``,
+    which no released cyllama has ever exported -- so this always
+    returned ``{}`` and the backends row read "(none enabled)" on every
+    build, GPU ones included.
+
+    Static for the lifetime of the process, so it is computed once and
     cached in ``_INFO_CACHE`` below.
     """
+    try:
+        from cyllama._internal import build_config
+    except Exception:  # noqa: BLE001
+        return {}
+    try:
+        raw = build_config.backend()
+    except Exception:  # noqa: BLE001
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+
     flags: dict[str, bool] = {}
-    candidates = ("cuda", "metal", "rocm", "vulkan", "sycl", "opencl", "blas")
-    backend = getattr(cyllama, "_backend", None) or getattr(cyllama, "backend", None)
-    if backend is not None:
-        for name in candidates:
-            v = getattr(backend, name, None)
-            if v is None:
-                continue
-            try:
-                flags[name] = bool(v() if callable(v) else v)
-            except Exception:  # noqa: BLE001
-                flags[name] = False
+    for name in _BACKEND_NAMES:
+        entry = raw.get(name)
+        if entry is None:
+            continue
+        # Each value is a per-backend detail dict; a bare bool is
+        # accepted too so a future flattening of the shape still works.
+        if isinstance(entry, dict):
+            enabled = bool(entry.get("enabled"))
+        else:
+            enabled = bool(entry)
+        flags[_BACKEND_ALIASES.get(name, name)] = enabled
     return flags
 
 
@@ -1792,7 +1820,7 @@ def _jsonify(v):
         return {str(k): _jsonify(x) for k, x in v.items()}
     if isinstance(v, (list, tuple)):
         return [_jsonify(x) for x in v]
-    # Numpy scalars expose .item(); fall back to str.
+    # Array-ish scalars expose .item(); fall back to str.
     if hasattr(v, "item"):
         try:
             return _jsonify(v.item())
@@ -2182,7 +2210,7 @@ async def models_inspect(req: Request):
                 continue
         if meta is None:
             return {"path": model_path, "metadata": None, "error": "no metadata getter matched"}
-        # GGUF metadata values can include numpy types; coerce to JSON-safe.
+        # GGUF metadata values can include non-JSON scalar types; coerce.
         return {"path": model_path, "metadata": _jsonify(meta)}
     except Exception as exc:  # noqa: BLE001
         return {"path": model_path, "metadata": None, "error": str(exc)}

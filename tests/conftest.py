@@ -108,13 +108,21 @@ class _FakeGenerationConfig:
         return getattr(self, key)
 
 
-class _FakeBackend:
-    cuda = False
-    metal = True
-    rocm = False
-    vulkan = False
-    sycl = False
-    opencl = False
+# Mirrors ``cyllama._internal.build_config.backend()``: one entry per
+# backend, each a detail dict whose ``enabled`` key is what the sidecar
+# reads. ``hip`` is cyllama's spelling of ROCm; ``/info`` renames it.
+# The extra keys are deliberate -- they keep the stub honest about the
+# real shape, which carries per-backend build detail we ignore.
+_FAKE_BUILD_BACKENDS = {
+    "cuda": {"enabled": False, "architectures": None},
+    "hip": {"enabled": False, "architectures": None},
+    "metal": {"enabled": True},
+    "vulkan": {"enabled": False},
+    "sycl": {"enabled": False, "host_runtimes": []},
+    "opencl": {"enabled": False},
+    "blas": {"enabled": False, "vendor": None},
+    "openmp": None,
+}
 
 
 class _FakeGGUFContext:
@@ -1040,10 +1048,23 @@ def _install_cyllama_stub() -> None:
     mod.__version__ = "0.0.0-test"
     mod.LLM = _FakeLLM
     mod.GenerationConfig = _FakeGenerationConfig
-    mod._backend = _FakeBackend
     mod.GGUFContext = _FakeGGUFContext
     mod.batch_generate = _fake_batch_generate
     sys.modules["cyllama"] = mod
+
+    # cyllama._internal.build_config -- the generated build config the
+    # sidecar reads backend flags from. It is imported as a module, so
+    # (like cyllama.utils below) it has to be a real sys.modules entry.
+    internal = types.ModuleType("cyllama._internal")
+    build_config = types.ModuleType("cyllama._internal.build_config")
+    build_config.backend = lambda: dict(_FAKE_BUILD_BACKENDS)
+    build_config.backend_enabled = lambda name: bool(
+        (_FAKE_BUILD_BACKENDS.get(name) or {}).get("enabled")
+    )
+    internal.build_config = build_config
+    mod._internal = internal
+    sys.modules["cyllama._internal"] = internal
+    sys.modules["cyllama._internal.build_config"] = build_config
 
     # cyllama.utils.json_schema_to_grammar -- the sidecar resolves this
     # via importlib.import_module so it has to exist as a real module

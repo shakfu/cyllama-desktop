@@ -21,9 +21,12 @@ def test_info_shape(client, auth):
     body = r.json()
     assert "cyllama" in body and "backends" in body and "sidecar" in body
     assert body["cyllama"]["version"] == "0.0.0-test"
+    # Sourced from cyllama._internal.build_config.backend(); "hip" is
+    # reported under its common name, and "openmp" (which the build
+    # config reports as None, not a backend dict) is dropped.
     assert body["backends"] == {
-        "cuda": False, "metal": True, "rocm": False,
-        "vulkan": False, "sycl": False, "opencl": False,
+        "cuda": False, "metal": True, "rocm": False, "vulkan": False,
+        "sycl": False, "opencl": False, "blas": False,
     }
     assert "artifacts_dir" in body["sidecar"]
 

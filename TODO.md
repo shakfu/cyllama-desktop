@@ -13,7 +13,7 @@ or move them to `CHANGELOG.md` under `[Unreleased]`.
 
 - [ ] **Forward-looking sampler fields** still waiting on cyllama for
       `grammar`, `speculative`, `ngram` (as `GenerationConfig` kwargs).
-      0.4.2 rejects all three as unexpected keyword arguments. UI +
+      0.4.4 rejects all three as unexpected keyword arguments. UI +
       sidecar whitelist are already in place; rows surface
       automatically once `/info.supported_params` and `/info.features`
       advertise them. (Penalty + mirostat fields landed in 0.2.17 and
@@ -121,9 +121,33 @@ else below is still missing.
       notarize, install on a clean machine, verify Gatekeeper passes.
 - [ ] macOS x86_64 build (PBS triple `x86_64-apple-darwin`); requires a
       matching CI runner.
-- [ ] Windows installer: pick CUDA vs CPU/Vulkan strategy. Either two
-      installers or one installer with both Python envs and runtime
-      detection. Verify cyllama's CUDA install on a Windows CI host first.
+- [ ] Windows installer: the CUDA vs CPU/Vulkan strategy is settled --
+      one installer per backend, not one installer carrying several
+      Python envs with runtime detection. The variant targets already
+      build them (`make app-cuda` / `app-vulkan` / `app-cpu` on a
+      Windows host produce NSIS installers named per backend), so what
+      is left is CI and verification, not design: a Windows runner per
+      backend, `cyllama-cuda12` and `cyllama-vulkan` install-and-import
+      checked on a clean host (0.4.2 shipped Windows GPU wheels that
+      silently ran on the CPU -- confirm `cyllama info` reports
+      `registries: CPU, CUDA`, not just `built: CUDA`), and a decision
+      on which artifact the download page offers by default. cyllama
+      publishes no `rocm` or `sycl` wheel for Windows, so those two
+      targets are Linux-only there.
+- [ ] **Ship a `deb` alongside the AppImage.** Ubuntu 24.04 sets
+      `kernel.apparmor_restrict_unprivileged_userns=1`, which denies
+      Electron the namespace sandbox; it falls back to the SUID helper,
+      and `chrome-sandbox` inside a user-owned FUSE mount can never be
+      root-owned `4755`, so the AppImage aborts with
+      `FATAL:setuid_sandbox_host.cc(163)` before the window opens. The
+      only workaround is `--no-sandbox`, which disables renderer
+      isolation. dpkg installs to `/opt` with `chrome-sandbox` root-owned
+      `4755`, so the sandbox works with no flag and no sysctl change.
+      One entry in `electron-builder.yml`'s `linux.target` plus a repack
+      (no Python env rebuild). Verified as a real wall on 24.04, not a
+      theoretical one; it affects every Electron AppImage, so the
+      AppImage should become the portable fallback rather than the
+      primary Linux artifact.
 - [ ] Linux AppImage: validate cyllama's Linux wheel + GPU backend story.
 - [ ] Crash reporting (Sentry or similar) with sidecar/renderer separation.
 
@@ -148,6 +172,18 @@ else below is still missing.
 - [ ] Move sidecar's per-model `LLM` slot to a real LRU; current
       single-slot eviction churns when alternating between two
       models.
+- [ ] **`CYLLAMA_SOURCE` leaks in from the environment.** make exports
+      environment variables into every recipe, so an exported
+      `CYLLAMA_SOURCE` (easy to have if you develop against a local
+      cyllama checkout) silently turns `make python` -- and `make
+      variant-cpu` -- into a source build, while the release path is
+      supposed to be PyPI-only. The variant guard in
+      `build-python-env.sh` catches this for GPU variants (dist name
+      mismatch) but not for `cpu`, where the two paths install under the
+      same name. Fix: have the `python` and `variant-*` targets invoke
+      the script with `CYLLAMA_SOURCE=` cleared, so only `python-local`
+      can trigger a source build. Confirmed reproducible with a probe
+      makefile.
 - [ ] Conftest's `_install_cyllama_stub()` runs `import pytest` at
       module level, which forces the Playwright e2e launcher to
       install pytest just to load the stub. Extract the stub into a

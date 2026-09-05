@@ -74,11 +74,46 @@ Quick path: `make` builds an installer for the host platform (macOS arm64 -> `.d
 make           Build a distributable installer (default = dmg on macOS)
 make dev       npm install + build python env + npm start
 make python    Build only the bundled Python env
+make variant   Show which cyllama GPU variant the build is pinned to
 make test      Run the sidecar pytest suite
 make e2e       Run the Playwright per-pane smoke suite
 make clean     Remove dist/ and build/
 make reset     Also remove node_modules/
 ```
+
+### GPU variants
+
+cyllama publishes the same import package under one distribution name per
+backend, so the app can be built against whichever one matches the target
+machine. Pick it with a variant target, which rewrites the sidecar's pin,
+rebuilds the bundled Python env, and (for `app-*`) produces an installer
+named after the backend so builds don't overwrite each other in `dist/`:
+
+```
+make variant-cpu     make app-cpu       # cyllama          (also Metal on macOS arm64)
+make variant-cuda    make app-cuda      # cyllama-cuda12   (Linux, Windows)
+make variant-vulkan  make app-vulkan    # cyllama-vulkan   (Linux, Windows, macOS x86_64)
+make variant-rocm    make app-rocm      # cyllama-rocm     (Linux)
+make variant-sycl    make app-sycl      # cyllama-sycl     (Linux)
+```
+
+`make variant` prints the current selection. **On Apple silicon there is
+nothing to choose**: the default `cpu` distribution's macOS arm64 wheel
+already has Metal compiled in, so it *is* the GPU build there. The variant
+targets matter on Linux and Windows, where the default wheel is CPU-only.
+
+Only one distribution can be installed at a time -- they all own the same
+`cyllama/` directory -- so switching wipes and rebuilds the env rather than
+upgrading in place. The selected backend shows up at runtime in
+General -> backends (sourced from cyllama's own build config), which is the
+quickest way to confirm a bundle is what you think it is.
+
+The choice lives in one line of `python-sidecar/pyproject.toml`;
+`scripts/build-python-env.sh` reads it back from there, so the wheel that
+gets installed and the sidecar's dependency metadata cannot disagree.
+Building from a local cyllama checkout (`make python-local`) is CPU-variant
+only, since a source build installs under the plain `cyllama` name whatever
+backend its own build flags selected.
 
 Manual phases (what `make` runs under the hood):
 
