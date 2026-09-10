@@ -129,7 +129,7 @@ test("Parameters right-tab renders LMStudio-style sections", async () => {
   await expect(window.locator("#p-system_prompt")).toBeHidden();
   await expect(window.locator("#p-temperature")).toBeHidden();
   await expect(window.locator("#p-spec_draft_model")).toBeHidden();
-  // The heads themselves are the load-bearing content, and expanding
+  // The heads themselves are the structural content, and expanding
   // one reveals its fields.
   const sampling = window.locator(".rt-section-head", { hasText: "Sampling" });
   await expect(sampling).toBeVisible();
@@ -212,7 +212,7 @@ test("cog nav-rail opens the Preferences window", async () => {
   await prefs.waitForLoadState("domcontentloaded");
   // Sidebar carries the four category tabs; default-selected is
   // General. The presence of all four data-prefs-tab buttons is the
-  // load-bearing check.
+  // structural check.
   await expect(prefs.locator(".prefs-nav-item")).toHaveCount(4);
   await expect(prefs.locator(".prefs-nav-item.active")).toContainText("General");
 });
