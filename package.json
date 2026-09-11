@@ -1,7 +1,7 @@
 {
   "name": "cyllama-desktop",
   "productName": "Cyllama Desktop",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Desktop app for cyllama (Electron + bundled Python sidecar)",
   "main": "src/main/index.js",
   "scripts": {
