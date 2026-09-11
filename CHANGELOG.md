@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.0]
+
 ### Changed (bundled cyllama 0.2.15 -> 0.4.4)
 
 - **Bundled cyllama bumped to 0.4.4.**
