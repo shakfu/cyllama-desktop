@@ -1,0 +1,198 @@
+# Build one unsigned installer per published cyllama variant, and on a
+# release tag publish them as a GitHub release. Follows chimera's
+# release.yml.
+#
+# Each job runs on a host matching its target: build-python-env.sh
+# cannot cross-build. The matrix lists only combinations cyllama 0.4.5
+# publishes a wheel for (see VARIANTS in scripts/set-cyllama-variant.py).
+# macOS arm64 builds cpu only; that wheel already includes Metal.
+#
+# Triggers:
+#   push of a bare-semver tag (0.2.0)  -> build + publish that release
+#   workflow_dispatch with tag         -> rebuild + republish an existing tag
+#   workflow_dispatch without tag      -> build the selected ref, no publish
+#
+# Publish is strict: it needs every build leg, so one failure ships nothing.
+
+name: build
+
+on:
+  push:
+    tags:
+      - '[0-9]+.[0-9]+.[0-9]+*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag to release (e.g. 0.2.0). Empty = build only.'
+        required: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.tag || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  preflight:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - id: tag
+        run: echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+        env:
+          TAG: ${{ inputs.tag || (github.event_name == 'push' && github.ref_name) || '' }}
+
+      # A missing tag otherwise surfaces as an opaque checkout failure.
+      - name: Verify tag exists on origin
+        if: steps.tag.outputs.tag != ''
+        run: |
+          remote="${{ github.server_url }}/${{ github.repository }}"
+          if ! git ls-remote --tags --exit-code "$remote" "refs/tags/$TAG" >/dev/null; then
+            echo "::error::tag '$TAG' does not exist on origin. Push it first: git tag $TAG && git push origin $TAG"
+            exit 1
+          fi
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+
+      - uses: actions/checkout@v7
+        if: steps.tag.outputs.tag != ''
+        with:
+          ref: ${{ steps.tag.outputs.tag }}
+
+      - name: Check tag matches package.json version
+        # Installer names use package.json's version, not the tag.
+        if: steps.tag.outputs.tag != ''
+        run: |
+          version=$(node -p "require('./package.json').version")
+          if [[ "$TAG" != "$version" ]]; then
+            echo "::error::tag $TAG does not match package.json version $version"
+            exit 1
+          fi
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+
+  build:
+    name: ${{ matrix.platform }}-${{ matrix.variant }}
+    needs: preflight
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { platform: mac,   runner: macos-15,       variant: cpu,    target: "build:mac-arm64" }
+          - { platform: linux, runner: ubuntu-latest,  variant: cpu,    target: "build:linux" }
+          - { platform: linux, runner: ubuntu-latest,  variant: vulkan, target: "build:linux" }
+          # These link libcuda / libamdhip64 / libsycl directly, which a
+          # GPU-less runner lacks, so the build's import check is skipped.
+          - { platform: linux, runner: ubuntu-latest,  variant: cuda,   target: "build:linux", skip_import: "1" }
+          - { platform: linux, runner: ubuntu-latest,  variant: rocm,   target: "build:linux", skip_import: "1" }
+          - { platform: linux, runner: ubuntu-latest,  variant: sycl,   target: "build:linux", skip_import: "1" }
+          # Windows wheels load GPU backends lazily, so import works here.
+          - { platform: win,   runner: windows-latest, variant: cpu,    target: "build:win" }
+          - { platform: win,   runner: windows-latest, variant: cuda,   target: "build:win" }
+          - { platform: win,   runner: windows-latest, variant: vulkan, target: "build:win" }
+    defaults:
+      run:
+        shell: bash
+    env:
+      # No signing identity in CI; stops electron-builder searching the keychain.
+      CSC_IDENTITY_AUTO_DISCOVERY: "false"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.preflight.outputs.tag || github.ref }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      # Runs the variant selector. The bundled interpreter comes from
+      # python-build-standalone, not from here.
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Use Git Bash for npm scripts
+        # postinstall and build:* call bash; cmd.exe may resolve the WSL stub.
+        if: runner.os == 'Windows'
+        run: npm config set script-shell "C:\\Program Files\\Git\\bin\\bash.exe"
+
+      - name: Install Vulkan loader
+        # Lets the import check load libvulkan.so.1; no GPU needed.
+        if: matrix.platform == 'linux' && matrix.variant == 'vulkan'
+        run: sudo apt-get update && sudo apt-get install -y libvulkan1
+
+      - name: Install Node deps
+        run: npm ci
+
+      - name: Select variant
+        run: python scripts/set-cyllama-variant.py ${{ matrix.variant }}
+
+      - name: Build bundled Python env
+        run: bash scripts/build-python-env.sh
+        env:
+          SKIP_CYLLAMA_IMPORT: ${{ matrix.skip_import }}
+
+      - name: Package installer
+        # --publish never: electron-builder would otherwise publish on tag builds.
+        run: npm run ${{ matrix.target }} -- --publish never
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: cyllama-desktop-${{ matrix.platform }}-${{ matrix.variant }}
+          path: |
+            dist/*.dmg
+            dist/*.AppImage
+            dist/*.exe
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    needs: [preflight, build]
+    if: needs.preflight.outputs.tag != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    env:
+      TAG: ${{ needs.preflight.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.TAG }}
+
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: List staged files
+        run: ls -la dist/
+
+      - name: Extract release notes from CHANGELOG
+        # Exit 0: body from release-notes.md. Exit 2: no section found,
+        # fall back to GitHub's generated notes.
+        run: |
+          if python3 scripts/release_notes.py "$TAG"; then
+            echo "FOUND=1" >> "$GITHUB_ENV"
+            cat release-notes.md
+          else
+            echo "FOUND=0" >> "$GITHUB_ENV"
+          fi
+
+      - name: Create / update GitHub release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ env.TAG }}
+          body_path: ${{ env.FOUND == '1' && 'release-notes.md' || '' }}
+          generate_release_notes: ${{ env.FOUND != '1' }}
+          files: |
+            dist/*.dmg
+            dist/*.AppImage
+            dist/*.exe
+          fail_on_unmatched_files: true

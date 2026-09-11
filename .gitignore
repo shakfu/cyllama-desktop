@@ -168,3 +168,6 @@ AGENTS.md
 GEMINI.md
 
 
+
+# scripts/release_notes.py output (make release-notes)
+release-notes.md

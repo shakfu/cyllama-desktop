@@ -11,6 +11,7 @@ here mutates the checkout.
 """
 
 import importlib.util
+import os
 import re
 import shutil
 import subprocess
@@ -98,6 +99,47 @@ def test_artifact_name_carries_the_backend_and_does_not_accumulate(variant):
         # No other backend's name may linger in it.
         others = set(variant.VARIANTS) - {backend}
         assert not [o for o in others if f"-{o}-" in names[0]]
+
+
+def _pinned_cyllama_version() -> str:
+    """build-python-env.sh's default cyllama pin, as bash evaluates it."""
+    line = next(
+        l for l in BUILD_SCRIPT.read_text().splitlines()
+        if l.startswith("CYLLAMA_VERSION=")
+    )
+    env = {k: v for k, v in os.environ.items() if k != "CYLLAMA_VERSION"}
+    return subprocess.run(
+        ["bash", "-c", f'{line}; printf %s "$CYLLAMA_VERSION"'],
+        capture_output=True, text=True, check=True, env=env,
+    ).stdout
+
+
+def _artifact_name(yml: str) -> str:
+    return next(l for l in yml.splitlines() if l.startswith("artifactName:"))
+
+
+def test_artifact_name_carries_the_pinned_cyllama_version(variant, monkeypatch):
+    monkeypatch.delenv("CYLLAMA_VERSION", raising=False)
+    pinned = _pinned_cyllama_version()
+    assert pinned
+    variant.set_backend("cuda", "linux")
+    assert f"-cyllama-{pinned}-cuda-" in _artifact_name(variant.BUILDER_YML.read_text())
+
+
+def test_artifact_name_follows_a_cyllama_version_override(variant, monkeypatch):
+    # build-python-env.sh installs $CYLLAMA_VERSION when set; the name must agree.
+    monkeypatch.setenv("CYLLAMA_VERSION", "9.9.9")
+    variant.set_backend("cpu", "linux")
+    assert "-cyllama-9.9.9-cpu-" in _artifact_name(variant.BUILDER_YML.read_text())
+
+
+def test_committed_artifact_name_matches_the_pinned_cyllama_version():
+    """Bumping the pin without re-running the selector leaves a stale name.
+
+    Fix with: python3 scripts/set-cyllama-variant.py cpu
+    """
+    yml = (ROOT / "electron-builder.yml").read_text()
+    assert f"-cyllama-{_pinned_cyllama_version()}-" in _artifact_name(yml)
 
 
 def test_appid_and_product_name_are_left_alone(variant):

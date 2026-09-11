@@ -4,8 +4,8 @@ version = "0.1.0"
 description = "FastAPI sidecar that exposes cyllama over localhost HTTP/SSE"
 requires-python = ">=3.12"
 dependencies = [
-  # 0.4.4 is what scripts/build-python-env.sh bundles; the floor also
-  # matches cyllama's own cp312-abi3 wheel tag.
+  # Floor: the oldest cyllama the sidecar is verified against.
+  # scripts/build-python-env.sh pins the exact version it bundles.
   "cyllama>=0.4.4",
   "fastapi>=0.115",
   "uvicorn[standard]>=0.32",

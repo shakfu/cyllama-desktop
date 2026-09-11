@@ -102,6 +102,20 @@ nothing to choose**: the default `cpu` distribution's macOS arm64 wheel
 already has Metal compiled in, so it *is* the GPU build there. The variant
 targets matter on Linux and Windows, where the default wheel is CPU-only.
 
+GPU runtimes are not bundled; PyPI's wheel size limit rules them out. The
+target machine needs the vendor runtime installed:
+
+| Variant | Linux | Windows |
+|-|-|-|
+| cuda | CUDA 12 runtime + cuBLAS, NVIDIA driver | same |
+| vulkan | Vulkan loader (`libvulkan1`) + GPU driver | GPU driver |
+| rocm | ROCm 6 (HIP, hipBLAS, rocBLAS) | -- |
+| sycl | Intel oneAPI runtime (SYCL, MKL, TBB) | -- |
+
+On Linux, the cuda, rocm and sycl bundles fail at startup without it;
+cyllama links those runtimes directly. The Windows builds load the GPU
+backend lazily.
+
 Only one distribution can be installed at a time -- they all own the same
 `cyllama/` directory -- so switching wipes and rebuilds the env rather than
 upgrading in place. The selected backend shows up at runtime in
@@ -169,7 +183,8 @@ This calls `electron-builder --mac --arm64`, which:
 - Copies `build/python-mac-arm64/` into `Resources/python/` inside the `.app`.
 - Copies `python-sidecar/sidecar.py` into `Resources/python-sidecar/`.
 - Bundles your JS into `Resources/app.asar`.
-- Produces `dist/Cyllama Desktop-0.1.0-arm64.dmg`.
+- Produces `dist/cyllama-desktop-0.1.0-cyllama-0.4.5-cpu-arm64.dmg`
+  (app version, bundled cyllama version, variant, arch).
 
 **Unsigned build** (for local testing only): nothing else needed. Gatekeeper will warn the first time you open it; right-click -> Open to bypass.
 
@@ -185,6 +200,23 @@ npm run build:mac-arm64
 ```
 
 electron-builder signs every `.dylib`/`.so` under `Resources/python/`, then `scripts/notarize.js` submits to Apple via notarytool. Allow ~5-15 min for notarization to return.
+
+## Releasing
+
+Releases are tag-driven. Tags are bare semver equal to `package.json`'s
+version (`0.2.0`, not `v0.2.0`).
+
+```bash
+# after bumping package.json and renaming "## [Unreleased]" in CHANGELOG.md
+make release-notes          # preview the release body
+git tag 0.2.0 && git push origin 0.2.0
+```
+
+`.github/workflows/build.yml` builds all 9 installers, creates the release,
+attaches them, and sets the body from the version's CHANGELOG section
+(falling back to `## [Unreleased]`, then to GitHub's generated notes).
+One failed build publishes nothing. To redo a release, run the workflow
+manually with the existing tag.
 
 ## Quick smoke test of just the sidecar (no Electron)
 
@@ -235,6 +267,8 @@ cyllama-desktop/
                                     cyllama is required)
   playwright.config.js              e2e config; npm run test:e2e
   .github/workflows/ci.yml          pytest + Playwright on push + PR
+  .github/workflows/build.yml       unsigned installer per platform x variant;
+                                    a tag push publishes them as a release
   scripts/
     build-python-env.sh             python-build-standalone bundler -> build/python-<os>-<arch>/
     notarize.js                     afterSign hook (no-op unless APPLE_ID set)

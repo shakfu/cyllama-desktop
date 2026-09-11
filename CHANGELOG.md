@@ -42,6 +42,43 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   ``ndarray``, which ``/jobs/transcribe`` hands straight to
   ``WhisperContext.full()`` unchanged -- jfk.wav transcribes correctly.
 
+### Added (variant build CI)
+
+- **``.github/workflows/build.yml`` builds an unsigned installer for
+  each published platform/variant pair** (9 jobs) and uploads each as
+  an artifact. Pushing a bare-semver tag (``0.2.0``) also creates the
+  GitHub release, attaches the installers once every job succeeds, and
+  fills the body from the version's CHANGELOG section via
+  ``scripts/release_notes.py``. This follows chimera's release flow;
+  the script also matches dated headings (``## [0.1.0] - 2026-04-25``).
+  The run fails before building unless the tag equals
+  ``package.json``'s version, which the installers are named after.
+  The Linux cuda/rocm/sycl bundles need the vendor GPU runtime on the
+  target machine; README lists what each needs.
+
+  On Linux the cuda/rocm/sycl extensions link ``libcuda.so.1`` / ``libamdhip64.so.6`` / ``libsycl.so.8``
+  directly, so ``import cyllama`` fails on a GPU-less runner;
+  ``SKIP_CYLLAMA_IMPORT=1`` makes ``build-python-env.sh`` check the
+  installed distribution version instead.
+
+- **Installer names carry the bundled cyllama version**, e.g.
+  ``cyllama-desktop-0.1.0-cyllama-0.4.5-cuda-x64.exe``. ``${name}``
+  replaces ``${productName}``, whose space GitHub turns into a dot in
+  release asset names. The app keeps
+  its own semver rather than matching cyllama's: an exact match leaves
+  no version for an app-only fix, since ``0.4.5-1`` sorts below
+  ``0.4.5`` and ``0.4.5+1`` compares equal to it. After bumping
+  ``CYLLAMA_VERSION`` in ``build-python-env.sh``, re-run
+  ``set-cyllama-variant.py``; a test fails until the name matches.
+
+### Fixed
+
+- **``build-python-env.sh`` could not build on Windows.** It tested
+  ``PLAT_DIR`` against ``win32``, but the value is ``win``, so it looked
+  for ``bin/python3`` in a tree that has ``python.exe`` at its root.
+  ``.gitattributes`` now pins ``*.sh`` to LF, since a CRLF checkout
+  breaks bash on the first line.
+
 ### Added (per-GPU build variants)
 
 - **The app can be built against any of cyllama's per-backend

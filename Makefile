@@ -32,7 +32,7 @@ endif
 PYENV_DIR := build/python-$(HOST_OS)-$(HOST_ARCH)
 PY_BIN    := $(PYENV_DIR)/bin/python3
 
-.PHONY: all dev dmg python python-local npm test test-deps e2e clean reset help \
+.PHONY: all dev dmg python python-local npm test test-deps e2e release-notes clean reset help \
         variant variant-cpu variant-cuda variant-vulkan variant-rocm variant-sycl \
         app-cpu app-cuda app-vulkan app-rocm app-sycl
 
@@ -63,6 +63,8 @@ help:
 	@echo "  make npm       npm install"
 	@echo "  make test      Run the sidecar pytest suite"
 	@echo "  make e2e       Run the Playwright per-pane smoke suite"
+	@echo "  make release-notes [VERSION=x.y.z]"
+	@echo "                 Preview the release body CI builds from CHANGELOG.md"
 	@echo "  make clean     Remove dist/ and build/"
 	@echo "  make reset     clean + remove node_modules/"
 
@@ -196,6 +198,12 @@ test: test-deps
 # bundled Python env covers fastapi + uvicorn already.
 e2e: node_modules test-deps
 	npm run test:e2e
+
+# Writes release-notes.md, as the publish job in build.yml does.
+VERSION ?= $(shell python3 -c "import json; print(json.load(open('package.json'))['version'])")
+
+release-notes:
+	@python3 scripts/release_notes.py $(VERSION)
 
 clean:
 	rm -rf dist build

@@ -19,7 +19,9 @@ metadata cannot drift apart.
 
 The variant also renames the installer (``electron-builder.yml``'s
 ``artifactName``) so a CUDA build and a CPU build don't overwrite each
-other in ``dist/``. ``appId`` and ``productName`` stay put: these are the
+other in ``dist/``. The name also carries the bundled cyllama version,
+because the app's own version is independent of cyllama's.
+``appId`` and ``productName`` stay put: these are the
 same application with a different accelerator, not competing apps, so
 they share their config and user data.
 
@@ -32,6 +34,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import sys
 from pathlib import Path
@@ -39,6 +42,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 PYPROJECT = ROOT / "python-sidecar" / "pyproject.toml"
 BUILDER_YML = ROOT / "electron-builder.yml"
+BUILD_SCRIPT = ROOT / "scripts" / "build-python-env.sh"
 
 # backend -> (distribution name, platforms with a published wheel).
 #
@@ -71,6 +75,11 @@ _DEP_RE = re.compile(
 # time rather than patched, so switching variants can't accumulate suffixes.
 _ARTIFACT_RE = re.compile(r"^artifactName:.*$\n?", re.MULTILINE)
 
+# build-python-env.sh's default cyllama pin.
+_VERSION_RE = re.compile(
+    r'^CYLLAMA_VERSION="\$\{CYLLAMA_VERSION:-(?P<ver>[^}"]+)\}"', re.MULTILINE
+)
+
 
 def host_platform() -> str:
     if sys.platform == "darwin":
@@ -90,6 +99,20 @@ def read_dependency() -> tuple[str, str]:
             'Expected a line like:  "cyllama>=0.4.4",'
         )
     return match.group("dist"), match.group("spec")
+
+
+def cyllama_version() -> str:
+    """The cyllama version build-python-env.sh installs.
+
+    Honors ``$CYLLAMA_VERSION`` the same way that script does, so an
+    override names the installer after what it actually bundles.
+    """
+    if env := os.environ.get("CYLLAMA_VERSION"):
+        return env
+    match = _VERSION_RE.search(BUILD_SCRIPT.read_text())
+    if match is None:
+        raise SystemExit(f"no CYLLAMA_VERSION default found in {BUILD_SCRIPT}")
+    return match.group("ver")
 
 
 def current_backend() -> str:
@@ -133,13 +156,15 @@ def set_backend(backend: str, platform: str) -> bool:
         PYPROJECT.write_text(text)
         changed = True
 
-    # Installer filename. electron-builder substitutes ${productName},
-    # ${version}, ${arch} and ${ext} itself; the backend is baked in here
-    # because it is fixed for the duration of a build.
+    # Installer filename. electron-builder substitutes ${name}, ${version},
+    # ${arch} and ${ext} itself; the cyllama version and backend are baked
+    # in here because they are fixed for the duration of a build. ${name}
+    # over ${productName}: GitHub turns the latter's space into a dot in
+    # release asset names.
     yml = BUILDER_YML.read_text()
     line = (
-        "artifactName: "
-        "${productName}-${version}-" + backend + "-${arch}.${ext}\n"
+        "artifactName: ${name}-${version}-cyllama-"
+        + cyllama_version() + "-" + backend + "-${arch}.${ext}\n"
     )
     if _ARTIFACT_RE.search(yml):
         new_yml = _ARTIFACT_RE.sub(line, yml, count=1)

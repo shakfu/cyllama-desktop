@@ -13,7 +13,7 @@ PBS_RELEASE="${PBS_RELEASE:-20241016}"
 # Pin cyllama so a re-bundle is reproducible. Bump deliberately when a
 # new release exposes APIs we want; the renderer auto-adapts to whatever
 # fields cyllama.GenerationConfig accepts (see _build_config and /info).
-CYLLAMA_VERSION="${CYLLAMA_VERSION:-0.4.4}"
+CYLLAMA_VERSION="${CYLLAMA_VERSION:-0.4.5}"
 
 # Detect target triple if not provided.
 detect_triple() {
@@ -100,7 +100,7 @@ URL="https://github.com/astral-sh/python-build-standalone/releases/download/${PB
 echo "Fetching $URL"
 curl -fL --retry 3 "$URL" | tar -xz -C "$OUT" --strip-components=1
 
-if [[ "$PLAT_DIR" == "win32" ]]; then
+if [[ "$PLAT_DIR" == "win" ]]; then
   PY="$OUT/python.exe"
 else
   PY="$OUT/bin/python3"
@@ -261,11 +261,21 @@ fi
 # satisfied and only resolve the rest.
 "$PY" -m pip install ./python-sidecar
 
-# Smoke test
-"$PY" -c "import cyllama, fastapi, uvicorn, openai, anthropic, pypdf; print('cyllama', cyllama.__version__, '| pypdf', pypdf.__version__)"
+# Smoke test. SKIP_CYLLAMA_IMPORT=1 checks the wheel is installed without
+# importing it: on Linux the cuda/rocm/sycl extensions link their GPU
+# runtime directly, so the import fails on a host without it (e.g. CI).
+if [[ "${SKIP_CYLLAMA_IMPORT:-}" == 1 ]]; then
+  "$PY" -c "import importlib.metadata as md, fastapi, uvicorn, openai, anthropic, pypdf; print('${CYLLAMA_DIST}', md.version('${CYLLAMA_DIST}'), '(import skipped) | pypdf', pypdf.__version__)"
+else
+  "$PY" -c "import cyllama, fastapi, uvicorn, openai, anthropic, pypdf; print('cyllama', cyllama.__version__, '| pypdf', pypdf.__version__)"
+fi
 
 # Prune to shrink the bundle.
-PYLIB_GLOB="$OUT/lib/python${PY_VERSION%.*}"
+if [[ "$PLAT_DIR" == "win" ]]; then
+  PYLIB_GLOB="$OUT/Lib"
+else
+  PYLIB_GLOB="$OUT/lib/python${PY_VERSION%.*}"
+fi
 find "$OUT" -type d -name "__pycache__" -prune -exec rm -rf {} +
 find "$OUT" -type d \( -name "tests" -o -name "test" \) -prune -exec rm -rf {} + || true
 find "$OUT" -type f -name "*.pyc" -delete || true
