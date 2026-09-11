@@ -10,6 +10,10 @@ All notable changes to cyllama-desktop are documented here. The format is based 
 
 - **The macOS arm64 installer is named ``metal``, not ``cpu``**, e.g. ``cyllama-desktop-0.2.1-cyllama-0.4.5-metal-arm64.dmg``. The base ``cyllama`` wheel has Metal built in on Apple silicon. The variant key stays ``cpu`` because it selects the ``cyllama`` distribution on every platform.
 
+- **The sidebar's Image and Batch tabs were cut off** when every feature was enabled. The tab strip has 256px, and the five tabs needed 296px even with Documents relabelled Docs. The label change stays, and tab padding is narrower. Tabs also shrink with an ellipsis, so a wider platform font truncates a label instead of hiding a tab.
+
+- **Dev runs no longer share user data with an installed build.** Both used `productName`'s folder, so model directories added under `npm start` appeared in the installed app. Unpackaged runs now use `Cyllama Desktop Dev/`. Models downloaded in dev before this change stay in `Cyllama Desktop/models`; add that folder as an extra directory to reuse them.
+
 ## [0.2.0]
 
 ### Changed (bundled cyllama 0.2.15 -> 0.4.4)

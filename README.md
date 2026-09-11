@@ -121,6 +121,8 @@ npm start
 
 Electron's main process spawns `build/python-mac-arm64/bin/python3 python-sidecar/sidecar.py`, waits for `/health` to respond, then opens the window. Pick a `.gguf` file via the Browse button and type a prompt.
 
+Dev runs store settings, chats and the model cache in `~/Library/Application Support/Cyllama Desktop Dev/`. Installed builds use `Cyllama Desktop/`.
+
 If something is wrong, watch the terminal — sidecar stdout/stderr is forwarded with `[sidecar]` / `[sidecar:err]` prefixes.
 
 ### 3b. Build a distributable `.dmg`

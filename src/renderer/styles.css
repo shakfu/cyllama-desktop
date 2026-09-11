@@ -603,7 +603,6 @@ dialog.agent-modal .agent-modal-actions {
   align-items: stretch;
   border-bottom: 1px solid var(--border);
   padding: 6px 6px 0;
-  gap: 2px;
   flex: 0 0 auto;
 }
 .lt-tab {
@@ -612,11 +611,18 @@ dialog.agent-modal .agent-modal-actions {
   border: 0;
   border-bottom: 2px solid transparent;
   color: var(--fg-faint);
-  padding: 8px 10px;
+  padding: 8px 6px;
   font: inherit;
   font-size: 12px;
   cursor: pointer;
   border-radius: 4px 4px 0 0;
+  /* Five tabs barely fit 268px; a wider platform font truncates a label
+     instead of pushing the last tab out of view. */
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .lt-tab:hover { color: var(--fg); }
 .lt-tab.active {

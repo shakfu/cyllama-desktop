@@ -51,6 +51,26 @@ test("Chat pane renders by default", async () => {
   await expect(window.locator("#send")).toBeVisible();
 });
 
+test("sidebar tab strip fits every tab when all features are on", async () => {
+  ctx = await launchApp();
+  const { window } = ctx;
+  await expect(window.locator("#tabBatch")).toBeVisible();
+  const m = await window.evaluate(() => {
+    const strip = document.querySelector(".lt-tabs").getBoundingClientRect();
+    return [...document.querySelectorAll(".lt-tab:not([hidden])")].map((t) => ({
+      label: t.textContent,
+      right: t.getBoundingClientRect().right,
+      stripRight: strip.right,
+      clipped: t.scrollWidth > t.clientWidth,
+    }));
+  });
+  expect(m.map((t) => t.label)).toEqual(["Chats", "Docs", "Transcribe", "Image", "Batch"]);
+  for (const t of m) {
+    expect(t.right, `${t.label} overflows the strip`).toBeLessThanOrEqual(t.stripRight);
+    expect(t.clipped, `${t.label} label is clipped`).toBe(false);
+  }
+});
+
 test("Documents pane mounts with collections list", async () => {
   ctx = await launchApp();
   const { window } = ctx;

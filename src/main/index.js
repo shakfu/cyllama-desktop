@@ -17,6 +17,10 @@ app.setName("Cyllama Desktop");
 // app.getPath("userData") read.
 if (process.env.ELECTRON_USER_DATA_DIR) {
   app.setPath("userData", process.env.ELECTRON_USER_DATA_DIR);
+} else if (!app.isPackaged) {
+  // Dev runs keep their own settings, chats and model cache, apart from
+  // an installed build of the same productName.
+  app.setPath("userData", path.join(app.getPath("appData"), "Cyllama Desktop Dev"));
 }
 
 let mainWindow = null;
