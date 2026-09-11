@@ -133,6 +133,31 @@ def test_artifact_name_follows_a_cyllama_version_override(variant, monkeypatch):
     assert "-cyllama-9.9.9-cpu-" in _artifact_name(variant.BUILDER_YML.read_text())
 
 
+@pytest.mark.parametrize(
+    "platform, machine, label",
+    [
+        ("mac", "arm64", "metal"),  # base wheel has Metal built in
+        ("mac", "x86_64", "cpu"),
+        ("linux", "arm64", "cpu"),
+        ("win", "AMD64", "cpu"),
+    ],
+)
+def test_base_wheel_is_labelled_metal_only_on_apple_silicon(
+    variant, monkeypatch, platform, machine, label
+):
+    monkeypatch.setattr(variant.pyplatform, "machine", lambda: machine)
+    variant.set_backend("cpu", platform)
+    name = _artifact_name(variant.BUILDER_YML.read_text())
+    assert f"-{label}-" in name
+    assert variant.current_backend() == "cpu"  # the pin is unchanged
+
+
+def test_metal_label_applies_to_the_base_wheel_only(variant, monkeypatch):
+    monkeypatch.setattr(variant.pyplatform, "machine", lambda: "arm64")
+    variant.set_backend("vulkan", "mac")
+    assert "-vulkan-" in _artifact_name(variant.BUILDER_YML.read_text())
+
+
 def test_committed_artifact_name_matches_the_pinned_cyllama_version():
     """Bumping the pin without re-running the selector leaves a stale name.
 

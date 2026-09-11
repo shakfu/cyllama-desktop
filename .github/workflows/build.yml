@@ -75,7 +75,7 @@ jobs:
           TAG: ${{ steps.tag.outputs.tag }}
 
   build:
-    name: ${{ matrix.platform }}-${{ matrix.variant }}
+    name: ${{ matrix.platform }}-${{ matrix.label || matrix.variant }}
     needs: preflight
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
@@ -83,7 +83,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { platform: mac,   runner: macos-15,       variant: cpu,    target: "build:mac-arm64" }
+          - { platform: mac,   runner: macos-15,       variant: cpu,    target: "build:mac-arm64", label: metal }
           - { platform: linux, runner: ubuntu-latest,  variant: cpu,    target: "build:linux" }
           - { platform: linux, runner: ubuntu-latest,  variant: vulkan, target: "build:linux" }
           # These link libcuda / libamdhip64 / libsycl directly, which a
@@ -144,7 +144,7 @@ jobs:
 
       - uses: actions/upload-artifact@v7
         with:
-          name: cyllama-desktop-${{ matrix.platform }}-${{ matrix.variant }}
+          name: cyllama-desktop-${{ matrix.platform }}-${{ matrix.label || matrix.variant }}
           path: |
             dist/*.dmg
             dist/*.AppImage

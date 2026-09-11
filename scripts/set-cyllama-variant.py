@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import platform as pyplatform
 import re
 import sys
 from pathlib import Path
@@ -87,6 +88,18 @@ def host_platform() -> str:
     if sys.platform.startswith("win"):
         return "win"
     return "linux"
+
+
+def artifact_label(backend: str, platform: str) -> str:
+    """Backend name for the installer filename.
+
+    The base wheel on macOS arm64 has Metal built in, so it is labelled
+    ``metal``, not ``cpu``. build-python-env.sh cannot cross-build, so the
+    host arch is the target arch.
+    """
+    if backend == "cpu" and platform == "mac" and pyplatform.machine() == "arm64":
+        return "metal"
+    return backend
 
 
 def read_dependency() -> tuple[str, str]:
@@ -164,7 +177,8 @@ def set_backend(backend: str, platform: str) -> bool:
     yml = BUILDER_YML.read_text()
     line = (
         "artifactName: ${name}-${version}-cyllama-"
-        + cyllama_version() + "-" + backend + "-${arch}.${ext}\n"
+        + cyllama_version() + "-" + artifact_label(backend, platform)
+        + "-${arch}.${ext}\n"
     )
     if _ARTIFACT_RE.search(yml):
         new_yml = _ARTIFACT_RE.sub(line, yml, count=1)

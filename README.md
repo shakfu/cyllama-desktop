@@ -4,73 +4,41 @@ Electron desktop app that runs [cyllama](https://github.com/shakfu/cyllama) via 
 
 ## Concepts
 
-- **Pane.** A UI surface in the app shell. Left nav-rail: Chats,
-  Models, Agents (full-area pane covering agent-type defaults +
-  workflow file management), Console. Right-sidebar tab: Parameters
-  (system-style Settings opens in a separate Preferences window via
-  `Cmd+,`). Panes whose underlying cyllama capability isn't present
-  in the build hide themselves automatically via `/info.features`.
-- **Workspace.** A *project*: a scoped bundle of inputs, outputs,
-  chosen models, presets, agent tool sandbox, and config. Today only
-  an implicit `default` workspace exists. Multi-workspace support and
-  a workspace switcher land later (see `PLAN.md` S.9).
-- **Sidecar.** The bundled Python process running cyllama via FastAPI
-  on `127.0.0.1`, gated by a per-launch bearer token. The renderer is
-  a thin client; the sidecar is the single source of truth for
-  inference, models, and jobs.
-- **Slash commands.** A `/`-prefixed entry in the chat composer
-  routes the prompt to a specific handler instead of `/chat`. The
-  agent family of commands (`/agent`, `/agent-constrained`, `/agent-contract`,
-  `/agent-plan`, `/agent-reflect`) runs an agent loop against the loaded chat
-  model with the sidebar's tool config; the trace + answer render
-  inline in the chat stream. Tab autocompletes a unique prefix
-  (`/a<Tab>` -> `/agent `). See `docs/slash-commands.md` for the
-  taxonomy and roadmap.
+- **Pane.** A UI surface in the app shell. Left nav-rail: Chats, Models, Agents (full-area pane covering agent-type defaults + workflow file management), Console. Right-sidebar tab: Parameters (system-style Settings opens in a separate Preferences window via `Cmd+,`). Panes whose underlying cyllama capability isn't present in the build hide themselves automatically via `/info.features`.
 
-See `PLAN.md` for the phased rollout and `CHANGELOG.md` for what has
-shipped.
+- **Workspace.** A *project*: a scoped bundle of inputs, outputs, chosen models, presets, agent tool sandbox, and config. Today only an implicit `default` workspace exists. Multi-workspace support and a workspace switcher land later (see `PLAN.md` S.9).
+
+- **Sidecar.** The bundled Python process running cyllama via FastAPI on `127.0.0.1`, gated by a per-launch bearer token. The renderer is a thin client; the sidecar is the single source of truth for inference, models, and jobs.
+
+- **Slash commands.** A `/`-prefixed entry in the chat composer routes the prompt to a specific handler instead of `/chat`. The agent family of commands (`/agent`, `/agent-constrained`, `/agent-contract`, `/agent-plan`, `/agent-reflect`) runs an agent loop against the loaded chat model with the sidebar's tool config; the trace + answer render inline in the chat stream. Tab autocompletes a unique prefix (`/a<Tab>` -> `/agent `). See `docs/slash-commands.md` for the taxonomy and roadmap.
+
+See `PLAN.md` for the phased rollout and `CHANGELOG.md` for what has shipped.
 
 ## User documentation
 
-- [`docs/guide-to-agents.md`](docs/guide-to-agents.md) -- end-user guide
-  to the agent slash-commands (`/agent`, `/agent-constrained`, `/agent-contract`,
-  `/agent-plan`, `/agent-reflect`), the Tools catalog, and the Workflows pane.
-  Read this first if you want to *use* the agent layer; skip to
-  [`docs/dev/agent_plan.md`](docs/dev/agent_plan.md) if you want to
-  *extend* it.
-- [`docs/slash-commands.md`](docs/slash-commands.md) -- slash-command
-  design + taxonomy. How commands are registered, how autocomplete
-  works, what kinds of commands exist.
+- [`docs/guide-to-agents.md`](docs/guide-to-agents.md) -- end-user guide to the agent slash-commands (`/agent`, `/agent-constrained`, `/agent-contract`, `/agent-plan`, `/agent-reflect`), the Tools catalog, and the Workflows pane. Read this first if you want to *use* the agent layer; skip to [`docs/dev/agent_plan.md`](docs/dev/agent_plan.md) if you want to *extend* it.
+
+- [`docs/slash-commands.md`](docs/slash-commands.md) -- slash-command design + taxonomy. How commands are registered, how autocomplete works, what kinds of commands exist.
 
 ### Composer capabilities
 
 The chat messagebox accepts more than text:
 
-- **Images** -- drop a `.png` / `.jpg` / `.webp` / `.gif` / `.bmp`
-  onto the composer (or use the paperclip) when a multimodal model
-  + mmproj are loaded. Routed through cyllama's `ImageAnalyzer`.
-- **Documents** -- drop a `.pdf` / `.md` / `.txt` / `.markdown` /
-  `.json` / `.jsonl`; the sidecar extracts text via
-  `cyllama.rag.loaders.load_document` (PDFs use the `pypdf` backend
-  bundled by default; install `pymupdf` / `docling` for richer
-  extraction). The text is inlined into the message the model sees
-  and the chat log shows a folded chip with a context-window
-  warning when the doc is large.
-- **Voice prompts** -- mic button next to the paperclip records
-  via `MediaRecorder`, transcribes via Whisper, appends the text
-  to the typed prompt. Requires a whisper model in the Transcribe
-  pane.
-- **Quarto rendering** -- the `quarto_render` agent tool (opt-in
-  in the Agents pane) lets the model generate `.pptx` / `.pdf` /
-  `.docx` / `.html` files. Requires the `quarto` CLI on PATH. The
-  resulting `file://` link in the assistant reply opens in your
-  OS default app.
+- **Images** -- drop a `.png` / `.jpg` / `.webp` / `.gif` / `.bmp` onto the composer (or use the paperclip) when a multimodal model
+
+  - mmproj are loaded. Routed through cyllama's `ImageAnalyzer`.
+
+- **Documents** -- drop a `.pdf` / `.md` / `.txt` / `.markdown` / `.json` / `.jsonl`; the sidecar extracts text via `cyllama.rag.loaders.load_document` (PDFs use the `pypdf` backend bundled by default; install `pymupdf` / `docling` for richer extraction). The text is inlined into the message the model sees and the chat log shows a folded chip with a context-window warning when the doc is large.
+
+- **Voice prompts** -- mic button next to the paperclip records via `MediaRecorder`, transcribes via Whisper, appends the text to the typed prompt. Requires a whisper model in the Transcribe pane.
+
+- **Quarto rendering** -- the `quarto_render` agent tool (opt-in in the Agents pane) lets the model generate `.pptx` / `.pdf` / `.docx` / `.html` files. Requires the `quarto` CLI on PATH. The resulting `file://` link in the assistant reply opens in your OS default app.
 
 ## Build
 
 Quick path: `make` builds an installer for the host platform (macOS arm64 -> `.dmg`). Other targets:
 
-```
+```text
 make           Build a distributable installer (default = dmg on macOS)
 make dev       npm install + build python env + npm start
 make python    Build only the bundled Python env
@@ -83,13 +51,9 @@ make reset     Also remove node_modules/
 
 ### GPU variants
 
-cyllama publishes the same import package under one distribution name per
-backend, so the app can be built against whichever one matches the target
-machine. Pick it with a variant target, which rewrites the sidecar's pin,
-rebuilds the bundled Python env, and (for `app-*`) produces an installer
-named after the backend so builds don't overwrite each other in `dist/`:
+cyllama publishes the same import package under one distribution name per backend, so the app can be built against whichever one matches the target machine. Pick it with a variant target, which rewrites the sidecar's pin, rebuilds the bundled Python env, and (for `app-*`) produces an installer named after the backend so builds don't overwrite each other in `dist/`:
 
-```
+```text
 make variant-cpu     make app-cpu       # cyllama          (also Metal on macOS arm64)
 make variant-cuda    make app-cuda      # cyllama-cuda12   (Linux, Windows)
 make variant-vulkan  make app-vulkan    # cyllama-vulkan   (Linux, Windows, macOS x86_64)
@@ -97,13 +61,9 @@ make variant-rocm    make app-rocm      # cyllama-rocm     (Linux)
 make variant-sycl    make app-sycl      # cyllama-sycl     (Linux)
 ```
 
-`make variant` prints the current selection. **On Apple silicon there is
-nothing to choose**: the default `cpu` distribution's macOS arm64 wheel
-already has Metal compiled in, so it *is* the GPU build there. The variant
-targets matter on Linux and Windows, where the default wheel is CPU-only.
+`make variant` prints the current selection. **On Apple silicon there is nothing to choose**: the default `cpu` distribution's macOS arm64 wheel already has Metal compiled in, so it *is* the GPU build there. The variant targets matter on Linux and Windows, where the default wheel is CPU-only.
 
-GPU runtimes are not bundled; PyPI's wheel size limit rules them out. The
-target machine needs the vendor runtime installed:
+GPU runtimes are not bundled; PyPI's wheel size limit rules them out. The target machine needs the vendor runtime installed:
 
 | Variant | Linux | Windows |
 |-|-|-|
@@ -112,22 +72,11 @@ target machine needs the vendor runtime installed:
 | rocm | ROCm 6 (HIP, hipBLAS, rocBLAS) | -- |
 | sycl | Intel oneAPI runtime (SYCL, MKL, TBB) | -- |
 
-On Linux, the cuda, rocm and sycl bundles fail at startup without it;
-cyllama links those runtimes directly. The Windows builds load the GPU
-backend lazily.
+On Linux, the cuda, rocm and sycl bundles fail at startup without it; cyllama links those runtimes directly. The Windows builds load the GPU backend lazily.
 
-Only one distribution can be installed at a time -- they all own the same
-`cyllama/` directory -- so switching wipes and rebuilds the env rather than
-upgrading in place. The selected backend shows up at runtime in
-General -> backends (sourced from cyllama's own build config), which is the
-quickest way to confirm a bundle is what you think it is.
+Only one distribution can be installed at a time -- they all own the same `cyllama/` directory -- so switching wipes and rebuilds the env rather than upgrading in place. The selected backend shows up at runtime in General -> backends (sourced from cyllama's own build config), which is the quickest way to confirm a bundle is what you think it is.
 
-The choice lives in one line of `python-sidecar/pyproject.toml`;
-`scripts/build-python-env.sh` reads it back from there, so the wheel that
-gets installed and the sidecar's dependency metadata cannot disagree.
-Building from a local cyllama checkout (`make python-local`) is CPU-variant
-only, since a source build installs under the plain `cyllama` name whatever
-backend its own build flags selected.
+The choice lives in one line of `python-sidecar/pyproject.toml`; `scripts/build-python-env.sh` reads it back from there, so the wheel that gets installed and the sidecar's dependency metadata cannot disagree. Building from a local cyllama checkout (`make python-local`) is CPU-variant only, since a source build installs under the plain `cyllama` name whatever backend its own build flags selected.
 
 Manual phases (what `make` runs under the hood):
 
@@ -149,8 +98,11 @@ bash scripts/build-python-env.sh
 What this does:
 
 - Detects your triple (`aarch64-apple-darwin` on Apple Silicon).
+
 - Downloads CPython 3.12 from python-build-standalone into `build/python-mac-arm64/`.
+
 - `pip install`s `cyllama` from PyPI plus `fastapi`, `uvicorn[standard]`, and `python-multipart`. On macOS arm64 the PyPI wheel ships Metal as the default backend.
+
 - Smoke-tests `import cyllama` and prunes caches.
 
 Expect ~2-5 minutes the first time. Output ends with a `du -sh` of the resulting tree (typically 200-400 MB depending on which cyllama backends are linked).
@@ -180,11 +132,14 @@ npm run build:mac-arm64
 This calls `electron-builder --mac --arm64`, which:
 
 - Reads `electron-builder.yml`.
+
 - Copies `build/python-mac-arm64/` into `Resources/python/` inside the `.app`.
+
 - Copies `python-sidecar/sidecar.py` into `Resources/python-sidecar/`.
+
 - Bundles your JS into `Resources/app.asar`.
-- Produces `dist/cyllama-desktop-0.1.0-cyllama-0.4.5-cpu-arm64.dmg`
-  (app version, bundled cyllama version, variant, arch).
+
+- Produces `dist/cyllama-desktop-0.2.1-cyllama-0.4.5-metal-arm64.dmg` (app version, bundled cyllama version, variant, arch). The `cpu` variant is labelled `metal` on Apple silicon.
 
 **Unsigned build** (for local testing only): nothing else needed. Gatekeeper will warn the first time you open it; right-click -> Open to bypass.
 
@@ -203,8 +158,7 @@ electron-builder signs every `.dylib`/`.so` under `Resources/python/`, then `scr
 
 ## Releasing
 
-Releases are tag-driven. Tags are bare semver equal to `package.json`'s
-version (`0.2.0`, not `v0.2.0`).
+Releases are tag-driven. Tags are bare semver equal to `package.json`'s version (`0.2.0`, not `v0.2.0`).
 
 ```bash
 # after bumping package.json and renaming "## [Unreleased]" in CHANGELOG.md
@@ -212,11 +166,7 @@ make release-notes          # preview the release body
 git tag 0.2.0 && git push origin 0.2.0
 ```
 
-`.github/workflows/build.yml` builds all 9 installers, creates the release,
-attaches them, and sets the body from the version's CHANGELOG section
-(falling back to `## [Unreleased]`, then to GitHub's generated notes).
-One failed build publishes nothing. To redo a release, run the workflow
-manually with the existing tag.
+`.github/workflows/build.yml` builds all 9 installers, creates the release, attaches them, and sets the body from the version's CHANGELOG section (falling back to `## [Unreleased]`, then to GitHub's generated notes). One failed build publishes nothing. To redo a release, run the workflow manually with the existing tag.
 
 ## Quick smoke test of just the sidecar (no Electron)
 
@@ -233,15 +183,18 @@ Should return `{"ok":true}`. Useful when isolating sidecar issues from Electron 
 ## Common failure modes
 
 - **`Bundled Python not found`** on `npm start`: you skipped step 2, or built it for the wrong arch.
+
 - **Sidecar fails to start within timeout**: open `python-sidecar/sidecar.py` in the bundled env directly (the smoke test above) and read the real traceback. Almost always either a missing native lib or a cyllama import error.
+
 - **Empty model error in chat**: the renderer requires both a model path and a prompt before sending — no implicit default.
+
 - **`electron-builder install-app-deps` runs forever on `npm install`**: that postinstall is harmless on a fresh tree (no native Node deps), but if it hangs, remove the `postinstall` line — you don't have native modules.
 
 ## Layout
 
 Source tree:
 
-```
+```text
 cyllama-desktop/
   package.json                      Electron + electron-builder + @electron/notarize
   electron-builder.yml              bundle config (mac dmg arm64 by default)
@@ -278,7 +231,7 @@ cyllama-desktop/
 
 Sidecar endpoints (all bearer-auth gated except `/health`):
 
-```
+```text
 GET  /health                          -- liveness probe
 GET  /info                            -- version, backends, devices, features, paths
 POST /chat                            -- SSE chat (text-only or multimodal route)
@@ -315,7 +268,7 @@ POST /jobs/{id}/cancel                -- cancel a running job
 
 Runtime data (under `app.getPath('userData')`):
 
-```
+```text
 <userData>/
   models/                           global GGUF cache (workspaces pin a default by path; never duplicated)
   .layout_version                   migration stamp (currently "1")
