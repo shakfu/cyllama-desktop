@@ -76,9 +76,9 @@ The chat messagebox accepts more than text:
 
 ## External providers
 
-Open Preferences (`Cmd+,`) -> Providers, paste a key for OpenAI, Anthropic or OpenRouter, and that provider appears in the model pill beside your local GGUFs. Picking one switches the chat backend; the pill then names the provider and the model, so which backend served a turn is always on screen.
+Open Preferences (`Cmd+,`) -> Providers, or pick *Add a provider...* at the bottom of the model menu. Paste a key for OpenAI, Anthropic or OpenRouter and that provider appears in the model pill beside your local GGUFs. Picking one switches the chat backend; the pill then names the provider and the model, so which backend served a turn is always on screen.
 
-**Any OpenAI-compatible endpoint** works too -- Ollama, LM Studio, Groq, Together, Fireworks, a `llama.cpp` server. Add it under *OpenAI-compatible endpoints* with a name and a base URL, then save a key for it. The URL must be `https`, or `http` on `localhost` / `127.0.0.1` / `::1`: sending a key in clear to a remote host is refused rather than offered as a choice. Each endpoint keeps its own key and its own model list, keyed by name.
+**Any OpenAI-compatible endpoint** works too -- Ollama, LM Studio, Groq, Together, Fireworks, a `llama.cpp` server. Add it under *OpenAI-compatible endpoints* with a name and a base URL. The URL must be `https`, or `http` on `localhost` / `127.0.0.1` / `::1`: sending a key in clear to a remote host is refused rather than offered as a choice. A remote endpoint needs a key saved; one on localhost does not, since those servers authenticate nothing -- it is usable as soon as you add it, and a token is still used if you save one. Each endpoint keeps its own key and its own model list, keyed by name.
 
 **Model lists** come from the provider's own list endpoint, cached per account under `<userData>/providers/`. Refresh is on demand, on a newly entered key, or past 24 hours; a failed refresh serves the cached list and says it may be stale. A model id typed by hand always works, which matters when a provider's list lags a release. The last model you used with each provider is remembered separately.
 

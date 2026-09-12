@@ -42,6 +42,7 @@ __all__ = [
     "set_credentials",
     "configured_accounts",
     "has_key",
+    "usable",
     "stream_chat",
     "list_models",
     "sdk_status",
@@ -58,6 +59,13 @@ OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 
 # Anthropic requires max_tokens; used when the caller sends no params.
 DEFAULT_MAX_TOKENS = 1024
+
+# Stand-in credential for a local endpoint that does not authenticate
+# (Ollama, LM Studio). The OpenAI SDK refuses to construct a client with a
+# falsy api_key -- it raises "Missing credentials" before any request -- so
+# something has to be sent. Only ever used where ``Provider.needs_key`` is
+# False, which is loopback-only.
+KEYLESS_PLACEHOLDER = "not-required"
 
 # Cached model lists older than this are refreshed on next use. The picker
 # is still served from cache while that happens.
@@ -124,6 +132,21 @@ class Provider:
             "anthropic": "Anthropic",
             "openrouter": "OpenRouter",
         }.get(self.kind, self.name)
+
+    @property
+    def needs_key(self) -> bool:
+        """False for a compat endpoint on loopback.
+
+        Ollama and LM Studio do not authenticate, so demanding a key there
+        means asking the user to invent one before the app will talk to a
+        server already running on their own machine. Loopback is the only
+        exemption: it is the same boundary ``endpoint_acceptable`` already
+        draws for sending a key in clear.
+        """
+        if self.kind != "compat":
+            return True
+        host = (urlparse(self.base_url).hostname or "").lower()
+        return host not in ("localhost", "127.0.0.1", "::1")
 
     @property
     def effective_base_url(self) -> str:
@@ -218,10 +241,23 @@ def has_key(provider: Provider) -> bool:
         return provider.account in _credentials
 
 
+def usable(provider: Provider) -> bool:
+    """Whether a request to this provider can be attempted.
+
+    A key is configured, or none is needed. Distinct from :func:`has_key`,
+    which answers only what the credential store holds.
+    """
+    return has_key(provider) or not provider.needs_key
+
+
 def _key_for(provider: Provider) -> str:
     with _cred_lock:
         key = _credentials.get(provider.account)
     if not key:
+        # A local server the user has set a token on still gets that token;
+        # this is only the fallback for one that authenticates nothing.
+        if not provider.needs_key:
+            return KEYLESS_PLACEHOLDER
         raise ProviderError(
             f"no API key configured for {provider.display_name}", status=401
         )
@@ -691,7 +727,7 @@ def list_models(
     if cached and not refresh and not is_stale(cached):
         return {**cached, "cached": True, "stale": False}
 
-    if not has_key(provider):
+    if not usable(provider):
         if cached:
             return {**cached, "cached": True, "stale": is_stale(cached)}
         raise ProviderError(

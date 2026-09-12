@@ -11,6 +11,15 @@ const NAMED = [
   { kind: "openrouter", account: "openrouter", label: "OpenRouter", hint: "openrouter.ai" },
 ];
 
+// Mirrors Provider.needs_key in the sidecar. A local server that
+// authenticates nothing needs no credential, so the row says so instead of
+// asking the user to invent one.
+function endpointNeedsKey(baseUrl) {
+  let host = "";
+  try { host = new URL(baseUrl || "").hostname.toLowerCase(); } catch { return true; }
+  return !["localhost", "127.0.0.1", "[::1]"].includes(host);
+}
+
 // Mirrors providers._normalize_account_suffix in the sidecar and
 // normalizeAccountSuffix in the renderer's lib/providers.js.
 function accountForEndpoint(name) {
@@ -138,17 +147,21 @@ export async function render() {
     return;
   }
 
-  function keyRow(label, account, hint) {
+  function keyRow(label, account, hint, opts = {}) {
     const configured = (state.configured || []).includes(account);
     const row = el("div", { class: "prefs-row prefs-row-provider" });
     row.appendChild(el("div", { class: "prefs-row-label" }, label));
-    row.appendChild(el("div", { class: "prefs-row-path mono" },
-      configured ? "key set" : hint || "no key"));
+    let statusText = configured ? "key set" : hint || "no key";
+    if (!configured && opts.keyless) statusText = `${hint} · no key needed`;
+    row.appendChild(el("div", { class: "prefs-row-path mono" }, statusText));
 
     const input = el("input", {
       type: "password",
       class: "prefs-input",
-      placeholder: configured ? "replace key" : "paste key",
+      // A local server started with its own token still takes one, so the
+      // field stays; it is just not a precondition for using the endpoint.
+      placeholder: configured ? "replace key"
+        : opts.keyless ? "token, if the server needs one" : "paste key",
       autocomplete: "off",
       spellcheck: "false",
     });
@@ -203,7 +216,9 @@ export async function render() {
   host.appendChild(el("p", { class: "prefs-hint" },
     "Anything speaking /v1/chat/completions: Ollama, LM Studio, Groq, ",
     "Together, a llama.cpp server. https is required except on localhost. ",
-    "Each endpoint keeps its own key and model list, keyed by name."));
+    "Each endpoint keeps its own key and model list, keyed by name. An ",
+    "endpoint on localhost needs no key -- those servers authenticate ",
+    "nothing, and it is usable as soon as you add it."));
 
   const custom = el("div", { class: "prefs-rows" });
   if (!endpoints.length) {
@@ -211,7 +226,8 @@ export async function render() {
       "No endpoints yet."));
   }
   for (const e of endpoints) {
-    const row = keyRow(e.name, accountForEndpoint(e.name), e.base_url);
+    const row = keyRow(e.name, accountForEndpoint(e.name), e.base_url,
+                       { keyless: !endpointNeedsKey(e.base_url) });
     row.appendChild(el("button", {
       type: "button", class: "btn-mini",
       onclick: async () => {
@@ -264,7 +280,9 @@ export async function render() {
         nameInput.value = "";
         urlInput.value = "";
         status.dataset.kind = "ok";
-        status.textContent = `${name}: endpoint added. Save a key for it in the list above.`;
+        status.textContent = endpointNeedsKey(baseUrl)
+          ? `${name}: endpoint added. Save a key for it in the list above.`
+          : `${name}: endpoint added. Local, so no key is needed -- pick it in the model menu.`;
         await render();
       } catch (e) {
         status.dataset.kind = "err";

@@ -2138,7 +2138,10 @@ async def chat(req: Request):
             model = str(body.get("model") or "").strip()
             if not model:
                 raise providers.ProviderError("model required")
-            if not providers.has_key(provider):
+            # ``usable``, not ``has_key``: a compat endpoint on loopback
+            # authenticates nothing, so requiring a credential there would
+            # mean asking the user to invent one.
+            if not providers.usable(provider):
                 raise providers.ProviderError(
                     f"no API key configured for {provider.display_name}",
                     status=401,

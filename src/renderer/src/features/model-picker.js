@@ -7,6 +7,7 @@ import * as providers from "../lib/providers.js";
 
 let onPick = (path) => {};
 let onPickRemote = (ref, model) => {};
+let onManageProviders = () => {};
 let onBrowse = async () => null;
 let pillEl = null;
 let menuEl = null;
@@ -215,15 +216,22 @@ async function render() {
   if (!groupBy.local.length && !groupBy.hf.length && !remote.length) {
     const empty = document.createElement("div");
     empty.className = "mp-empty";
-    empty.textContent = "No models found. Use Browse..., open the Models tab, "
-      + "or add a provider key in Settings.";
+    empty.textContent = "No models found. Use Browse... or open the Models tab.";
     menu.appendChild(empty);
   }
 
-  // Browse... fallback to OS file dialog.
+  // Action rows. These are the only mention of providers a user with local
+  // models would ever see -- without this row the feature is invisible
+  // unless you already know to look in Preferences.
   const sep = document.createElement("div");
   sep.className = "mp-sep";
   menu.appendChild(sep);
+  const manage = document.createElement("button");
+  manage.type = "button";
+  manage.className = "mp-item mp-item-browse";
+  manage.textContent = remote.length ? "Manage providers..." : "Add a provider...";
+  manage.addEventListener("click", () => { close(); onManageProviders(); });
+  menu.appendChild(manage);
   const browse = document.createElement("button");
   browse.type = "button";
   browse.className = "mp-item mp-item-browse";
@@ -265,11 +273,14 @@ function outsideHandler(e) {
   close();
 }
 
-export function bind({ pillSelector, onPickPath, onPickProvider, onBrowsePath } = {}) {
+export function bind({
+  pillSelector, onPickPath, onPickProvider, onManageProviders: onManage, onBrowsePath,
+} = {}) {
   pillEl = document.querySelector(pillSelector || "#pick");
   if (!pillEl) return;
   if (typeof onPickPath === "function") onPick = onPickPath;
   if (typeof onPickProvider === "function") onPickRemote = onPickProvider;
+  if (typeof onManage === "function") onManageProviders = onManage;
   if (typeof onBrowsePath === "function") onBrowse = onBrowsePath;
   pillEl.addEventListener("click", (e) => {
     e.preventDefault();

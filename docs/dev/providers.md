@@ -88,6 +88,26 @@ Also landed here, from S6:
 
 Where usage surfaces: **Preferences -> Providers**, not "the Jobs panel" the S6 item named. There is no Jobs panel -- the Console is a sidecar log drawer. Providers is where the user already manages keys and endpoints, so it is where they will look to ask what those keys cost.
 
+**R1a -- discoverability and keyless local endpoints** [x]
+
+Two gaps in R0's gating, found by asking what a user actually sees.
+
+- A provider row appears only once a key is saved, so a user with local GGUFs had no way to
+  learn the feature exists: the only mention was in the picker's empty state, which shows
+  when there are *no* local models. The menu now always carries one action row beside
+  `Browse...` -- "Add a provider..." or "Manage providers..." -- which opens Preferences on the
+  Providers tab. One row, always actionable, no per-provider clutter. `openPreferences(tab)` takes
+  a category now, delivered as a load hash or over `prefs:tab` when the window is already up.
+- Ollama and LM Studio authenticate nothing, but `has_key` gated every compat endpoint, so a
+  server already running on the user's own machine was unreachable until they invented a key and
+  pasted it -- with the Providers tab instructing them to. `Provider.needs_key` is False for a
+  compat endpoint on loopback, `usable()` is what the request paths check, and `_key_for` returns
+  `KEYLESS_PLACEHOLDER` there. A placeholder rather than an empty string because the OpenAI SDK
+  raises "Missing credentials" before any request when `api_key` is falsy
+  (`openai/_client.py:265`). A token is still used when one is saved, so a `llama.cpp` server
+  started with `--api-key` works. The exemption is exactly the boundary
+  `endpoint_acceptable` already draws: loopback is where plaintext is already permitted.
+
 **R2 -- vision in the composer** [ ]  <- next
 
 Remote vision beats local mmproj and needs no projector pairing. The one wire divergence: content becomes a parts array -- OpenAI takes `image_url` with a `data:` URI, Anthropic takes a base64 `source` block. Uploads already land sandboxed under `UPLOADS_DIR` (`sidecar.py:1614`), so the renderer side is done.

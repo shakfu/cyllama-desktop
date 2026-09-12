@@ -60,6 +60,17 @@ for (const btn of document.querySelectorAll(".prefs-nav-item")) {
   btn.addEventListener("click", () => setTab(btn.dataset.prefsTab));
 }
 
+// The opener may name a category: a hash on first load, or this channel when
+// the window was already open. Unknown names are ignored, so a stale hash
+// cannot leave every pane hidden.
+function setTabIfKnown(name) {
+  if (!name) return;
+  if (!document.querySelector(`.prefs-nav-item[data-prefs-tab="${name}"]`)) return;
+  setTab(name);
+}
+setTabIfKnown(location.hash.replace(/^#/, ""));
+if (window.cyllama?.onTab) window.cyllama.onTab(setTabIfKnown);
+
 // --- Models tab: model directories ----------------------------------------
 
 let prefsCache = { info: null };

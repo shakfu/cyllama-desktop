@@ -24,6 +24,16 @@ export function normalizeAccountSuffix(name) {
     .replace(/^-+|-+$/g, "");
 }
 
+// Mirrors Provider.needs_key in the sidecar. A local server that
+// authenticates nothing (Ollama, LM Studio) is reachable without a
+// credential, so it belongs in the picker before one is saved.
+export function needsKey(ref) {
+  if (!ref || ref.kind !== "compat") return true;
+  let host = "";
+  try { host = new URL(ref.base_url || "").hostname.toLowerCase(); } catch { return true; }
+  return !["localhost", "127.0.0.1", "[::1]"].includes(host);
+}
+
 export function accountFor(ref) {
   if (!ref) return "";
   if (ref.kind === "compat") return "compat." + normalizeAccountSuffix(ref.name);
@@ -41,9 +51,12 @@ export function displayName(ref) {
  * ``configured`` comes from the main process (which accounts hold a key);
  * ``endpoints`` from settings.json; ``/info.remote.sdks`` says which client
  * library this build can import. A provider missing any of the three is
- * omitted rather than shown disabled -- Preferences is where keys are
- * managed, and a dead row in the picker only invites a click that 401s or
- * 501s.
+ * omitted rather than shown disabled -- a dead row only invites a click
+ * that 401s or 501s. The picker carries a permanent row into Preferences
+ * instead, so the feature stays discoverable without per-provider clutter.
+ *
+ * A loopback compat endpoint needs no key and appears as soon as it is
+ * added (see :func:`needsKey`).
  */
 export async function listAvailable() {
   const out = [];
@@ -77,7 +90,7 @@ export async function listAvailable() {
   if (usable("compat")) {
     for (const e of endpoints) {
       const ref = { kind: "compat", name: e.name, base_url: e.base_url };
-      if (configured.includes(accountFor(ref))) out.push(ref);
+      if (configured.includes(accountFor(ref)) || !needsKey(ref)) out.push(ref);
     }
   }
   return out;

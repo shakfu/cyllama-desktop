@@ -2133,6 +2133,7 @@ modelPicker.bind({
   pillSelector: "#pick",
   onPickPath: (p) => { if (p) setModel(p); },
   onPickProvider: (ref, model) => setRemoteBackend(ref, model),
+  onManageProviders: () => window.cyllama.openPreferences("providers"),
   onBrowsePath: () => window.cyllama.pickModel(),
 });
 ejectBtn.addEventListener("click", async () => {

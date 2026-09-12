@@ -17,7 +17,7 @@ contextBridge.exposeInMainWorld("cyllama", {
     deleteKey: (account) => ipcRenderer.invoke("providers:deleteKey", account),
   },
   restartSidecar: () => ipcRenderer.invoke("sidecar:restart"),
-  openPreferences: () => ipcRenderer.invoke("prefs:open"),
+  openPreferences: (tab) => ipcRenderer.invoke("prefs:open", tab),
   fileExists: (path) => ipcRenderer.invoke("fs:exists", path),
   revealItem: (path) => ipcRenderer.invoke("shell:revealItem", path),
   openPath: (path) => ipcRenderer.invoke("shell:openPath", path),

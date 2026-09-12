@@ -677,3 +677,67 @@ def test_usage_endpoint_returns_totals_and_clears(client, auth, prov, sidecar_ap
 
 def test_usage_endpoint_requires_the_bearer(client):
     assert client.get("/providers/usage").status_code == 401
+
+
+# --- keyless loopback endpoints ---------------------------------------------
+
+
+@pytest.mark.parametrize("url", [
+    "http://localhost:11434/v1",
+    "http://127.0.0.1:1234/v1",
+])
+def test_loopback_compat_endpoints_need_no_key(prov, url):
+    """Ollama and LM Studio authenticate nothing; demanding a key there
+    means asking the user to invent one."""
+    p = prov.Provider(kind="compat", name="local", base_url=url)
+    assert p.needs_key is False
+    assert prov.usable(p) is True
+    assert prov.has_key(p) is False
+
+
+def test_remote_compat_endpoints_still_need_a_key(prov):
+    p = prov.Provider(kind="compat", name="groq", base_url="https://api.groq.com/openai/v1")
+    assert p.needs_key is True
+    assert prov.usable(p) is False
+
+
+@pytest.mark.parametrize("kind", ["openai", "anthropic", "openrouter"])
+def test_named_kinds_always_need_a_key(prov, kind):
+    p = prov.Provider(kind=kind)
+    assert p.needs_key is True
+    assert prov.usable(p) is False
+
+
+def test_keyless_endpoint_gets_a_placeholder_credential(prov):
+    """The OpenAI SDK refuses to construct a client with a falsy api_key."""
+    p = prov.Provider(kind="compat", name="local", base_url="http://localhost:11434/v1")
+    assert prov._key_for(p) == prov.KEYLESS_PLACEHOLDER
+    assert prov.KEYLESS_PLACEHOLDER
+
+
+def test_a_configured_token_wins_over_the_placeholder(prov):
+    """A local server started with its own token still gets that token."""
+    p = prov.Provider(kind="compat", name="local", base_url="http://localhost:1234/v1")
+    prov.set_credentials({p.account: "real-token"})
+    assert prov._key_for(p) == "real-token"
+
+
+def test_chat_to_a_keyless_loopback_endpoint_is_not_401(client, auth, prov, monkeypatch):
+    _install_stub(prov, monkeypatch, _StubClient(chunks=["local"]))
+    text = _sse_text(client, {
+        "provider": {"kind": "compat", "name": "Ollama",
+                     "base_url": "http://localhost:11434/v1"},
+        "model": "llama4",
+        "messages": _MSGS,
+    }, auth)
+    assert '"text": "local"' in text
+
+
+def test_models_for_a_keyless_loopback_endpoint_is_not_401(client, auth, prov, monkeypatch):
+    _install_stub(prov, monkeypatch, _StubClient(models=[{"id": "llama4"}]))
+    r = client.get(
+        "/providers/models?kind=compat&name=Ollama&base_url=http://localhost:11434/v1",
+        headers=auth,
+    )
+    assert r.status_code == 200
+    assert r.json()["models"] == [{"id": "llama4"}]

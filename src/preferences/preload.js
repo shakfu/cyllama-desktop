@@ -37,6 +37,13 @@ contextBridge.exposeInMainWorld("cyllama", {
     setKey:    (account, key) => ipcRenderer.invoke("providers:setKey", account, key),
     deleteKey: (account) => ipcRenderer.invoke("providers:deleteKey", account),
   },
+  // The opener can ask for a category ("providers"), delivered as a hash on
+  // first load and over this channel when the window is already up.
+  onTab: (handler) => {
+    const fn = (_e, tab) => handler(tab);
+    ipcRenderer.on("prefs:tab", fn);
+    return () => ipcRenderer.removeListener("prefs:tab", fn);
+  },
   log: {
     recent: () => ipcRenderer.invoke("log:recent"),
     subscribe: (handler) => {

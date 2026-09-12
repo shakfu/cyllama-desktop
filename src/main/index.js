@@ -485,8 +485,13 @@ function stopSidecar() {
 // (settings, sidecar, log subscription) are shared with the main
 // renderer.
 let prefsWindow = null;
-function openPreferences() {
+// ``tab`` optionally selects a category on open, so a caller that means
+// "add a provider" lands on Providers rather than on General's placeholder.
+// Sent as a hash rather than IPC: it survives the load with no handshake.
+function openPreferences(tab = "") {
+  const hash = /^[a-z]+$/.test(tab) ? `#${tab}` : "";
   if (prefsWindow && !prefsWindow.isDestroyed()) {
+    if (hash) prefsWindow.webContents.send("prefs:tab", tab);
     prefsWindow.show();
     prefsWindow.focus();
     return;
@@ -508,7 +513,8 @@ function openPreferences() {
     },
   });
   prefsWindow.setMenuBarVisibility(false);
-  prefsWindow.loadFile(path.join(__dirname, "..", "preferences", "index.html"));
+  prefsWindow.loadFile(path.join(__dirname, "..", "preferences", "index.html"),
+                       hash ? { hash: tab } : undefined);
   // Guard against ``ready-to-show`` firing after the window has been
   // destroyed (Playwright tears the app down faster than Electron's
   // load completes; calling ``.show()`` on a destroyed window
@@ -520,7 +526,9 @@ function openPreferences() {
   prefsWindow.on("closed", () => { prefsWindow = null; });
 }
 
-ipcMain.handle("prefs:open", () => openPreferences());
+ipcMain.handle("prefs:open", (_e, tab) => openPreferences(
+  typeof tab === "string" ? tab : "",
+));
 
 function buildApplicationMenu() {
   // Defining the menu explicitly (using ``app.name`` for the leading

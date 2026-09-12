@@ -261,6 +261,22 @@ test("Preferences Providers tab lists the named providers", async () => {
   }
 });
 
+test("Model menu always offers a route to the Providers tab", async () => {
+  ctx = await launchApp();
+  const { window, electron } = ctx;
+  await window.click("#pick");
+  // The only mention of providers a user with local models would see.
+  const row = window.locator(".mp-menu .mp-item", { hasText: /provider/i });
+  await expect(row).toHaveCount(1);
+  const newWindowP = electron.waitForEvent("window", { timeout: 5_000 });
+  await row.click();
+  const prefs = await newWindowP;
+  await prefs.waitForLoadState("domcontentloaded");
+  // Opening from that row lands on Providers, not on General's placeholder.
+  await expect(prefs.locator(".prefs-nav-item.active")).toContainText("Providers");
+  await expect(prefs.locator('[data-prefs-pane="providers"]')).toBeVisible();
+});
+
 test("/agent-constrained slash command is registered (Tab autocompletes)", async () => {
   ctx = await launchApp();
   const { window } = ctx;
