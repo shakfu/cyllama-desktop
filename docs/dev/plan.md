@@ -20,25 +20,17 @@ Both personas share one binary; the difference is UI mode, not feature gating.
 
 - Re-implementing cyllama features in JS. The renderer is a thin client; the Python sidecar is the single source of truth. (Drift between an Electron-side reimplementation and cyllama proper is the failure mode this plan most needs to prevent.)
 
-- A cloud / multi-user mode. This is a local-first single-user app; auth is loopback-bearer only.
+- A hosted / multi-user mode. This is a local-first single-user app; auth is loopback-bearer only. Calling *out* to an external provider from the chat pane is in scope and shipped -- see `docs/dev/providers.md`. Serving other users is not.
 
 - Replacing `cyllama` the CLI. The desktop is additive, not a substitute.
 
 ## 3. Current state (2026-09-12)
 
-For the full endpoint list and source tree, see `README.md`; this
-section records only what bears on the phases below.
+For the full endpoint list and source tree, see `README.md`; this section records only what bears on the phases below.
 
 Sidecar (`python-sidecar/sidecar.py`):
 
-- 57 routes. Beyond the Phase 0-9 set: the four agent variants
-  (`/jobs/agent/{constrained,contract,plan,reflect}`),
-  `/info/contract-presets`, workflows (`/workflows`,
-  `/workflows/{id}/spec`, `/jobs/workflow/run`), scripts (`/scripts`,
-  `/jobs/script/run`), the shipped-example install and uninstall
-  routes for both, `/documents/extract`, `/audio/upload`, and
-  `/jobs/{id}/log` for replaying retained events after a dropped
-  stream.
+- 57 routes. Beyond the Phase 0-9 set: the four agent variants (`/jobs/agent/{constrained,contract,plan,reflect}`), `/info/contract-presets`, workflows (`/workflows`, `/workflows/{id}/spec`, `/jobs/workflow/run`), scripts (`/scripts`, `/jobs/script/run`), the shipped-example install and uninstall routes for both, `/documents/extract`, `/audio/upload`, and `/jobs/{id}/log` for replaying retained events after a dropped stream.
 
 - Sampler whitelist now includes the forward-looking fields (`presence_penalty`, `frequency_penalty`, `mirostat*`, `grammar`) filtered through `_GC_ACCEPTED` so they no-op cleanly on cyllama builds that don't accept them. Capability flags surface what's live.
 
@@ -50,14 +42,7 @@ Sidecar (`python-sidecar/sidecar.py`):
 
 Renderer:
 
-- The nav-rail now mixes two things: full-area pane jumps (Chats,
-  Models, Agents) plus Console and Preferences, while the left-sidebar
-  tabs carry Chats, Docs, Transcribe, Image and Batch. Models and
-  Agents were promoted out of the right sidebar into full-area panes;
-  Settings moved into a separate Preferences window (`Cmd+,`) with
-  General, Models, Sidecar and Logs tabs. Panes that depend on
-  optional cyllama capabilities still hide themselves via
-  `/info.features`.
+- The nav-rail now mixes two things: full-area pane jumps (Chats, Models, Agents) plus Console and Preferences, while the left-sidebar tabs carry Chats, Docs, Transcribe, Image and Batch. Models and Agents were promoted out of the right sidebar into full-area panes; Settings moved into a separate Preferences window (`Cmd+,`) with General, Models, Sidecar and Logs tabs. Panes that depend on optional cyllama capabilities still hide themselves via `/info.features`.
 
 - Chat: streaming, multi-turn, persistent chats, copy/regenerate, presets, full sampling surface (basic + Advanced disclosure for grammar / speculative / n-gram cache), retrieval injection from a RAG collection, ModelPicker, sampling and load-time hardware controls (multi-GPU rows hidden on single-GPU rigs), GBNF generation from JSON schema.
 
@@ -73,17 +58,9 @@ Renderer:
 
 - Models tab: cached models list, drag-drop import, HF download, metadata inspector, Tools section with quantize.
 
-- Agents pane (full-area): six agent types with per-type defaults and
-  a per-call modal, a tool catalog (stock tools, sandboxed read_file,
-  web_fetch, search_wikipedia, quarto_render, rag_query,
-  semantic_memory), the workflow row (file list, plan preview,
-  initial state, live trace), and the scripts row (child-process jobs
-  with streamed output, cancel, and artifacts). Shipped examples for
-  both install and uninstall from the row.
+- Agents pane (full-area): six agent types with per-type defaults and a per-call modal, a tool catalog (stock tools, sandboxed read_file, web_fetch, search_wikipedia, quarto_render, rag_query, semantic_memory), the workflow row (file list, plan preview, initial state, live trace), and the scripts row (child-process jobs with streamed output, cancel, and artifacts). Shipped examples for both install and uninstall from the row.
 
-- Preferences window: About and devices under General, extra model
-  search roots under Models, workspace paths and the Python runtime
-  under Sidecar, plus the sidecar log under Logs.
+- Preferences window: About and devices under General, extra model search roots under Models, workspace paths and the Python runtime under Sidecar, plus the sidecar log under Logs.
 
 ## 4. Feature surface to expose
 
@@ -292,10 +269,7 @@ Status legend: [x] shipped, [~] partial (slice noted), [ ] not started. See `CHA
 
 - Advanced reveals: ControlNet image upload, inpaint mask canvas, LoRA selector, ESRGAN upscale post-step.
 
-**Phase 7 -- Agents** [x] (ReActAgent, the tool catalog, and the
-ContractAgent pre/post UI all shipped, along with three agent variants
-the original phase did not anticipate. Phases A-F in
-`agent_plan.md` supersede this entry.)
+**Phase 7 -- Agents** [x] (ReActAgent, the tool catalog, and the ContractAgent pre/post UI all shipped, along with three agent variants the original phase did not anticipate. Phases A-F in `agent_plan.md` supersede this entry.)
 - `/agent/run` with live tool-call trace SSE.
 
 - Pre-shipped tool catalog: web fetch (off by default), file read inside a chosen sandbox dir, RAG-collection query, calculator.
@@ -316,22 +290,13 @@ the original phase did not anticipate. Phases A-F in
 
 Phases 4-7 are independently parallelizable once 0-3 are in.
 
-**Phase 10 -- agent layer** [x] Six agent types, the tool catalog,
-semantic memory, workflows, and the full-area Agents pane. Planned and
-tracked separately in [`agent_plan.md`](agent_plan.md) as Phases A-F;
-F.4 (per-agent-type run history) is the one slice still open.
+**Phase 10 -- agent layer** [x] Six agent types, the tool catalog, semantic memory, workflows, and the full-area Agents pane. Planned and tracked separately in [`agent_plan.md`](agent_plan.md) as Phases A-F; F.4 (per-agent-type run history) is the one slice still open.
 
-**Phase 11 -- workspace scripts** [x] Python files run as child-process
-jobs against the resident model. Design record in
-[`scripting.md`](scripting.md). The Windows process-tree kill is
-written but unverified (Section 15.3 there).
+**Phase 11 -- workspace scripts** [x] Python files run as child-process jobs against the resident model. Design record in [`scripting.md`](scripting.md). The Windows process-tree kill is written but unverified (Section 15.3 there).
 
 ---
 
-What's next: the partial phases (5 and 6) have specific sub-features
-tracked in `TODO.md`. Once cyllama exposes a richer image API
-(progress callbacks, img2img, video) the slice notes in Phase 6 become
-discrete follow-up phases rather than open questions.
+What's next: the partial phases (5 and 6) have specific sub-features tracked in `TODO.md`. Once cyllama exposes a richer image API (progress callbacks, img2img, video) the slice notes in Phase 6 become discrete follow-up phases rather than open questions.
 
 ## 9. Workspaces (projects), persistence, and config
 
@@ -384,14 +349,9 @@ Global `<userData>/settings.json`. Proposed shape:
   "server": { "kind": "embedded", "port": 0, "exposeLan": false } }
 ```
 
-As shipped it carries one field, `models_extra` -- the additional
-read-only model search roots set in Preferences -> Models. Hardware,
-theme and server settings still live in the renderer's localStorage.
-Growing the file is a migration away, not a redesign, but it has not
-happened.
+As shipped it carries one field, `models_extra` -- the additional read-only model search roots set in Preferences -> Models. Hardware, theme and server settings still live in the renderer's localStorage. Growing the file is a migration away, not a redesign, but it has not happened.
 
-Per-workspace `<userData>/workspaces/<id>/settings.json`. Nothing
-reads or writes this file yet; the shape is still the proposal:
+Per-workspace `<userData>/workspaces/<id>/settings.json`. Nothing reads or writes this file yet; the shape is still the proposal:
 ```
 { "version": 1,
   "model": { "default": "<path-into-global-cache>", "loadOptions": {...} },
@@ -432,7 +392,7 @@ The original draft listed these as open questions; resolutions are recorded here
 
 2. **HF download UX.** Paste-URL only in Phase 1. In-app browse / search deferred to a later phase (needs HF API surface + rate-limit handling).
 
-3. **OpenAI / LangChain compat shims.** Dropped from scope. Target users write code, not click buttons; document the shim as a README example instead of building UI.
+3. **OpenAI / LangChain compat shims.** Dropped from scope. Target users write code, not click buttons; document the shim as a README example instead of building UI. This is about other tools calling *into* cyllama, and is unrelated to the app calling *out* to a provider, which `docs/dev/providers.md` covers.
 
 4. **Pane renderer split.** esbuild + per-pane modules land in Phase 0 alongside JobRunner; see Section 8.
 

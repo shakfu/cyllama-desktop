@@ -20,9 +20,10 @@ dependencies = [
   "pypdf>=4.0",
 ]
 
-# Two top-level modules live here: the sidecar itself and the client
-# library its child scripts import. Without this, setuptools' flat-layout
-# auto-discovery refuses to build ("Multiple top-level modules
-# discovered"), which breaks the bundled-env rebuild and CI.
+# Three top-level modules live here: the sidecar, the external-provider
+# client layer it imports, and the client library its child scripts import.
+# Without this, setuptools' flat-layout auto-discovery refuses to build
+# ("Multiple top-level modules discovered"), which breaks the bundled-env
+# rebuild and CI.
 [tool.setuptools]
-py-modules = ["sidecar", "cyllama_desktop"]
+py-modules = ["sidecar", "providers", "cyllama_desktop"]

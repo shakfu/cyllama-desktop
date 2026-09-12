@@ -4,6 +4,8 @@ Started by the Electron main process with these env vars:
   CYLLAMA_SIDECAR_PORT          port to bind on 127.0.0.1
   CYLLAMA_SIDECAR_TOKEN         bearer token clients must send
   CYLLAMA_SIDECAR_PARENT_PID    parent pid; sidecar exits if parent dies
+  CYLLAMA_SIDECAR_PROVIDERS     dir for external-provider model-list caches
+  CYLLAMA_SIDECAR_USAGE         sqlite file recording provider token usage
 """
 
 from __future__ import annotations
@@ -32,6 +34,8 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 
 import cyllama
 from cyllama import LLM, GenerationConfig
+
+import providers
 
 # Whitelist of GenerationConfig fields the renderer is allowed to set.
 # Restricting this is defense-in-depth: we never pass arbitrary kwargs
@@ -668,6 +672,19 @@ PORT = int(os.environ["CYLLAMA_SIDECAR_PORT"])
 TOKEN = os.environ["CYLLAMA_SIDECAR_TOKEN"]
 PARENT_PID = int(os.environ.get("CYLLAMA_SIDECAR_PARENT_PID", "0"))
 
+# Workflows run in *this* process, not a child, so the client library they
+# import has to find the sidecar the way a script child does (_script_env
+# sets the same pair). The token is already here; the URL is not, which is
+# why ``from cyllama_desktop import app`` in a workflow node used to raise
+# NotRunningUnderDesktop. Setting it here is what gives a workflow the
+# resident model and the configured providers.
+#
+# Job-scoped members of that handle stay meaningless in a workflow: there is
+# no CYLLAMA_JOB_ID, so progress() is inert and args is empty. A node blocks
+# in a thread (cyllama dispatches sync nodes via asyncio.to_thread), so the
+# loopback call does not stall the event loop.
+os.environ["CYLLAMA_SIDECAR_URL"] = f"http://127.0.0.1:{PORT}"
+
 # Artifact dir is created by the main process under userData/artifacts and
 # passed in. Falls back to a temp-style path so direct curl smoke tests still
 # work without the Electron host.
@@ -758,6 +775,24 @@ SCRIPTS_DIR = Path(
     or (Path.home() / ".cache" / "cyllama-desktop" / "scripts")
 ).resolve()
 SCRIPTS_DIR.mkdir(parents=True, exist_ok=True)
+
+# External-provider model-list caches, one JSON file per credential account.
+# Global rather than workspace-scoped: a provider's catalogue is a property of
+# the account, not of the project. Holds no credentials -- keys live in the
+# main process (encrypted) and in this process's memory only.
+PROVIDERS_DIR = Path(
+    os.environ.get("CYLLAMA_SIDECAR_PROVIDERS")
+    or (Path.home() / ".cache" / "cyllama-desktop" / "providers")
+).resolve()
+PROVIDERS_DIR.mkdir(parents=True, exist_ok=True)
+
+# Provider token usage, one row per billable call. Workspace-scoped, unlike
+# the model-list cache: spend belongs to the project it was incurred for.
+# A file rather than a directory because it is exactly one sqlite db.
+USAGE_DB = Path(
+    os.environ.get("CYLLAMA_SIDECAR_USAGE")
+    or (Path.home() / ".cache" / "cyllama-desktop" / "usage.db")
+).resolve()
 
 
 def _resolve_examples_dir(env_var: str) -> Optional[Path]:
@@ -1076,6 +1111,20 @@ _INFO_CACHE: dict = {
     # to surface "install <foo> for richer extraction" affordances.
     # Empty when the installed cyllama predates the loader refactor.
     "pdf_backends": _probe_pdf_backends(),
+    # External providers. ``sdks`` reports whether the client libraries are
+    # importable in this build -- the renderer hides the provider section
+    # entirely when neither is. ``supported_params`` is the per-kind sibling
+    # of ``supported_params`` above: the Parameters pane hides rows the
+    # active kind has no equivalent for. Which accounts have a key is
+    # runtime state, so it lives on /providers/credentials, not here.
+    "remote": {
+        "kinds": list(providers.KINDS),
+        "sdks": providers.sdk_status(),
+        "supported_params": {
+            kind: sorted(fields)
+            for kind, fields in providers.PARAM_SUPPORT.items()
+        },
+    },
 }
 
 
@@ -1121,6 +1170,77 @@ def info():
     Adding fields is fine; renaming requires a bump.
     """
     return _INFO_CACHE
+
+
+# ---------------------------------------------------------------------------
+# External providers. Credentials arrive from the main process, which holds
+# them encrypted at <userData>/credentials.json via Electron safeStorage; this
+# process keeps them in memory only. Model lists are fetched here (the key is
+# here) and cached under PROVIDERS_DIR. See docs/dev/providers.md.
+# ---------------------------------------------------------------------------
+
+
+def _provider_http(exc: providers.ProviderError) -> HTTPException:
+    """Map a ProviderError onto the status it carries."""
+    return HTTPException(status_code=exc.status, detail=str(exc))
+
+
+@app.post("/providers/credentials")
+async def providers_credentials_set(req: Request):
+    """Replace the credential set. Body: ``{"credentials": {account: key}}``.
+
+    Returns configured account ids only. No endpoint ever returns key bytes.
+    """
+    body = await req.json()
+    try:
+        configured = providers.set_credentials(body.get("credentials"))
+    except providers.ProviderError as exc:
+        raise _provider_http(exc) from exc
+    return {"configured": configured}
+
+
+@app.get("/providers/credentials")
+def providers_credentials_list():
+    """Which accounts have a key. A boolean surface, by design."""
+    return {"configured": providers.configured_accounts()}
+
+
+@app.get("/providers/models")
+def providers_models(
+    kind: str,
+    name: str = "",
+    base_url: str = "",
+    refresh: bool = False,
+):
+    """Chat models this provider offers, cache-first.
+
+    ``{models, fetched_at, cached, stale}``. A fetch happens only on
+    ``refresh``, on a cold cache, or past the TTL; a failed refresh with a
+    usable cache serves the cache and flags it stale rather than emptying
+    the picker.
+    """
+    try:
+        provider = providers.provider_from_dict(
+            {"kind": kind, "name": name, "base_url": base_url}
+        )
+        return providers.list_models(provider, PROVIDERS_DIR, refresh=refresh)
+    except providers.ProviderError as exc:
+        raise _provider_http(exc) from exc
+
+
+@app.get("/providers/usage")
+def providers_usage(since: float = 0.0):
+    """Token totals per account and model, newest first.
+
+    ``since`` is an epoch seconds floor. Tokens rather than money: a price
+    table would go stale and vary by tier.
+    """
+    return {"totals": providers.usage_totals(USAGE_DB, since), "since": since}
+
+
+@app.delete("/providers/usage")
+def providers_usage_clear():
+    return {"deleted": providers.clear_usage(USAGE_DB)}
 
 
 # ---------------------------------------------------------------------------
@@ -1932,15 +2052,108 @@ def _normalize_messages(body: dict) -> list[dict]:
     return msgs
 
 
+def _remote_chat_response(
+    provider: providers.Provider,
+    model: str,
+    messages: list[dict],
+    raw_params: dict | None,
+    source: str = "",
+) -> StreamingResponse:
+    """Stream a provider's reply in the same SSE frames the local path uses.
+
+    The renderer's stream reader is therefore shared: ``{"text": ...}`` per
+    delta, ``{"error": ...}`` as a terminal frame, ``[DONE]`` on success.
+    """
+    loop = asyncio.get_running_loop()
+
+    async def event_stream():
+        q: asyncio.Queue = asyncio.Queue()
+        DONE = object()
+        # Set when the client disconnects. The producer is parked in a
+        # blocking SDK read, so it notices on the next delta -- which for a
+        # streaming provider is the next token, not the end of the reply.
+        stop = threading.Event()
+
+        # Filled by the provider at the end of the stream. Stays empty on a
+        # cancelled generation and on a compat endpoint that reports nothing.
+        usage: dict = {}
+
+        def producer():
+            gen = providers.stream_chat(provider, model, messages, raw_params, usage)
+            try:
+                for chunk in gen:
+                    if stop.is_set():
+                        break
+                    loop.call_soon_threadsafe(q.put_nowait, chunk)
+            except providers.ProviderError as exc:
+                loop.call_soon_threadsafe(q.put_nowait, {"__error__": str(exc)})
+            except Exception as exc:  # noqa: BLE001
+                loop.call_soon_threadsafe(q.put_nowait, {"__error__": str(exc)})
+            finally:
+                # Closing the generator unwinds the SDK's context manager and
+                # releases the HTTP connection on the cancel path too.
+                try:
+                    gen.close()
+                except Exception:
+                    pass
+                providers.record_usage(USAGE_DB, provider, model, usage, source)
+                loop.call_soon_threadsafe(q.put_nowait, DONE)
+
+        threading.Thread(target=producer, daemon=True).start()
+
+        try:
+            while True:
+                item = await q.get()
+                if item is DONE:
+                    # One extra frame the local path never sends. A reader
+                    # that only looks at ``text`` ignores it, which is what
+                    # the client library does.
+                    if usage:
+                        yield "data: " + json.dumps({"usage": usage}) + "\n\n"
+                    yield "data: [DONE]\n\n"
+                    return
+                if isinstance(item, dict) and "__error__" in item:
+                    yield "data: " + json.dumps({"error": item["__error__"]}) + "\n\n"
+                    return
+                yield "data: " + json.dumps({"text": str(item)}) + "\n\n"
+        except asyncio.CancelledError:
+            stop.set()
+            raise
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
 @app.post("/chat")
 async def chat(req: Request):
     body = await req.json()
-    model_path = body.get("model_path")
-    if not model_path:
-        raise HTTPException(status_code=400, detail="model_path required")
-
     messages = _normalize_messages(body)
     raw_params = body.get("params")
+
+    # Remote branch: an external provider instead of a GGUF on disk. Checked
+    # before ``model_path`` so a body carrying both is unambiguous. Validation
+    # is eager -- a missing key must be a 401, not an SSE error frame.
+    if body.get("provider") is not None:
+        try:
+            provider = providers.provider_from_dict(body.get("provider"))
+            model = str(body.get("model") or "").strip()
+            if not model:
+                raise providers.ProviderError("model required")
+            if not providers.has_key(provider):
+                raise providers.ProviderError(
+                    f"no API key configured for {provider.display_name}",
+                    status=401,
+                )
+        except providers.ProviderError as exc:
+            raise _provider_http(exc) from exc
+        # Caller's own label for the usage row. A hint, not a claim the
+        # sidecar can verify -- see docs/dev/providers.md S8.2.
+        source = str(body.get("source") or "")[:120]
+        return _remote_chat_response(provider, model, messages, raw_params, source)
+
+    model_path = body.get("model_path")
+    if not model_path:
+        raise HTTPException(status_code=400, detail="model_path or provider required")
+
     config = _build_config(raw_params)
 
     llm = _get_llm(model_path, raw_params)

@@ -21,9 +21,14 @@ extraResources:
   - from: "python-sidecar"
     to: "python-sidecar"
     filter:
+      # providers.py is imported by sidecar.py. The bundled env also has an
+      # installed copy (pyproject's py-modules), but that one can drift from
+      # the sidecar.py shipped here; this directory is sys.path[0], so the
+      # two must be shipped together.
       # cyllama_desktop.py is the client library scripts import; it is put
       # on the child process's PYTHONPATH from this directory.
       - "sidecar.py"
+      - "providers.py"
       - "cyllama_desktop.py"
   # Shipped examples. Listed read-only in the pane; the user copies
   # one into the workspace (docs/dev/scripting.md S17).

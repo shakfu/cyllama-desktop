@@ -4,6 +4,28 @@ All notable changes to cyllama-desktop are documented here. The format is based 
 
 ## [Unreleased]
 
+### Added
+
+- **Chat against OpenAI, Anthropic, OpenRouter, or any OpenAI-compatible endpoint.** The model pill lists configured providers beside the local GGUFs; picking one switches the chat backend. Keys are entered in the new Preferences -> Providers tab, stored with Electron `safeStorage`, and pushed to the sidecar over loopback, which makes every outbound call. The renderer never holds a key, and the sidecar never reads one from its environment -- `_script_env` copies `os.environ` into every script child, so an environment variable would hand keys to user scripts.
+
+  Only Anthropic differs on the wire; OpenAI, OpenRouter and a user-supplied endpoint share one client and differ by base URL. An endpoint must be `https`, or `http` on loopback so Ollama and LM Studio work without certificates. Per-kind parameter mapping is data rather than branching: `top_k` reaches Anthropic and not OpenAI, `max_completion_tokens` goes to OpenAI while OpenRouter and compat servers get `max_tokens`, and the Parameters pane hides each row the active backend has no equivalent for. Everything local-only says why instead of failing: the advanced sampling section and multi-GPU split disappear, and estimating layers, the agent loop and image attachment name the active provider in the refusal.
+
+  Model lists come from each provider's own list endpoint, cached per account under `<userData>/providers/` and refreshed on demand, past 24h, or on a newly entered key. A failed refresh serves the cached list and says it may be stale rather than emptying the picker. The last model used is remembered per provider, so switching back restores that provider's choice. Free-text model ids are always accepted, because a provider's list lags a new release.
+
+  `docs/dev/providers.md` carries the roadmap for the rest, ordered by value over effort: vision next, then RAG generation, agents, batch, image generation, embeddings, transcription.
+
+- **Scripts and workflows reach providers, and every provider call is counted.** `app.chat(..., provider="openai", model="gpt-5.4")` in a workspace script runs against a configured provider; `app.providers()` and `app.provider_models()` say what is reachable. `model=` is required there, since there is no local file to default to.
+
+  A workflow node can import the same handle now. It could not before: a workflow is Python running inside the sidecar, and `from cyllama_desktop import app` raised `NotRunningUnderDesktop` because only the script-child environment carried `CYLLAMA_SIDECAR_URL`. The sidecar exports it for itself, which gives a workflow node the resident model and the providers together. The job-scoped members of that handle stay inert there -- `args` is empty, `progress()` does nothing -- because a workflow has no job artifact directory and its stdout is the sidecar's log.
+
+  Each provider call books a row in `<workspace>/usage.db`: account, model, token counts, and who asked (`chat`, `script:<job>`, `workflow`). Preferences -> Providers shows the totals with a Clear action. Tokens rather than money, because a price table would go stale and varies by tier and cached input. An assistant turn served by a provider also carries that attribution in the chat's own JSON and renders it under the message, so reopening an old chat still says where those tokens went. A cancelled generation books nothing, and a compat endpoint that reports no usage books nothing rather than zeros.
+
+  Retries are one constant (`MAX_RETRIES = 2`) applied at client construction: both SDKs already retry 429 and 5xx with backoff and honour `Retry-After`, so the shared policy this was meant to be is a policy knob, not an implementation. Timeouts stay at the SDK defaults, since a long generation is not a stalled one.
+
+### Fixed
+
+- **Provider keys are refused rather than stored under a publicly known key.** `safeStorage.isEncryptionAvailable()` reports true on a Linux desktop with no keyring, because Chromium's `basic_text` fallback does have a key -- one compiled into Chromium. The Providers tab accepted a key there, stored it that way, and said nothing. It now also checks `getSelectedStorageBackend()` and explains why it cannot save. macOS and Windows were never affected. Untestable from CI: it needs a Linux host with the keyring stopped, or `--password-store=basic`.
+
 ## [0.3.2]
 
 ### Added

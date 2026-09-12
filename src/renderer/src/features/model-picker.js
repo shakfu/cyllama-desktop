@@ -3,8 +3,10 @@
 // "Browse..." item at the bottom that falls back to the OS file picker.
 
 import { listModels } from "../lib/models.js";
+import * as providers from "../lib/providers.js";
 
 let onPick = (path) => {};
+let onPickRemote = (ref, model) => {};
 let onBrowse = async () => null;
 let pillEl = null;
 let menuEl = null;
@@ -35,10 +37,109 @@ function position() {
   menuEl.style.minWidth = `${Math.max(280, rect.width)}px`;
 }
 
+// Second view: the chosen provider's models. Cache-first, so this is
+// usually instant; a cold cache pays one fetch. Free-text entry stays
+// available because a provider's list can lag a new model id.
+async function renderProviderModels(ref) {
+  const menu = ensureMenu();
+  menu.innerHTML = "";
+
+  const back = document.createElement("button");
+  back.type = "button";
+  back.className = "mp-item mp-item-back";
+  back.textContent = "< All models";
+  back.addEventListener("click", () => { render().then(position); });
+  menu.appendChild(back);
+
+  const head = document.createElement("div");
+  head.className = "mp-group";
+  head.textContent = providers.displayName(ref);
+  menu.appendChild(head);
+
+  const listHost = document.createElement("div");
+  menu.appendChild(listHost);
+
+  function activate(model) {
+    const id = String(model || "").trim();
+    if (!id) return;
+    close();
+    onPickRemote(ref, id);
+  }
+
+  // Free text first: it always works, including for a model the list
+  // does not carry yet.
+  const form = document.createElement("form");
+  form.className = "mp-freetext";
+  const input = document.createElement("input");
+  input.type = "text";
+  input.placeholder = "model id";
+  input.value = providers.lastModel(ref);
+  const go = document.createElement("button");
+  go.type = "submit";
+  go.className = "btn-mini";
+  go.textContent = "Use";
+  form.append(input, go);
+  form.addEventListener("submit", (e) => { e.preventDefault(); activate(input.value); });
+  menu.appendChild(form);
+
+  async function fill({ refresh = false } = {}) {
+    listHost.innerHTML = `<div class="mp-loading">Loading...</div>`;
+    let payload;
+    try {
+      payload = await providers.listModels(ref, { refresh });
+    } catch (e) {
+      listHost.innerHTML = "";
+      const err = document.createElement("div");
+      err.className = "mp-error";
+      err.textContent = `Error: ${e.message}`;
+      listHost.appendChild(err);
+      return;
+    }
+    listHost.innerHTML = "";
+    const items = payload.models || [];
+    if (!items.length) {
+      const empty = document.createElement("div");
+      empty.className = "mp-empty";
+      empty.textContent = "No models listed. Type an id above.";
+      listHost.appendChild(empty);
+    }
+    for (const m of items) {
+      const row = document.createElement("button");
+      row.type = "button";
+      row.className = "mp-item";
+      row.innerHTML = `<span class="mp-item-name"></span><span class="mp-item-meta"></span>`;
+      row.querySelector(".mp-item-name").textContent = m.display_name || m.id;
+      row.querySelector(".mp-item-meta").textContent =
+        Number.isFinite(m.context_length) ? `${Math.round(m.context_length / 1024)}k ctx` : "";
+      row.title = m.id;
+      row.addEventListener("click", () => activate(m.id));
+      listHost.appendChild(row);
+    }
+    const foot = document.createElement("div");
+    foot.className = "mp-foot";
+    // A stale list is served on purpose when a refresh fails, so say which
+    // one is on screen rather than leaving the picker silently out of date.
+    foot.textContent = payload.stale ? "list may be out of date" : "";
+    const refreshBtn = document.createElement("button");
+    refreshBtn.type = "button";
+    refreshBtn.className = "btn-mini";
+    refreshBtn.textContent = "Refresh";
+    refreshBtn.addEventListener("click", () => fill({ refresh: true }));
+    foot.appendChild(refreshBtn);
+    listHost.appendChild(foot);
+  }
+
+  await fill();
+  position();
+}
+
 async function render() {
   const menu = ensureMenu();
   menu.innerHTML = `<div class="mp-loading">Loading...</div>`;
+  let remote = [];
+  try { remote = await providers.listAvailable(); } catch { remote = []; }
   let models = [];
+  let localError = "";
   try {
     // Chat-side picker: only surface text-generation models. Whisper
     // / SD / mmproj projectors aren't loadable as a chat LLM and used
@@ -46,8 +147,9 @@ async function render() {
     const r = await listModels({ kinds: ["chat"] });
     models = r.models || [];
   } catch (e) {
-    menu.innerHTML = `<div class="mp-error">Error: ${e.message}</div>`;
-    return;
+    // Report it inline rather than replacing the whole menu: a failed
+    // local scan must not hide the providers, which are still reachable.
+    localError = e.message;
   }
 
   menu.innerHTML = "";
@@ -69,6 +171,33 @@ async function render() {
     return row;
   }
 
+  if (remote.length) {
+    const h = document.createElement("div");
+    h.className = "mp-group";
+    h.textContent = "Providers";
+    menu.appendChild(h);
+    for (const ref of remote) {
+      const row = document.createElement("button");
+      row.type = "button";
+      row.className = "mp-item";
+      row.innerHTML = `<span class="mp-item-name"></span><span class="mp-item-meta"></span>`;
+      row.querySelector(".mp-item-name").textContent = providers.displayName(ref);
+      // The last model used with this provider, so the common case is one
+      // click. Empty until the user has picked one.
+      row.querySelector(".mp-item-meta").textContent = providers.lastModel(ref) || "choose model";
+      row.title = ref.kind === "compat" ? ref.base_url : "";
+      row.addEventListener("click", () => { renderProviderModels(ref); });
+      menu.appendChild(row);
+    }
+  }
+
+  if (localError) {
+    const err = document.createElement("div");
+    err.className = "mp-error";
+    err.textContent = `Local models unavailable: ${localError}`;
+    menu.appendChild(err);
+  }
+
   if (groupBy.local.length) {
     const h = document.createElement("div");
     h.className = "mp-group";
@@ -83,10 +212,11 @@ async function render() {
     menu.appendChild(h);
     for (const m of groupBy.hf) menu.appendChild(rowFor(m));
   }
-  if (!groupBy.local.length && !groupBy.hf.length) {
+  if (!groupBy.local.length && !groupBy.hf.length && !remote.length) {
     const empty = document.createElement("div");
     empty.className = "mp-empty";
-    empty.textContent = "No models found. Use Browse... or open the Models tab.";
+    empty.textContent = "No models found. Use Browse..., open the Models tab, "
+      + "or add a provider key in Settings.";
     menu.appendChild(empty);
   }
 
@@ -135,10 +265,11 @@ function outsideHandler(e) {
   close();
 }
 
-export function bind({ pillSelector, onPickPath, onBrowsePath } = {}) {
+export function bind({ pillSelector, onPickPath, onPickProvider, onBrowsePath } = {}) {
   pillEl = document.querySelector(pillSelector || "#pick");
   if (!pillEl) return;
   if (typeof onPickPath === "function") onPick = onPickPath;
+  if (typeof onPickProvider === "function") onPickRemote = onPickProvider;
   if (typeof onBrowsePath === "function") onBrowse = onBrowsePath;
   pillEl.addEventListener("click", (e) => {
     e.preventDefault();

@@ -4,11 +4,14 @@
 // resources (settings.json, sidecar /info, sidecar stdout ring
 // buffer) stay consistent across the two windows.
 //
-// Three populated tabs:
+// Four populated tabs:
 //
-//   Models   -- read/write of the model directories list. Edits
+//   Models    -- read/write of the model directories list. Edits
 //               persist via window.cyllama.settings.set + restart
 //               the sidecar so the new scan roots take effect.
+//   Providers -- external-provider keys and OpenAI-compatible
+//               endpoints. Keys go to the OS keychain via the main
+//               process; this window never sees one back.
 //   Sidecar  -- read-only view of /info: cyllama version, backends,
 //               devices, paths.
 //   Logs     -- live tail of the sidecar's stdout/stderr ring
@@ -19,6 +22,7 @@
 // sampling preset / window behavior land here in follow-ups.
 
 import * as serverPane from "../renderer/src/features/server-pane.js";
+import * as providersTab from "./providers-tab.js";
 
 function el(tag, attrs = {}, ...children) {
   const node = document.createElement(tag);
@@ -352,6 +356,7 @@ async function mountServerSection() {
 (async () => {
   await refreshInfoCache();
   await renderModelsTab();
+  await providersTab.render();
   renderSidecarTab();
   await mountServerSection();
 

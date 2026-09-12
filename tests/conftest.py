@@ -1310,10 +1310,13 @@ def sidecar_app(tmp_path, monkeypatch):
     monkeypatch.setenv("CYLLAMA_SIDECAR_RAG", str(tmp_path / "rag"))
     monkeypatch.setenv("CYLLAMA_SIDECAR_UPLOADS", str(tmp_path / "uploads"))
     monkeypatch.setenv("CYLLAMA_SIDECAR_SCRIPTS", str(tmp_path / "scripts"))
+    monkeypatch.setenv("CYLLAMA_SIDECAR_PROVIDERS", str(tmp_path / "providers"))
+    monkeypatch.setenv("CYLLAMA_SIDECAR_USAGE", str(tmp_path / "usage.db"))
 
     sidecar_path = Path(__file__).resolve().parent.parent / "python-sidecar"
     sys.path.insert(0, str(sidecar_path))
     sys.modules.pop("sidecar", None)
+    sys.modules.pop("providers", None)
     import sidecar  # noqa: F401
 
     # Neutralize the real HF caches so tests don't enumerate the dev
@@ -1323,6 +1326,9 @@ def sidecar_app(tmp_path, monkeypatch):
     yield sidecar
 
     sys.modules.pop("sidecar", None)
+    # Credentials live in module state; a leak between tests would let one
+    # test's stub key satisfy another's "no key configured" assertion.
+    sys.modules.pop("providers", None)
     sys.path.remove(str(sidecar_path))
     _FakeLLM.instances.clear()
     _FakeEmbedder.instances.clear()
@@ -1349,6 +1355,17 @@ def sidecar_app(tmp_path, monkeypatch):
         if "start_returns" in cls.__dict__ and cls is not _FakeServer:
             delattr(cls, "start_returns")
     _FakeServer.start_returns = True
+
+
+@pytest.fixture()
+def prov(sidecar_app):
+    """The ``providers`` module the sidecar imported, with per-test state.
+
+    Credentials and the model-list cache are module globals, so going through
+    the sidecar fixture is what guarantees one test's key does not satisfy
+    another's "no key configured" assertion.
+    """
+    return sidecar_app.providers
 
 
 @pytest.fixture()

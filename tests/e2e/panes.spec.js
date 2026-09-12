@@ -232,11 +232,33 @@ test("cog nav-rail opens the Preferences window", async () => {
   await window.click("#navPrefs");
   const prefs = await newWindowP;
   await prefs.waitForLoadState("domcontentloaded");
-  // Sidebar carries the four category tabs; default-selected is
-  // General. The presence of all four data-prefs-tab buttons is the
+  // Sidebar carries the five category tabs; default-selected is
+  // General. The presence of all five data-prefs-tab buttons is the
   // structural check.
-  await expect(prefs.locator(".prefs-nav-item")).toHaveCount(4);
+  await expect(prefs.locator(".prefs-nav-item")).toHaveCount(5);
   await expect(prefs.locator(".prefs-nav-item.active")).toContainText("General");
+});
+
+test("Preferences Providers tab lists the named providers", async () => {
+  ctx = await launchApp();
+  const { window, electron } = ctx;
+  const newWindowP = electron.waitForEvent("window", { timeout: 5_000 });
+  await window.click("#navPrefs");
+  const prefs = await newWindowP;
+  await prefs.waitForLoadState("domcontentloaded");
+  await prefs.click('.prefs-nav-item[data-prefs-tab="providers"]');
+  const pane = prefs.locator('[data-prefs-pane="providers"]');
+  await expect(pane).toBeVisible();
+  // The tab has rendered once the intro copy is on screen.
+  await expect(pane.locator(".prefs-hint").first()).toBeVisible();
+  // One key row per named provider. A host with no encrypted storage (a
+  // Linux box with no keyring) shows the notice instead and no rows.
+  const notice = pane.locator(".prefs-empty-row", { hasText: "encrypted storage" });
+  if (await notice.count() > 0) {
+    await expect(notice).toBeVisible();
+  } else {
+    await expect(pane.locator(".prefs-row-provider")).toHaveCount(3);
+  }
 });
 
 test("/agent-constrained slash command is registered (Tab autocompletes)", async () => {

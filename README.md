@@ -1,6 +1,8 @@
 # cyllama-desktop
 
-Electron desktop app for local AI inference: chat, retrieval, agents, transcription and image generation, driven from GGUF model files you hold on disk. It runs [cyllama](https://github.com/shakfu/cyllama) in a bundled Python sidecar, so there is no account to create, no API key, and nothing to install alongside it.
+Electron desktop app for local AI inference: chat, retrieval, agents, transcription and image generation, driven from GGUF model files you hold on disk. It runs [cyllama](https://github.com/shakfu/cyllama) in a bundled Python sidecar, so nothing needs installing alongside it and it works with no account and no API key.
+
+Chat can also run against an external provider -- OpenAI, Anthropic, OpenRouter, or any OpenAI-compatible endpoint -- when you add a key. Local is the default and everything else in the app is local only; see [External providers](#external-providers).
 
 ## What cyllama is
 
@@ -30,7 +32,9 @@ cyllama is the engine. This app is the UI, the job runner, and the persistence a
 
 - **Jobs everywhere.** Every long operation is a job: streamed events, progress, cancel, retained log replay after a dropped stream, and downloadable artifacts.
 
-- **Local by construction.** The sidecar binds `127.0.0.1` behind a per-launch bearer token. Nothing leaves the machine except model downloads you ask for and the two agent tools that are explicitly opt-in (`web_fetch`, `search_wikipedia`).
+- **Chat against an external provider.** OpenAI, Anthropic, OpenRouter, or any OpenAI-compatible endpoint (Ollama, LM Studio, Groq, Together, a llama.cpp server). Keys live in the OS encrypted store; the sidecar makes every call. Chat only for now -- see [`docs/dev/providers.md`](docs/dev/providers.md) for what comes next.
+
+- **Local by default.** The sidecar binds `127.0.0.1` behind a per-launch bearer token. Nothing leaves the machine except model downloads you ask for, the two agent tools that are explicitly opt-in (`web_fetch`, `search_wikipedia`), and a chat you send to a provider you configured.
 
 - **GPU backends.** One build per backend -- Metal, CUDA 12, Vulkan, ROCm, SYCL -- selected at build time. See [GPU variants](#gpu-variants).
 
@@ -45,6 +49,8 @@ cyllama is the engine. This app is the UI, the job runner, and the persistence a
 - **Script.** A Python file in `<workspace>/scripts/`, run as a job from the Agents pane. It executes in a child process with the bundled interpreter and talks back to the app over the loopback API, so `cyllama_desktop.app.chat()` reuses the model the sidecar already has loaded instead of loading a second copy. Output streams into the pane, cancel kills the process group, and files the script writes are downloadable as job artifacts. Scripts run with your full privileges -- the child process is for crash containment and a working cancel, not a sandbox -- so every row has a View button that opens the file read-only and syntax highlighted, and Run on a file you have not read shows you the code first. See [`docs/dev/scripting.md`](docs/dev/scripting.md).
 
 - **Shipped examples.** The scripts and workflow rows list the examples the app ships alongside your own files. Install copies one into the workspace, where it is yours to edit; Uninstall removes it, and asks first if you have changed it. Nothing is written to the workspace until you install something, and Uninstall never offers to delete a file you wrote.
+
+- **Provider.** An external inference endpoint the chat can run against instead of a local GGUF. Four kinds: `openai`, `anthropic`, `openrouter`, and a user-supplied OpenAI-compatible endpoint. Only Anthropic differs on the wire; the other three share one client and differ by base URL. See [External providers](#external-providers).
 
 - **Slash commands.** A `/`-prefixed entry in the chat composer routes the prompt to a specific handler instead of `/chat`. The agent family of commands (`/agent`, `/agent-constrained` -- aliased `/agent-strict`, `/agent-contract`, `/agent-plan`, `/agent-reflect`) runs an agent loop against the loaded chat model with the sidebar's tool config; the trace + answer render inline in the chat stream. Tab autocompletes a unique prefix (`/a<Tab>` -> `/agent `). See `docs/slash-commands.md` for the taxonomy and roadmap.
 
@@ -67,6 +73,24 @@ The chat messagebox accepts more than text:
 - **Voice prompts** -- mic button next to the paperclip records via `MediaRecorder`, transcribes via Whisper, appends the text to the typed prompt. Requires a whisper model in the Transcribe pane.
 
 - **Quarto rendering** -- the `quarto_render` agent tool (opt-in in the Agents pane) lets the model generate `.pptx` / `.pdf` / `.docx` / `.html` files. Requires the `quarto` CLI on PATH. The resulting `file://` link in the assistant reply opens in your OS default app.
+
+## External providers
+
+Open Preferences (`Cmd+,`) -> Providers, paste a key for OpenAI, Anthropic or OpenRouter, and that provider appears in the model pill beside your local GGUFs. Picking one switches the chat backend; the pill then names the provider and the model, so which backend served a turn is always on screen.
+
+**Any OpenAI-compatible endpoint** works too -- Ollama, LM Studio, Groq, Together, Fireworks, a `llama.cpp` server. Add it under *OpenAI-compatible endpoints* with a name and a base URL, then save a key for it. The URL must be `https`, or `http` on `localhost` / `127.0.0.1` / `::1`: sending a key in clear to a remote host is refused rather than offered as a choice. Each endpoint keeps its own key and its own model list, keyed by name.
+
+**Model lists** come from the provider's own list endpoint, cached per account under `<userData>/providers/`. Refresh is on demand, on a newly entered key, or past 24 hours; a failed refresh serves the cached list and says it may be stale. A model id typed by hand always works, which matters when a provider's list lags a release. The last model you used with each provider is remembered separately.
+
+**What keys are.** They are encrypted with the OS store (Keychain, DPAPI, the session keyring) at `<userData>/credentials.json`, decrypted only to be handed to the sidecar over loopback, and held in its memory for the session. The renderer never receives one, and the sidecar deliberately does not read them from its environment -- it passes its own environment to every script it runs, so a key there would reach user scripts. On a system with no encrypted store available (a Linux session with no keyring) the tab says so and saves nothing.
+
+**Scripts and workflows** reach providers too. `app.chat("...", provider="openai", model="gpt-5.4")` in a workspace script runs against a configured provider, and `app.providers()` lists what is reachable; `model=` is required there, since there is no local file to default to. A workflow node can import the same handle. The key stays in the sidecar either way -- a script names a provider and never sees a credential, though it can spend one, which is what the usage rows below are for. See [`docs/dev/scripting.md`](docs/dev/scripting.md) S7.5.
+
+**Usage.** Every provider call books a row in `<workspace>/usage.db` -- account, model, token counts, and who asked (chat, a script, a workflow). Preferences -> Providers shows the totals with a Clear action. Tokens rather than money: a price table would go stale, and varies by tier and by cached input. An assistant turn served by a provider also carries that attribution in the chat's own history and shows it under the message, so reopening an old chat still says where those tokens went.
+
+**Scope.** Chat, scripts and workflows. Everything else -- retrieval ingest, agents, transcription, image generation, quantize, GGUF inspection, layer estimates -- runs against local models, and each says why rather than failing when a provider is active. Sampling controls follow the active backend: rows a provider has no equivalent for are hidden, and the advanced section (grammar, speculative decoding, n-gram cache, multi-GPU split) is local-only in full. Retrieval in the composer is the exception: it retrieves locally and injects the sources, so it works with a provider already.
+
+[`docs/dev/providers.md`](docs/dev/providers.md) carries the roadmap for the rest, ordered by value over effort.
 
 ## Build
 

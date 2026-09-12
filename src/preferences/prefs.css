@@ -106,6 +106,28 @@ body.prefs {
 .prefs-status[data-kind="ok"]  { color: #6ab04c; }
 .prefs-status[data-kind="err"] { color: #c33; }
 
+/* Providers tab. A key row carries an input plus up to three buttons, so it
+   wraps as a flex line instead of using .prefs-row's fixed 3-column grid. */
+.prefs-row-provider {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.prefs-row-provider .prefs-row-label { flex: 0 0 auto; min-width: 84px; }
+.prefs-row-provider .prefs-row-path { flex: 1 1 120px; }
+.prefs-input {
+  flex: 1 1 140px;
+  min-width: 0;
+  padding: 5px 8px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg);
+  color: var(--fg);
+  font: inherit;
+  font-size: 12px;
+}
+.prefs-input-wide { flex: 2 1 220px; }
+
 .prefs-kv {
   display: grid;
   grid-template-columns: 140px 1fr;

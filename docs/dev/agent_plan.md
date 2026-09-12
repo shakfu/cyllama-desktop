@@ -24,36 +24,19 @@ Concrete acceptance criterion: a user can pick any of the new agent types from t
 
 ## 3. Current state (2026-09-12)
 
-Phases A through F have shipped. What follows records the outcome; the
-original plan is preserved below it, with per-item status, because the
-reasoning still explains why the surface has the shape it does.
+Phases A through F have shipped. What follows records the outcome; the original plan is preserved below it, with per-item status, because the reasoning still explains why the surface has the shape it does.
 
 Shipped:
 
-- Six agent types behind slash commands: `/agent`,
-  `/agent-constrained` (aliased `/agent-strict`), `/agent-contract`,
-  `/agent-plan`, `/agent-reflect`, and `/agent-workflow`. Endpoints
-  `/jobs/agent/{run,constrained,contract,plan,reflect}` plus
-  `/info/contract-presets`.
+- Six agent types behind slash commands: `/agent`, `/agent-constrained` (aliased `/agent-strict`), `/agent-contract`, `/agent-plan`, `/agent-reflect`, and `/agent-workflow`. Endpoints `/jobs/agent/{run,constrained,contract,plan,reflect}` plus `/info/contract-presets`.
 
-- Tool catalog: stock cyllama tools (`calculator`, `current_time`,
-  `word_count`), sandboxed `read_file`, `web_fetch`,
-  `search_wikipedia`, `quarto_render`, `rag_query`, and
-  `semantic_memory` (`remember` / `recall`). The last three are
-  Phase E.
+- Tool catalog: stock cyllama tools (`calculator`, `current_time`, `word_count`), sandboxed `read_file`, `web_fetch`, `search_wikipedia`, `quarto_render`, `rag_query`, and `semantic_memory` (`remember` / `recall`). The last three are Phase E.
 
-- Workflows: `/workflows`, `/workflows/{id}/spec`,
-  `/jobs/workflow/run`, authored as Python in
-  `<workspace>/workflows/`.
+- Workflows: `/workflows`, `/workflows/{id}/spec`, `/jobs/workflow/run`, authored as Python in `<workspace>/workflows/`.
 
-- A full-area Agents pane (Phase F) that absorbed the right-sidebar
-  `agents` tab, the standalone Workflows pane, and per-call modals for
-  the four configurable agent types. It also hosts workspace scripts,
-  which are not part of this plan -- see
-  [`scripting.md`](scripting.md).
+- A full-area Agents pane (Phase F) that absorbed the right-sidebar `agents` tab, the standalone Workflows pane, and per-call modals for the four configurable agent types. It also hosts workspace scripts, which are not part of this plan -- see [`scripting.md`](scripting.md).
 
-Not shipped: items 3, 9, 10 and 11 of Section 4, and Phase F.4
-(per-agent-type run history), which is tracked in `TODO.md`.
+Not shipped: items 3, 9, 10 and 11 of Section 4, and Phase F.4 (per-agent-type run history), which is tracked in `TODO.md`.
 
 ## 4. Surface to wire (priority order)
 
@@ -201,29 +184,15 @@ The agent variants (Constrained, Contract, Reflect, Plan) are "chat-shaped" -- s
 
 This is also the cheapest staging: Option A is ~3 hours of renderer work per command (slash registration, validation, trace adapter). Option B is ~2 days but only needs to be built once.
 
-**What shipped, and how it differs.** Option A, with every command
-under an `/agent-` prefix -- `/agent-constrained`, `/agent-contract`,
-`/agent-plan`, `/agent-reflect`, `/agent-workflow` -- so Tab
-completion from `/agent` surfaces the family. The bare names proposed
-above (`/constrained`, `/reflect`) were never registered.
+**What shipped, and how it differs.** Option A, with every command under an `/agent-` prefix -- `/agent-constrained`, `/agent-contract`, `/agent-plan`, `/agent-reflect`, `/agent-workflow` -- so Tab completion from `/agent` surfaces the family. The bare names proposed above (`/constrained`, `/reflect`) were never registered.
 
-Option B was built and then folded in. Workflows shipped as a separate
-full-area pane, then Phase F made them the `agent-workflow` row of the
-Agents pane, which also absorbed the right-sidebar `agents` tab. So
-there is one pane, not one per capability, and the trace-rendering
-duplication the Cons list warned about was the reason: one pane, one
-renderer.
+Option B was built and then folded in. Workflows shipped as a separate full-area pane, then Phase F made them the `agent-workflow` row of the Agents pane, which also absorbed the right-sidebar `agents` tab. So there is one pane, not one per capability, and the trace-rendering duplication the Cons list warned about was the reason: one pane, one renderer.
 
-The four configurable variants gained a per-call modal, pre-filled
-from the pane's defaults. That was not in either option. It resolves
-the tension the Cons list named -- commands are discoverable and
-configuration is visible at the point of use, rather than only in a
-sidebar the user has to find first.
+The four configurable variants gained a per-call modal, pre-filled from the pane's defaults. That was not in either option. It resolves the tension the Cons list named -- commands are discoverable and configuration is visible at the point of use, rather than only in a sidebar the user has to find first.
 
 ## 9. Phasing
 
-Five short phases, each shippable on its own. All five shipped, plus
-an unplanned Phase F; status is marked per phase. Each ends with a Playwright smoke test, a CHANGELOG entry, and a feature-flag expansion. No phase blocks on cyllama-side changes -- the cyllama work has landed.
+Five short phases, each shippable on its own. All five shipped, plus an unplanned Phase F; status is marked per phase. Each ends with a Playwright smoke test, a CHANGELOG entry, and a feature-flag expansion. No phase blocks on cyllama-side changes -- the cyllama work has landed.
 
 **Phase A. Bundle bump.** [shipped] Update `python-sidecar/pyproject.toml` cyllama pin. Run existing pytest + Playwright suite. Resolve any breakage from the bump itself (signature changes, removed APIs). Add `_resolve_attr` probes from Section 6. No new endpoints. No new UI. Single CHANGELOG entry: "bump cyllama; detect new agent capabilities."
 
@@ -234,21 +203,11 @@ an unplanned Phase F; status is marked per phase. Each ends with a Playwright sm
 **Phase D. Workflow pane.** [shipped, then superseded by F] New left-nav-rail pane "Workflows". `/workflows` endpoint for discovery, `/jobs/workflow/run` for execution, `/workflows/<id>/spec` for the static dry-run plan (for the pane's preview panel). Workspace `workflows/` directory
 + first-launch seeding with the three example workflows. Playwright tests: discovery, dry-run preview, execute, real-time event streaming (the test from cyllama `test_sub_events_arrive_before_node_end` translated to a UI assertion).
 
-Two parts of that came out differently. One example workflow ships
-(`word_count.py`), not three. And first-launch seeding was removed:
-the pane lists the shipped examples beside the user's own files, and
-Install copies one in. Nothing writes to the workspace on launch. See
-[`scripting.md`](scripting.md) S17.
+Two parts of that came out differently. One example workflow ships (`word_count.py`), not three. And first-launch seeding was removed: the pane lists the shipped examples beside the user's own files, and Install copies one in. Nothing writes to the workspace on launch. See [`scripting.md`](scripting.md) S17.
 
 **Phase E. Memory + RAG tool.** [shipped] Extends the existing agent tool catalog with `rag_search` (gated on a workspace having an active RAG collection) and `remember`/`recall` (semantic memory). No new endpoints; the tool catalog is the surface. Available to every agent type from Phases B/C and any Workflow that opts in. Shipped as `rag_query` rather than `rag_search`.
 
-**Phase F. One pane.** [shipped, except F.4] Not in the original
-plan. Promotes the right-sidebar `agents` tab and the standalone
-Workflows pane into a single full-area Agents pane: a subnav of the
-six agent types plus a scripts row, per-type defaults in the main
-column, and a per-call modal pre-filled from those defaults. F.4,
-per-agent-type run history, is still open -- see `TODO.md` for the
-shape and why it was deferred.
+**Phase F. One pane.** [shipped, except F.4] Not in the original plan. Promotes the right-sidebar `agents` tab and the standalone Workflows pane into a single full-area Agents pane: a subnav of the six agent types plus a scripts row, per-type defaults in the main column, and a per-call modal pre-filled from those defaults. F.4, per-agent-type run history, is still open -- see `TODO.md` for the shape and why it was deferred.
 
 ## 10. Risks
 
@@ -290,20 +249,9 @@ Every phase ships with:
 
 - **Workflow visualization in the pane?** `flow.to_mermaid()` and `flow.to_dot()` exist. Rendering Mermaid in the pane is ~100 LoC of renderer work. Phase D should include this -- the visualization is exactly the kind of thing that makes the workflow surface feel substantive vs. "a JSON config that does some things."
 
-  Partly done. `/workflows/{id}/spec` returns `mermaid` and the pane
-  shows it, but as collapsed source in a `<details>`, not a rendered
-  diagram. Entry node, exits and topological levels render as text
-  above it. Rendering the graph is still open.
+  Partly done. `/workflows/{id}/spec` returns `mermaid` and the pane shows it, but as collapsed source in a `<details>`, not a rendered diagram. Entry node, exits and topological levels render as text above it. Rendering the graph is still open.
 
-- **Should the trust boundary have a guardrail?** Settled, as
-  disclosure rather than a gate: Run on an unread file shows the code
-  with a warning, and the run starts from there. Same for scripts. A
-  prose dialog was built first and discarded -- describing the trust
-  level does not help a user answer "is this safe to run", and the
-  code does. What remains open is whether having read a file should
-  expire when its content changes; it does not today, because
-  re-prompting on every save would fire once per iteration while
-  authoring.
+- **Should the trust boundary have a guardrail?** Settled, as disclosure rather than a gate: Run on an unread file shows the code with a warning, and the run starts from there. Same for scripts. A prose dialog was built first and discarded -- describing the trust level does not help a user answer "is this safe to run", and the code does. What remains open is whether having read a file should expire when its content changes; it does not today, because re-prompting on every save would fire once per iteration while authoring.
 
 ## 14. References
 
@@ -319,5 +267,4 @@ Every phase ships with:
 
 - [`plan.md`](plan.md) S.9 (Workspaces) -- where workflow files live.
 
-- [`scripting.md`](scripting.md) -- workspace scripts, which share the
-  Agents pane but are not part of this plan.
+- [`scripting.md`](scripting.md) -- workspace scripts, which share the Agents pane but are not part of this plan.

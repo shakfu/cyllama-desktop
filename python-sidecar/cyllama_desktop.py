@@ -16,6 +16,19 @@ list, RAG collections, progress reporting, artifacts. It deliberately
 does not wrap cyllama's inference API. A script that wants low-level
 control should ``import cyllama`` and get the real thing.
 
+A workflow node can import the same handle. It runs inside the sidecar
+rather than a child process, so the job-scoped members are inert there:
+``args`` is empty, ``progress()`` does nothing, and ``artifact()`` /
+``set_result()`` resolve against the process working directory rather
+than a job. Everything else -- ``chat``, ``models``, ``rag_*``,
+``providers`` -- behaves identically.
+
+``app.chat(..., provider="openai", model="gpt-5.4")`` runs against an
+external provider the user configured in Preferences. The key never
+enters this process: the script names a provider and the sidecar holds
+the credential. That also means a script can spend a key it cannot read
+-- see ``docs/dev/providers.md`` S8.2.
+
 The reason to prefer ``app.chat()`` over loading a model here is
 memory: the sidecar keeps one LLM resident and reuses it across calls,
 so a 50-generation sweep pays one model load. Loading a second copy in
@@ -148,7 +161,14 @@ class App:
 
         ``value`` is a 0..1 fraction and drives the progress bar;
         ``message`` is a one-line status. Either may be omitted.
+
+        Inert outside a job. A workflow node imports this same handle but
+        runs inside the sidecar, where this stdout belongs to the sidecar's
+        log rather than to a job -- writing the sentinel there would put
+        control characters in the Console for no benefit.
         """
+        if not self.job_id:
+            return
         payload: dict[str, Any] = {}
         if value is not None:
             payload["progress"] = max(0.0, min(1.0, float(value)))
@@ -205,6 +225,7 @@ class App:
         *,
         model: str = "",
         system: str = "",
+        provider: Union[str, dict, None] = None,
         **params,
     ) -> str:
         """Generate against the model the app already has resident.
@@ -214,8 +235,19 @@ class App:
         keyword arguments are sampling parameters (temperature, top_p,
         max_tokens, ...); the sidecar drops any the installed cyllama
         does not accept.
+
+        Pass ``provider=`` to run against an external provider instead of
+        a local GGUF -- see :meth:`providers`. ``model`` is then a provider
+        model id and is required, since there is no local file to default
+        to::
+
+            app.chat("name three primes", provider="openai", model="gpt-5.4")
+
+        The key stays in the sidecar; this process never sees it.
         """
-        return "".join(self.chat_stream(prompt, model=model, system=system, **params))
+        return "".join(self.chat_stream(
+            prompt, model=model, system=system, provider=provider, **params,
+        ))
 
     def chat_stream(
         self,
@@ -223,15 +255,28 @@ class App:
         *,
         model: str = "",
         system: str = "",
+        provider: Union[str, dict, None] = None,
         **params,
     ) -> Iterator[str]:
         """Same as :meth:`chat`, yielding text chunks as they arrive."""
         messages = self._messages(prompt, system)
-        body = {
-            "model_path": model or self.default_model(),
-            "messages": messages,
-            "params": params or {},
-        }
+        body: dict = {"messages": messages, "params": params or {}}
+        if provider is None:
+            body["model_path"] = model or self.default_model()
+        else:
+            ref = self._provider_ref(provider)
+            if not model:
+                raise SidecarError(
+                    "model= is required with provider=; there is no local "
+                    "file to fall back to. Use app.provider_models() to list "
+                    "what the provider offers."
+                )
+            body["provider"] = ref
+            body["model"] = model
+            # Label the usage row so provider spend can be traced back to
+            # the job that caused it. A hint, not a claim the sidecar can
+            # verify -- docs/dev/providers.md S8.2.
+            body["source"] = f"script:{self.job_id}" if self.job_id else "workflow"
         # No read timeout: a long generation is not a stalled one.
         with self._open("POST", "/chat", body=body, timeout=None) as r:
             for raw in r:
@@ -252,6 +297,20 @@ class App:
                     yield text
 
     @staticmethod
+    def _provider_ref(provider: Union[str, dict]) -> dict:
+        """Normalise ``provider=`` into the wire shape.
+
+        A string names one of the built-in kinds. A dict is a compat
+        endpoint: ``{"kind": "compat", "name": ..., "base_url": ...}``,
+        matching what the Providers tab stores. The sidecar validates it.
+        """
+        if isinstance(provider, str):
+            return {"kind": provider}
+        if isinstance(provider, dict):
+            return dict(provider)
+        raise SidecarError("provider= must be a string or a dict")
+
+    @staticmethod
     def _messages(prompt: Union[str, list], system: str) -> list:
         if isinstance(prompt, str):
             messages = [{"role": "user", "content": prompt}]
@@ -268,6 +327,32 @@ class App:
             "text": text,
         })
         return int(body.get("count", 0))
+
+    # -- external providers ------------------------------------------------
+
+    def providers(self) -> list[str]:
+        """Accounts that have a key configured, e.g. ``["openai"]``.
+
+        A compat endpoint appears as ``compat.<normalized-name>``. This is
+        the full extent of what a script can learn about credentials: no
+        endpoint returns key bytes. A provider missing from this list will
+        refuse a :meth:`chat` with 401.
+        """
+        return self._get("/providers/credentials").get("configured", [])
+
+    def provider_models(self, provider: Union[str, dict]) -> list[dict]:
+        """Chat models a provider offers. Each item carries ``id``.
+
+        Served from the app's cache; pass a provider the user has not
+        configured and this raises rather than returning an empty list.
+        """
+        ref = self._provider_ref(provider)
+        return self._get(
+            "/providers/models",
+            kind=ref.get("kind", ""),
+            name=ref.get("name", ""),
+            base_url=ref.get("base_url", ""),
+        ).get("models", [])
 
     # -- RAG ---------------------------------------------------------------
 

@@ -1658,6 +1658,33 @@ details.rt-collapsible > summary > .icon-btn { margin-right: 4px; }
 .mp-item-meta { font-size: 11px; color: var(--fg-faint); margin-left: 12px; flex: 0 0 auto; }
 .mp-sep { height: 1px; background: var(--border); margin: 6px 4px; }
 .mp-item-browse { color: var(--fg-faint); font-style: italic; }
+/* Provider model view: back row, free-text model id, refresh footer. */
+/* Which provider served an assistant turn, and its token cost. */
+.turn-backend {
+  margin-top: 6px;
+  font-size: 11px;
+  color: var(--fg-faint);
+}
+
+.mp-item-back { color: var(--fg-faint); }
+.mp-freetext { display: flex; gap: 6px; padding: 4px 10px 8px; }
+.mp-freetext input {
+  flex: 1 1 auto; min-width: 0;
+  padding: 5px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--fg);
+  font: inherit;
+  font-size: 12px;
+}
+.mp-foot {
+  display: flex; justify-content: space-between; align-items: center;
+  gap: 8px;
+  padding: 6px 10px 2px;
+  font-size: 11px;
+  color: var(--fg-faint);
+}
 
 /* Phase 2.0: select dropdowns inside params (mirostat). */
 .param select {

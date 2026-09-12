@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Menu, ipcMain, dialog, shell } = require("electron");
+const { app, BrowserWindow, Menu, ipcMain, dialog, safeStorage, shell } = require("electron");
 const { spawn } = require("child_process");
 const path = require("path");
 const fs = require("fs");
@@ -52,13 +52,50 @@ function workspaceDir(id = DEFAULT_WORKSPACE_ID) {
 }
 
 // ---------------------------------------------------------------------------
-// Global settings (Preferences). Lives at <userData>/settings.json. Today
-// the only field is ``models_extra`` -- additional read-only model search
-// roots the sidecar scans alongside MODELS_DIR. Schema is versioned + the
-// IPC handlers validate so a hand-edited file can't crash the launcher.
+// Global settings (Preferences). Lives at <userData>/settings.json. Two
+// fields: ``models_extra`` -- additional read-only model search roots the
+// sidecar scans alongside MODELS_DIR -- and ``provider_endpoints``, the
+// user's OpenAI-compatible endpoints. Schema is versioned + the IPC handlers
+// validate so a hand-edited file can't crash the launcher.
+//
+// Endpoints carry no secrets; the key for each lives in credentials.json
+// keyed by the endpoint's normalized name. Removing an endpoint here leaves
+// its key in place, so re-adding the same name picks it up again.
 // ---------------------------------------------------------------------------
 const SETTINGS_FILE = () => path.join(userDataDir(), "settings.json");
-const DEFAULT_SETTINGS = { version: 1, models_extra: [] };
+const DEFAULT_SETTINGS = { version: 1, models_extra: [], provider_endpoints: [] };
+
+// https anywhere, http only for loopback. Mirrors providers.endpoint_
+// acceptable in the sidecar, which is the check that actually gates a
+// request; this one keeps an unusable endpoint out of settings.json.
+function endpointAcceptable(url) {
+  let u;
+  try { u = new URL(url); } catch (_) { return false; }
+  if (u.protocol === "https:") return !!u.hostname;
+  if (u.protocol === "http:") {
+    return ["localhost", "127.0.0.1", "[::1]"].includes(u.hostname);
+  }
+  return false;
+}
+
+function cleanEndpoints(raw) {
+  if (!Array.isArray(raw)) return [];
+  const out = [];
+  const seen = new Set();
+  for (const e of raw) {
+    if (!e || typeof e !== "object") continue;
+    const name = typeof e.name === "string" ? e.name.trim() : "";
+    const baseUrl = typeof e.base_url === "string" ? e.base_url.trim() : "";
+    if (!name || !endpointAcceptable(baseUrl)) continue;
+    // Two endpoints whose names normalize alike would share one credential
+    // slot and one model cache, so the second is dropped.
+    const account = name.toLowerCase().replace(/[^a-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "");
+    if (!account || seen.has(account)) continue;
+    seen.add(account);
+    out.push({ name, base_url: baseUrl });
+  }
+  return out;
+}
 
 function loadSettings() {
   try {
@@ -71,7 +108,12 @@ function loadSettings() {
       // MODELS_EXTRA splice and is easier to silently filter than
       // refuse-to-launch over.
       const cleaned = extra.filter((p) => typeof p === "string" && path.isAbsolute(p));
-      return { ...DEFAULT_SETTINGS, ...parsed, models_extra: cleaned };
+      return {
+        ...DEFAULT_SETTINGS,
+        ...parsed,
+        models_extra: cleaned,
+        provider_endpoints: cleanEndpoints(parsed.provider_endpoints),
+      };
     }
   } catch (_) { /* missing / unreadable -> defaults */ }
   return { ...DEFAULT_SETTINGS };
@@ -84,6 +126,105 @@ function saveSettings(settings) {
   fs.writeFileSync(tmp, JSON.stringify(merged, null, 2), "utf8");
   fs.renameSync(tmp, SETTINGS_FILE());
   return merged;
+}
+
+// ---------------------------------------------------------------------------
+// External provider credentials. <userData>/credentials.json holds one
+// base64 ciphertext per account, encrypted with Electron's safeStorage
+// (Keychain on macOS, DPAPI on Windows, the session keyring on Linux).
+//
+// Weaker than a per-item keychain entry: safeStorage encrypts opaque blobs
+// with no per-item access control. Anything that can act as this app can
+// decrypt them; the encryption is what protects the file once it is away
+// from the machine (a backup, a synced folder, a stolen disk copy). See
+// docs/dev/providers.md S7.3 and S8.
+//
+// Plaintext keys never reach the renderer. They go to the sidecar over
+// loopback at launch and on change, and live in its memory only.
+// ---------------------------------------------------------------------------
+const CREDENTIALS_FILE = () => path.join(userDataDir(), "credentials.json");
+// Mirrors providers.Provider.account: the three named kinds, or a compat
+// endpoint keyed by its normalized name. Validated here so a renderer bug
+// cannot write an arbitrary key into the file.
+const ACCOUNT_RE = /^(openai|anthropic|openrouter|compat\.[a-z0-9._-]+)$/;
+
+function credentialsAvailable() {
+  try {
+    if (!safeStorage.isEncryptionAvailable()) return false;
+    // Linux with no recognised desktop keyring selects Chromium's
+    // ``basic_text`` backend, whose key comes from a password compiled into
+    // Chromium -- public, so the ciphertext is obfuscation and not
+    // encryption. isEncryptionAvailable() still reports true there, because
+    // a key *is* available, so the backend has to be checked separately.
+    // getSelectedStorageBackend is Linux-only, hence the platform guard.
+    if (process.platform === "linux"
+        && typeof safeStorage.getSelectedStorageBackend === "function"
+        && safeStorage.getSelectedStorageBackend() === "basic_text") {
+      return false;
+    }
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+function loadCredentialStore() {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(CREDENTIALS_FILE(), "utf8"));
+    if (parsed && typeof parsed === "object" && parsed.credentials
+        && typeof parsed.credentials === "object") {
+      return parsed.credentials;
+    }
+  } catch (_) { /* missing / unreadable -> nothing configured */ }
+  return {};
+}
+
+function saveCredentialStore(credentials) {
+  const tmp = CREDENTIALS_FILE() + ".tmp";
+  fs.writeFileSync(tmp, JSON.stringify({ version: 1, credentials }, null, 2), {
+    encoding: "utf8",
+    mode: 0o600,
+  });
+  fs.renameSync(tmp, CREDENTIALS_FILE());
+}
+
+function credentialAccounts() {
+  return Object.keys(loadCredentialStore()).sort();
+}
+
+// Decrypt for the one caller that needs plaintext: the push to the sidecar.
+// An entry that fails to decrypt is dropped rather than throwing -- a
+// machine whose keychain rotated should lose that one key, not refuse to
+// launch.
+function decryptedCredentials() {
+  const out = {};
+  if (!credentialsAvailable()) return out;
+  for (const [account, blob] of Object.entries(loadCredentialStore())) {
+    try {
+      const key = safeStorage.decryptString(Buffer.from(blob, "base64"));
+      if (key) out[account] = key;
+    } catch (err) {
+      console.error(`[providers] could not decrypt ${account}: ${err.message}`);
+    }
+  }
+  return out;
+}
+
+async function pushCredentials() {
+  if (!sidecarInfo) return;
+  const { port, token } = sidecarInfo;
+  try {
+    await fetch(`http://127.0.0.1:${port}/providers/credentials`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${token}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ credentials: decryptedCredentials() }),
+    });
+  } catch (err) {
+    console.error(`[providers] credential push failed: ${err.message}`);
+  }
 }
 
 function migrateLayoutIfNeeded() {
@@ -247,6 +388,14 @@ async function startSidecar() {
   // runs them as child processes for /scripts + /jobs/script/run.
   const scriptsDir = path.join(workspaceDir(), "scripts");
   fs.mkdirSync(scriptsDir, { recursive: true });
+  // External-provider model-list caches. Global, like the model cache: a
+  // provider's catalogue belongs to the account, not the project. Holds no
+  // credentials.
+  const providersDir = path.join(userDataDir(), "providers");
+  fs.mkdirSync(providersDir, { recursive: true });
+  // Provider token usage. Workspace-scoped, unlike the model-list cache:
+  // spend belongs to the project it was incurred for.
+  const usageDb = path.join(workspaceDir(), "usage.db");
   // Shipped examples are a read-only catalog the sidecar lists beside
   // the user's own files; a copy action puts one in the workspace. The
   // app never writes to workspaceDir() on launch, so everything in
@@ -266,6 +415,8 @@ async function startSidecar() {
       CYLLAMA_SIDECAR_UPLOADS: uploadsDir,
       CYLLAMA_SIDECAR_WORKFLOWS: workflowsDir,
       CYLLAMA_SIDECAR_SCRIPTS: scriptsDir,
+      CYLLAMA_SIDECAR_PROVIDERS: providersDir,
+      CYLLAMA_SIDECAR_USAGE: usageDb,
       CYLLAMA_SIDECAR_EXAMPLE_WORKFLOWS: exampleWorkflowsDir,
       CYLLAMA_SIDECAR_EXAMPLE_SCRIPTS: exampleScriptsDir,
       // Additional read-only model search roots from Preferences.
@@ -295,6 +446,9 @@ async function startSidecar() {
   // Wait for the sidecar to become reachable.
   await waitForSidecar(port, token, 30_000);
   sidecarInfo = { port, token };
+  // The sidecar starts with no keys; it cannot read them from the
+  // environment by design. Push them now, and again on every change.
+  await pushCredentials();
   return sidecarInfo;
 }
 
@@ -619,16 +773,57 @@ ipcMain.handle("settings:set", async (_e, patch) => {
   if (!patch || typeof patch !== "object") {
     throw new Error("settings:set expects an object");
   }
-  // Patch shape: ``{ models_extra: [string, ...] }``. Anything else is
-  // ignored for now -- explicit allowlist so a renderer bug can't
-  // smuggle arbitrary keys into the on-disk shape.
+  // Patch shape: ``{ models_extra: [string, ...] }`` and/or
+  // ``{ provider_endpoints: [{name, base_url}, ...] }``. Anything else is
+  // ignored -- explicit allowlist so a renderer bug can't smuggle arbitrary
+  // keys into the on-disk shape.
   const current = loadSettings();
   const next = { ...current };
   if (Array.isArray(patch.models_extra)) {
     next.models_extra = patch.models_extra
       .filter((p) => typeof p === "string" && path.isAbsolute(p));
   }
+  if (Array.isArray(patch.provider_endpoints)) {
+    next.provider_endpoints = cleanEndpoints(patch.provider_endpoints);
+  }
   return saveSettings(next);
+});
+
+// Provider credentials. ``list`` reports booleans, never key bytes -- the
+// renderer has no reason to hold a key and no way to ask for one.
+ipcMain.handle("providers:list", async () => {
+  return { available: credentialsAvailable(), configured: credentialAccounts() };
+});
+
+ipcMain.handle("providers:setKey", async (_e, account, key) => {
+  if (typeof account !== "string" || !ACCOUNT_RE.test(account)) {
+    throw new Error("providers:setKey expects a valid account id");
+  }
+  if (typeof key !== "string" || !key.trim()) {
+    throw new Error("providers:setKey expects a non-empty key");
+  }
+  if (!credentialsAvailable()) {
+    throw new Error(
+      "no OS encrypted storage is available, so the key cannot be stored "
+      + "safely. On Linux this means no desktop keyring is running.",
+    );
+  }
+  const credentials = loadCredentialStore();
+  credentials[account] = safeStorage.encryptString(key.trim()).toString("base64");
+  saveCredentialStore(credentials);
+  await pushCredentials();
+  return { available: true, configured: credentialAccounts() };
+});
+
+ipcMain.handle("providers:deleteKey", async (_e, account) => {
+  if (typeof account !== "string" || !ACCOUNT_RE.test(account)) {
+    throw new Error("providers:deleteKey expects a valid account id");
+  }
+  const credentials = loadCredentialStore();
+  delete credentials[account];
+  saveCredentialStore(credentials);
+  await pushCredentials();
+  return { available: credentialsAvailable(), configured: credentialAccounts() };
 });
 
 ipcMain.handle("sidecar:restart", async () => {

@@ -1,7 +1,6 @@
 # SCRIPTING: Workspace Python Scripts as Sidecar Jobs
 
-Status: implemented (Phases 0-3). Owner: @shakfu. Last updated: 2026-09-12.
-See Section 16 for where the build deviated from this spec.
+Status: implemented (Phases 0-3). Owner: @shakfu. Last updated: 2026-09-12. See Section 16 for where the build deviated from this spec.
 
 Companion docs: `docs/dev/plan.md` (overall rollout), `docs/dev/agent_plan.md` (agent + workflow layer), `TODO.md`, `CHANGELOG.md`. This document is scoped to one question: should the app run user-authored Python scripts as jobs, and if so, how.
 
@@ -242,6 +241,20 @@ app.artifact("report.csv").write_text(rows)
 
 Scope rule: the library wraps **app state only** -- `chat`, `models`, `rag_query`, `rag_ingest`, `progress`, `artifact`. It must not wrap cyllama's inference API. A script wanting low-level control should `import cyllama` and get the real thing, not a lossy proxy (Section 10.3).
 
+External providers (`docs/dev/providers.md` R1). `app.chat(..., provider=, model=)` runs against a provider the user configured instead of a local GGUF, and `app.providers()` / `app.provider_models()` say what is available:
+
+```python
+for name in app.providers():            # ["openai", "compat.lm-studio"]
+    for m in app.provider_models(name):
+        print(name, m["id"])
+
+text = app.chat("name three primes", provider="openai", model="gpt-5.4")
+```
+
+`model=` is required there -- there is no local file to default to. The key stays in the sidecar, so the script never sees one, but it can spend one: each call books a usage row labelled `script:<job id>`, visible in Preferences -> Providers (`docs/dev/providers.md` S8.2).
+
+A workflow node can import the same handle. It runs inside the sidecar rather than a child process, so `chat`, `models`, `rag_*` and `providers` behave identically while the job-scoped members are inert: `args` is empty, `progress()` does nothing, and `artifact()` resolves against the sidecar's working directory. Sync nodes are dispatched on `asyncio.to_thread`, so the blocking loopback call does not stall the event loop.
+
 ### 7.6 Renderer
 
 Reuse, near-total:
@@ -438,33 +451,11 @@ Phases 0 through 3: about two days, plus tests. Phase 0 alone is a half day and 
 
 Three things landed differently from the plan above.
 
-**15.1 Phase 0 became a deque, not a lossy queue.** The plan was
-`put_nowait` plus a dropped counter on the existing bounded
-`asyncio.Queue`. That is not sufficient: progressive events still
-*occupy* the queue, so a terminal event arriving after 1024 of them
-blocks behind events nobody is reading. Skipping the queue entirely
-when `subscribers == 0` fixes the stall but loses every event emitted
-between the POST and the client attaching its stream -- which is the
-order every existing pane uses, and it broke four existing test files.
-The queue is now a `deque` the producer can always append to, drained by
-the subscriber and woken by an `asyncio.Event`. Overflow evicts the
-oldest progressive event; terminal events are never evicted. `_emit`
-no longer awaits anything.
+**15.1 Phase 0 became a deque, not a lossy queue.** The plan was `put_nowait` plus a dropped counter on the existing bounded `asyncio.Queue`. That is not sufficient: progressive events still *occupy* the queue, so a terminal event arriving after 1024 of them blocks behind events nobody is reading. Skipping the queue entirely when `subscribers == 0` fixes the stall but loses every event emitted between the POST and the client attaching its stream -- which is the order every existing pane uses, and it broke four existing test files. The queue is now a `deque` the producer can always append to, drained by the subscriber and woken by an `asyncio.Event`. Overflow evicts the oldest progressive event; terminal events are never evicted. `_emit` no longer awaits anything.
 
-**15.2 Script jobs are the first that outlive their request.** Every
-existing job test drives a stub that finishes inside the POST handler,
-so a bare `TestClient` -- which starts a portal per request -- was
-enough. A script spawns a real child process, and its task was cancelled
-the moment the POST's event loop went away. `tests/conftest.py` gains a
-`live_client` fixture that enters the client as a context manager;
-`tests/test_scripts.py` overrides the module's `client` with it.
+**15.2 Script jobs are the first that outlive their request.** Every existing job test drives a stub that finishes inside the POST handler, so a bare `TestClient` -- which starts a portal per request -- was enough. A script spawns a real child process, and its task was cancelled the moment the POST's event loop went away. `tests/conftest.py` gains a `live_client` fixture that enters the client as a context manager; `tests/test_scripts.py` overrides the module's `client` with it.
 
-**15.3 Windows tree-kill uses a job object, and is unverified.**
-`_signal_child` signals the process group on POSIX. On Windows it
-terminates a kill-on-close job object created at spawn, falling back to
-the direct child when the job could not be created. Section 10.7 has the
-mechanism and what remains unproven; Q6 stays open, since nothing in CI
-exercises it.
+**15.3 Windows tree-kill uses a job object, and is unverified.** `_signal_child` signals the process group on POSIX. On Windows it terminates a kill-on-close job object created at spawn, falling back to the direct child when the job could not be created. Section 10.7 has the mechanism and what remains unproven; Q6 stays open, since nothing in CI exercises it.
 
 ## 16. References
 
@@ -492,105 +483,36 @@ exercises it.
 
 ## 17. Next: examples as a catalog, not a seed
 
-Implemented. Supersedes first-launch seeding for scripts and workflows;
-`seedExamples` and its `.seeded` marker are gone from the launch path.
+Implemented. Supersedes first-launch seeding for scripts and workflows; `seedExamples` and its `.seeded` marker are gone from the launch path.
 
-**17.1 What is wrong now.** `seedExamples` (`src/main/index.js:200`) copies
-`resources/example-scripts/*.py` into `SCRIPTS_DIR` once, then writes a
-`.seeded` marker. The marker records one bit -- that seeding ran -- so it
-cannot distinguish "the user deleted `sweep.py`" from "`rag_audit2.py` did
-not exist when this install first launched". Respecting deletion is the
-stated goal (`index.js:198`) and is correct; the cost is that an install
-which first launched on 0.3.0 never receives an example added later. The
-mechanism was inherited from `example-workflows` (`agent_plan.md:206`) and
-was never argued for scripts. `WORKFLOWS_DIR` has the same marker and the
-same defect (`index.js:290`).
+**17.1 What is wrong now.** `seedExamples` (`src/main/index.js:200`) copies `resources/example-scripts/*.py` into `SCRIPTS_DIR` once, then writes a `.seeded` marker. The marker records one bit -- that seeding ran -- so it cannot distinguish "the user deleted `sweep.py`" from "`rag_audit2.py` did not exist when this install first launched". Respecting deletion is the stated goal (`index.js:198`) and is correct; the cost is that an install which first launched on 0.3.0 never receives an example added later. The mechanism was inherited from `example-workflows` (`agent_plan.md:206`) and was never argued for scripts. `WORKFLOWS_DIR` has the same marker and the same defect (`index.js:290`).
 
-**17.2 Shape.** Stop writing to the user's directory on launch. Ship the
-examples read-only inside the app, list them in the pane as a second group
-the user cannot edit, and add a copy action that puts one into
-`SCRIPTS_DIR`, where it becomes an ordinary user file. The user decides
-what exists in their workspace and what runs.
+**17.2 Shape.** Stop writing to the user's directory on launch. Ship the examples read-only inside the app, list them in the pane as a second group the user cannot edit, and add a copy action that puts one into `SCRIPTS_DIR`, where it becomes an ordinary user file. The user decides what exists in their workspace and what runs.
 
-**17.3 Sidecar.** Scripts first; 17.7 applies the same shape to
-workflows.
+**17.3 Sidecar.** Scripts first; 17.7 applies the same shape to workflows.
 
-- `EXAMPLES_DIR` from `CYLLAMA_SIDECAR_EXAMPLE_SCRIPTS`, same
-  env-var-with-fallback pattern as `SCRIPTS_DIR` (`sidecar.py:756`), except
-  the fallback is "no catalog" rather than a created directory. The sidecar
-  never writes here.
-- `_list_script_files` and `_script_summary` (`sidecar.py:4605`, `:4624`)
-  take a directory argument. Both are already path-driven; only the
-  `SCRIPTS_DIR` reference at `:4612` and `:4615` is fixed.
-- `GET /scripts` (`:4659`) gains `examples: [...]`, each summary carrying
-  `in_workspace: bool` -- true when a file of that stem already exists in
-  `SCRIPTS_DIR`. One round trip, one response shape.
-- `POST /scripts/examples/{id}/copy` copies `EXAMPLES_DIR/{id}.py` to
-  `SCRIPTS_DIR/{id}.py`. 409 when the target exists; never overwrite user
-  code. Returns the new script summary so the pane can select it.
-- `POST /jobs/script/run` (`:5046`) is unchanged and still resolves only
-  under `SCRIPTS_DIR` (`:5059`). Examples are not runnable in place, so the
-  trust-boundary statement at `sidecar.py:748-755` keeps one execution root
-  and needs no second clause.
+- `EXAMPLES_DIR` from `CYLLAMA_SIDECAR_EXAMPLE_SCRIPTS`, same env-var-with-fallback pattern as `SCRIPTS_DIR` (`sidecar.py:756`), except the fallback is "no catalog" rather than a created directory. The sidecar never writes here.
 
-**17.4 Main process.** `resolveExamplesDir` (`index.js:190`) already
-resolves packaged vs dev; pass its result as
-`CYLLAMA_SIDECAR_EXAMPLE_SCRIPTS` beside `CYLLAMA_SIDECAR_SCRIPTS`
-(`:304`). Drop the `seedExamples("example-scripts", ...)` call (`:291`).
+- `_list_script_files` and `_script_summary` (`sidecar.py:4605`, `:4624`) take a directory argument. Both are already path-driven; only the `SCRIPTS_DIR` reference at `:4612` and `:4615` is fixed.
 
-**17.5 Renderer.** Scripts merge the catalog into a single list rather
-than showing a second section: `scriptRows()` joins `state.scripts` and
-`state.scriptExamples` by id, and each row carries the name, the first
-docstring line, Install or Uninstall, and Run. A shipped script that is
-not installed has no Run; a user-authored file has no Uninstall. Install
-is `POST .../copy`, Uninstall is `DELETE /scripts/examples/{id}`, which
-refuses a name the build does not ship -- so neither the pane nor the API
-can delete a script the user wrote. An installed copy whose bytes differ
-from the shipped file returns 409, and the pane confirms before retrying
-with `force`.
+- `GET /scripts` (`:4659`) gains `examples: [...]`, each summary carrying `in_workspace: bool` -- true when a file of that stem already exists in `SCRIPTS_DIR`. One round trip, one response shape.
 
-The workflow pane merges the same way (`workflowRows`), with two
-differences. Its rows drop `entry`, which the catalog cannot report
-without importing and which the Plan section already shows; and its Run
-is inert until the selected workflow's `inputs_required` are filled,
-with the tooltip naming what is missing. Typing in those fields updates
-that one button (`syncWorkflowRunButton`) rather than re-rendering the
-form, which would move focus out of the field. No Cancel on a workflow
-row: it runs in-process, where cancel cannot interrupt a node mid-call
-(the reason scripts are a child process at all, Section 7).
+- `POST /scripts/examples/{id}/copy` copies `EXAMPLES_DIR/{id}.py` to `SCRIPTS_DIR/{id}.py`. 409 when the target exists; never overwrite user code. Returns the new script summary so the pane can select it.
 
-**17.6 Existing installs.** 0.3.0 seeded five files and wrote `.seeded`.
-Leave both. Those copies are user files now and may have been edited. The
-catalog shows the same five with `in_workspace` true, so they read as
-already copied rather than as duplicates. The marker becomes inert; a
-cleanup pass that deletes files from a user's directory buys nothing.
+- `POST /jobs/script/run` (`:5046`) is unchanged and still resolves only under `SCRIPTS_DIR` (`:5059`). Examples are not runnable in place, so the trust-boundary statement at `sidecar.py:748-755` keeps one execution root and needs no second clause.
 
-**17.7 Workflows get the same treatment, in the same change.** Two answers
-to "where do examples come from" is worse than the extra work, and if Q5
-ever merges the two directories, one catalog is one less thing to merge.
-`CYLLAMA_SIDECAR_EXAMPLE_WORKFLOWS`, an `examples` array on `GET /workflows`
-(`sidecar.py:4409`), `POST /workflows/examples/{id}/copy`, and an Examples
-section in the workflow pane (`agents-pane.js:573`).
+**17.4 Main process.** `resolveExamplesDir` (`index.js:190`) already resolves packaged vs dev; pass its result as `CYLLAMA_SIDECAR_EXAMPLE_SCRIPTS` beside `CYLLAMA_SIDECAR_SCRIPTS` (`:304`). Drop the `seedExamples("example-scripts", ...)` call (`:291`).
 
-One thing does not carry over. `_workflow_summary` (`sidecar.py:4381`)
-builds its summary by importing and compiling the module, which is fine for
-a file the user placed in their own workspace and wrong for a catalog:
-opening the pane would execute every shipped example in the sidecar
-process, before the user has chosen anything. The catalog needs the
-`ast.parse` path scripts already use (`:4624`, and the rule at Section 7).
-So a shared docstring-only summary serves both catalogs, and catalog rows
-carry no `entry`, `exits`, or `inputs_required` -- those appear once the
-file is copied into the workspace and the existing summary runs on it.
+**17.5 Renderer.** Scripts merge the catalog into a single list rather than showing a second section: `scriptRows()` joins `state.scripts` and `state.scriptExamples` by id, and each row carries the name, the first docstring line, Install or Uninstall, and Run. A shipped script that is not installed has no Run; a user-authored file has no Uninstall. Install is `POST .../copy`, Uninstall is `DELETE /scripts/examples/{id}`, which refuses a name the build does not ship -- so neither the pane nor the API can delete a script the user wrote. An installed copy whose bytes differ from the shipped file returns 409, and the pane confirms before retrying with `force`.
 
-**17.8 Cost.** Two endpoints, two env vars, a shared ast-based summary,
-three functions gaining a parameter, two pane sections, two copy actions. The regression is that a
-first launch shows an empty script list. Mitigate by pointing the empty
-state at the Examples section directly below it, not by seeding.
+The workflow pane merges the same way (`workflowRows`), with two differences. Its rows drop `entry`, which the catalog cannot report without importing and which the Plan section already shows; and its Run is inert until the selected workflow's `inputs_required` are filled, with the tooltip naming what is missing. Typing in those fields updates that one button (`syncWorkflowRunButton`) rather than re-rendering the form, which would move focus out of the field. No Cancel on a workflow row: it runs in-process, where cancel cannot interrupt a node mid-call (the reason scripts are a child process at all, Section 7).
 
-**17.9 Rejected: manifest seeding.** Store the list of names ever seeded in
-`.seeded` and copy any shipped example absent from it. About 15 lines, no
-UI, keeps first-launch content, and fixes 17.1 exactly. Rejected because it
-keeps writing to the user's directory on the app's schedule and keeps what
-the app ships and what the user wrote in one namespace, which is what made
-the one-bit marker ambiguous. It is the right fallback if 17.5 does not fit
-the release.
+**17.6 Existing installs.** 0.3.0 seeded five files and wrote `.seeded`. Leave both. Those copies are user files now and may have been edited. The catalog shows the same five with `in_workspace` true, so they read as already copied rather than as duplicates. The marker becomes inert; a cleanup pass that deletes files from a user's directory buys nothing.
+
+**17.7 Workflows get the same treatment, in the same change.** Two answers to "where do examples come from" is worse than the extra work, and if Q5 ever merges the two directories, one catalog is one less thing to merge. `CYLLAMA_SIDECAR_EXAMPLE_WORKFLOWS`, an `examples` array on `GET /workflows` (`sidecar.py:4409`), `POST /workflows/examples/{id}/copy`, and an Examples section in the workflow pane (`agents-pane.js:573`).
+
+One thing does not carry over. `_workflow_summary` (`sidecar.py:4381`) builds its summary by importing and compiling the module, which is fine for a file the user placed in their own workspace and wrong for a catalog: opening the pane would execute every shipped example in the sidecar process, before the user has chosen anything. The catalog needs the `ast.parse` path scripts already use (`:4624`, and the rule at Section 7). So a shared docstring-only summary serves both catalogs, and catalog rows carry no `entry`, `exits`, or `inputs_required` -- those appear once the file is copied into the workspace and the existing summary runs on it.
+
+**17.8 Cost.** Two endpoints, two env vars, a shared ast-based summary, three functions gaining a parameter, two pane sections, two copy actions. The regression is that a first launch shows an empty script list. Mitigate by pointing the empty state at the Examples section directly below it, not by seeding.
+
+**17.9 Rejected: manifest seeding.** Store the list of names ever seeded in `.seeded` and copy any shipped example absent from it. About 15 lines, no UI, keeps first-launch content, and fixes 17.1 exactly. Rejected because it keeps writing to the user's directory on the app's schedule and keeps what the app ships and what the user wrote in one namespace, which is what made the one-bit marker ambiguous. It is the right fallback if 17.5 does not fit the release.

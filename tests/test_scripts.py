@@ -730,3 +730,162 @@ def test_source_does_not_execute_the_file(client, auth, scripts_dir, tmp_path):
     got = client.get("/scripts/sideeffect/source", headers=auth).json()
     assert "write_text" in got["source"]
     assert not marker.exists()
+
+
+# ---------------------------------------------------------------------------
+# Client library: external providers (docs/dev/providers.md R1).
+#
+# The wire format is already covered by tests/test_providers.py; what matters
+# here is the body the client library builds, so a script naming a provider
+# reaches the same endpoint the chat pane does.
+# ---------------------------------------------------------------------------
+
+
+class _FakeResponse:
+    """Stands in for the urllib response ``App._open`` returns."""
+
+    def __init__(self, lines):
+        self._lines = list(lines)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def __iter__(self):
+        return iter(self._lines)
+
+    def read(self):
+        return b"".join(self._lines)
+
+
+@pytest.fixture()
+def client_lib(monkeypatch):
+    """The client library with a sidecar env, plus the calls it makes.
+
+    ``_open`` is stubbed: these tests are about the request the library
+    builds, not about HTTP.
+    """
+    import importlib
+    import sys as _sys
+
+    lib_dir = Path(__file__).resolve().parent.parent / "python-sidecar"
+    _sys.path.insert(0, str(lib_dir))
+    monkeypatch.setenv("CYLLAMA_SIDECAR_URL", "http://127.0.0.1:1")
+    monkeypatch.setenv("CYLLAMA_SIDECAR_TOKEN", "t")
+    monkeypatch.delenv("CYLLAMA_JOB_ID", raising=False)
+    _sys.modules.pop("cyllama_desktop", None)
+    mod = importlib.import_module("cyllama_desktop")
+
+    calls = []
+    replies = {}
+
+    def fake_open(method, path, body=None, params=None, timeout=None):
+        calls.append({"method": method, "path": path, "body": body, "params": params})
+        return _FakeResponse(replies.get(path, [b'data: [DONE]\n']))
+
+    monkeypatch.setattr(mod.app, "_open", fake_open)
+    try:
+        yield mod, calls, replies
+    finally:
+        _sys.modules.pop("cyllama_desktop", None)
+        _sys.path.remove(str(lib_dir))
+
+
+def test_chat_with_a_named_provider_sends_a_provider_ref(client_lib):
+    mod, calls, replies = client_lib
+    replies["/chat"] = [b'data: {"text": "hi"}\n', b'data: [DONE]\n']
+    out = mod.app.chat("q", provider="openai", model="gpt-5.4", temperature=0.5)
+    assert out == "hi"
+    body = calls[0]["body"]
+    assert body["provider"] == {"kind": "openai"}
+    assert body["model"] == "gpt-5.4"
+    assert body["params"] == {"temperature": 0.5}
+    # No local model is involved, so no path is sent and none is looked up.
+    assert "model_path" not in body
+
+
+def test_chat_with_a_compat_provider_passes_the_endpoint_through(client_lib):
+    mod, calls, _ = client_lib
+    ref = {"kind": "compat", "name": "LM Studio", "base_url": "http://localhost:1234/v1"}
+    mod.app.chat("q", provider=ref, model="local-model")
+    assert calls[0]["body"]["provider"] == ref
+
+
+def test_chat_with_a_provider_requires_a_model(client_lib):
+    mod, calls, _ = client_lib
+    with pytest.raises(mod.SidecarError) as exc:
+        mod.app.chat("q", provider="openai")
+    assert "model=" in str(exc.value)
+    # Failed before any request, so no /models/cached lookup either.
+    assert calls == []
+
+
+def test_provider_must_be_a_string_or_a_dict(client_lib):
+    mod, _, _ = client_lib
+    with pytest.raises(mod.SidecarError):
+        mod.app.chat("q", provider=42, model="m")
+
+
+def test_chat_without_a_provider_still_sends_model_path(client_lib):
+    mod, calls, replies = client_lib
+    replies["/chat"] = [b'data: {"text": "x"}\n', b'data: [DONE]\n']
+    mod.app.chat("q", model="/models/a.gguf")
+    body = calls[0]["body"]
+    assert body["model_path"] == "/models/a.gguf"
+    assert "provider" not in body and "model" not in body
+
+
+def test_providers_lists_configured_accounts(client_lib):
+    mod, calls, replies = client_lib
+    replies["/providers/credentials"] = [b'{"configured": ["openai", "compat.lm"]}']
+    assert mod.app.providers() == ["openai", "compat.lm"]
+    assert calls[0]["path"] == "/providers/credentials"
+
+
+def test_provider_models_forwards_the_endpoint_fields(client_lib):
+    mod, calls, replies = client_lib
+    replies["/providers/models"] = [b'{"models": [{"id": "gpt-5.4"}]}']
+    ref = {"kind": "compat", "name": "LM", "base_url": "https://x.co/v1"}
+    assert mod.app.provider_models(ref) == [{"id": "gpt-5.4"}]
+    assert calls[0]["params"] == {
+        "kind": "compat", "name": "LM", "base_url": "https://x.co/v1",
+    }
+
+
+def test_progress_is_inert_without_a_job(client_lib, capsys):
+    """A workflow node imports the same handle inside the sidecar, where
+    this stdout is the sidecar's log rather than a job's event stream."""
+    mod, _, _ = client_lib
+    mod.app.progress(0.5, "halfway")
+    assert capsys.readouterr().out == ""
+
+
+def test_progress_writes_the_sentinel_inside_a_job(client_lib, monkeypatch, capsys):
+    mod, _, _ = client_lib
+    monkeypatch.setattr(mod.app, "job_id", "job-1")
+    mod.app.progress(0.5, "halfway")
+    assert "halfway" in capsys.readouterr().out
+
+
+def test_sidecar_exports_its_own_url_so_workflows_can_reach_it(sidecar_app):
+    """Workflows run in the sidecar process; the client library finds the
+    app through this variable, which only _script_env used to set."""
+    import os
+    assert os.environ["CYLLAMA_SIDECAR_URL"].endswith(f":{sidecar_app.PORT}")
+
+
+def test_chat_with_a_provider_labels_the_usage_row(client_lib, monkeypatch):
+    """Provider spend has to be traceable to the job that caused it."""
+    mod, calls, _ = client_lib
+    monkeypatch.setattr(mod.app, "job_id", "job-7")
+    mod.app.chat("q", provider="openai", model="gpt-5.4")
+    assert calls[0]["body"]["source"] == "script:job-7"
+
+
+def test_chat_from_a_workflow_labels_itself_as_such(client_lib):
+    """A workflow node imports the same handle but has no job id."""
+    mod, calls, _ = client_lib
+    mod.app.chat("q", provider="openai", model="gpt-5.4")
+    assert calls[0]["body"]["source"] == "workflow"

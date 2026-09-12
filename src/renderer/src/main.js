@@ -23,6 +23,7 @@ import * as slash from "./features/slash.js";
 // retained for now in case a follow-up wants to mount Preferences-
 // shaped controls inline somewhere.
 import * as modelPicker from "./features/model-picker.js";
+import * as providersLib from "./lib/providers.js";
 import * as presets from "./features/presets.js";
 import * as documentsDialog from "./features/documents-pane.js";
 import * as transcribePane from "./features/transcribe-pane.js";
@@ -129,6 +130,11 @@ for (const b of document.querySelectorAll(".nav-btn[data-pane-jump]")) {
 
 let sidecar = null;
 let modelPath = "";
+// Active external provider, or null when the backend is a local GGUF. Shape:
+// ``{kind, name, base_url, model}``. Exactly one of ``modelPath`` and
+// ``remoteBackend`` is ever set -- setModel and setRemoteBackend each clear
+// the other, so there is no "which one wins" question at send time.
+let remoteBackend = null;
 let inFlight = false;
 let stickyScroll = true;
 let abortCtl = null;
@@ -371,6 +377,7 @@ function newChat() {
 function basename(p) { return p ? p.split(/[\\/]/).pop() : ""; }
 function setModel(path) {
   modelPath = path || "";
+  if (modelPath) setRemoteBackendState(null);
   modelNameEl.textContent = path ? basename(path) : "Select a model";
   modelNameEl.title = path || "";
   try {
@@ -379,7 +386,59 @@ function setModel(path) {
   } catch {}
   updateSendEnabled();
   refreshActiveModelMeta();
+  applySupportedParams();
   window.dispatchEvent(new CustomEvent("cyllama:model-changed", { detail: { modelPath } }));
+}
+
+// Bare state write, no UI. Used by setModel to clear the other backend
+// without recursing back through setRemoteBackend.
+function setRemoteBackendState(active) {
+  remoteBackend = active;
+  providersLib.saveActive(active);
+}
+
+// Switch the chat to an external provider. The pill names the provider as
+// well as the model: which backend served a turn has to be visible, not
+// inferred from a model id.
+function setRemoteBackend(ref, model) {
+  if (!ref || !model) return;
+  modelPath = "";
+  try { localStorage.removeItem(LAST_MODEL_KEY); } catch {}
+  setRemoteBackendState({ kind: ref.kind, name: ref.name || "", base_url: ref.base_url || "", model });
+  providersLib.rememberModel(ref, model);
+  modelNameEl.textContent = `${providersLib.displayName(ref)} / ${model}`;
+  modelNameEl.title = ref.kind === "compat" ? `${ref.base_url} / ${model}` : model;
+  // Local-only: GGUF metadata, and the layer/context warnings built on it.
+  activeModelMeta = null;
+  updateSendEnabled();
+  applySupportedParams();
+  window.dispatchEvent(new CustomEvent("cyllama:model-changed", { detail: { modelPath: "" } }));
+}
+
+/** True when some backend can serve a turn. */
+function hasBackend() { return !!modelPath || !!remoteBackend; }
+
+/** Why a local-only action is unavailable right now.
+ *
+ * "Pick a model first" is the wrong sentence when a provider is active: a
+ * model *is* picked, it is just not one this action can use.
+ */
+function localOnlyMessage(what) {
+  if (remoteBackend) {
+    return `${what} needs a local model -- ${providersLib.displayName(remoteBackend)} `
+      + "is active. Pick a local GGUF to use it.";
+  }
+  return `${what} needs a local model. Pick one first.`;
+}
+
+/** The ``/chat`` fields naming the active backend. */
+function chatTarget() {
+  if (remoteBackend) {
+    const { kind, name, base_url: baseUrl, model } = remoteBackend;
+    // ``source`` labels the usage row this turn books.
+    return { provider: { kind, name, base_url: baseUrl }, model, source: "chat" };
+  }
+  return { model_path: modelPath, mmproj_path: getMmprojPath() };
 }
 
 // Cached GGUF metadata for the active model. Populated asynchronously
@@ -473,10 +532,10 @@ function updateSendEnabled() {
     sendBtn.title = "Stop";
     return;
   }
-  const ok = !!modelPath && !!sidecar;
+  const ok = hasBackend() && !!sidecar;
   sendBtn.disabled = !ok;
   sendBtn.title = !sidecar ? "Sidecar not connected"
-                : !modelPath ? "Pick a model first"
+                : !hasBackend() ? "Pick a model first"
                 : "Send";
 }
 
@@ -755,6 +814,11 @@ async function onAttachFiles(files) {
         // Image: requires multimodal model + mmproj. Surface the
         // user-actionable mismatch as a clear error rather than
         // letting the upload succeed but the chat silently drop it.
+        if (remoteBackend) {
+          throw new Error(
+            `images need a local multimodal model -- ${providersLib.displayName(remoteBackend)} is active`,
+          );
+        }
         if (!getMmprojPath()) {
           throw new Error("no mmproj pinned -- attach images via the Models tab first");
         }
@@ -830,7 +894,25 @@ function makeExchange(displayText, images, documents, composedContent) {
   logEl.appendChild(wrap);
   if (stickyScroll) logEl.scrollTop = logEl.scrollHeight;
 
-  return { wrap, asstText };
+  return { wrap, asstText, asstBlock };
+}
+
+// Which backend produced an assistant turn, rendered under it. Only for
+// provider turns: a local turn is attributable from the chat's own
+// modelPath, while a provider turn is the one that left the machine and
+// cost money, so the record has to survive in the history.
+function renderTurnBackend(asstBlock, backend) {
+  if (!backend || !backend.kind) return;
+  const label = document.createElement("div");
+  label.className = "turn-backend";
+  const name = backend.name || providersLib.displayName(backend);
+  const parts = [`${name} / ${backend.model || "?"}`];
+  const u = backend.usage;
+  if (u && (u.prompt_tokens || u.completion_tokens)) {
+    parts.push(`${u.prompt_tokens || 0} in / ${u.completion_tokens || 0} out tokens`);
+  }
+  label.textContent = parts.join(" · ");
+  asstBlock.appendChild(label);
 }
 
 function attachMessageActions(host, getText, exchangeEl) {
@@ -1261,7 +1343,7 @@ function applyMirostatVisibility() {
 // when the installed cyllama lacks the helper.
 async function estimateGpuLayers() {
   if (!modelPath) {
-    errorLine("Pick a model first to estimate layers.");
+    errorLine(localOnlyMessage("Estimating layers"));
     return;
   }
   const raw = window.prompt("Available GPU memory (MB)?", "8000");
@@ -1317,9 +1399,23 @@ async function applySupportedParams() {
   let info = null;
   try { info = await cyllamaSidecar.getInfo(); }
   catch { return; /* /info unreachable -> leave UI as-is */ }
-  const supported = info && Array.isArray(info.supported_params)
-    ? new Set(info.supported_params) : null;
+  // A provider accepts a different set of sampler fields than a local
+  // GGUF, so the row gating follows the active backend.
+  const remoteParams = remoteBackend
+    ? (info && info.remote && info.remote.supported_params
+        && info.remote.supported_params[remoteBackend.kind]) || []
+    : null;
+  const supported = remoteParams
+    ? new Set(remoteParams)
+    : (info && Array.isArray(info.supported_params) ? new Set(info.supported_params) : null);
   const features = (info && info.features) || {};
+  // Grammar, speculative decoding, n-gram cache and the multi-GPU split are
+  // all properties of a local llama.cpp context, so the advanced section
+  // goes away with a provider active rather than offering controls that
+  // would be dropped in transit. Scoped to those rows on purpose: the
+  // Transcribe / Image / Agents / Batch panes and document extraction run
+  // against their own models and are unaffected by the chat backend.
+  const localOnly = !!remoteBackend;
   if (supported) {
     for (const key of PARAM_KEYS) {
       // Advanced-section keys are gated by ``data-feature`` instead of
@@ -1339,9 +1435,9 @@ async function applySupportedParams() {
   // available even when chat-side grammar isn't wired -- the user can
   // still generate GBNF for copy/paste use.
   const featRowHidden = {
-    grammar: !(features.grammar || features.json_schema_to_grammar),
-    speculative: !features.speculative,
-    ngram: !features.ngram,
+    grammar: localOnly || !(features.grammar || features.json_schema_to_grammar),
+    speculative: localOnly || !features.speculative,
+    ngram: localOnly || !features.ngram,
   };
   for (const row of document.querySelectorAll("[data-feature]")) {
     const f = row.dataset.feature;
@@ -1389,7 +1485,8 @@ function applyAttachButtonVisibility(features) {
   // (needs mmproj pinned), OR document extraction (always-on once
   // cyllama exposes the loaders). Hidden when neither -- there's no
   // useful attachment to make.
-  const canImage = !!(features && features.multimodal) && !!getMmprojPath();
+  const canImage = !remoteBackend
+    && !!(features && features.multimodal) && !!getMmprojPath();
   const canDoc = !!(features && features["documents.extract"]);
   btn.hidden = !(canImage || canDoc);
   // Tooltip surfaces what's currently supported so the user knows
@@ -1424,8 +1521,11 @@ function applyMultiGpuVisibility(info) {
   // GPU-typed entries: ggml reports CPU/ACCEL/GPU/iGPU. Treat both
   // 'GPU' and 'iGPU' as a GPU for this purpose.
   const gpuCount = devices.filter((d) => /^i?GPU$/i.test(String(d.type || ""))).length;
-  // No probe data -> assume multi-GPU possible, leave visible.
-  const hide = devices.length > 0 && gpuCount <= 1;
+  // No probe data -> assume multi-GPU possible, leave visible. A provider
+  // has no device split at all, so hide regardless of what the local probe
+  // found (``tensor_split`` is not in PARAM_KEYS, so the row gating above
+  // does not reach it).
+  const hide = !!remoteBackend || (devices.length > 0 && gpuCount <= 1);
   for (const key of MULTI_GPU_KEYS) {
     const el = paramEl(key);
     if (!el) continue;
@@ -1779,7 +1879,7 @@ async function loadChat(id) {
   setSystemPromptUI(activeChat.systemPrompt);
   // Optional: if the chat remembers a model and the user hasn't picked
   // anything yet, auto-restore. Don't override an explicit pick.
-  if (activeChat.modelPath && !modelPath) setModel(activeChat.modelPath);
+  if (activeChat.modelPath && !modelPath && !remoteBackend) setModel(activeChat.modelPath);
 
   clearLog();
   if (messages.length === 0) showEmptyState();
@@ -1850,6 +1950,9 @@ function replayMessages(msgs) {
       at.className = isAgent ? "asst-text agent-answer" : "asst-text";
       renderStatic(at, a.content);
       ab.appendChild(at);
+      // Reopening a chat shows which provider served each turn, and what
+      // it cost in tokens.
+      renderTurnBackend(ab, a.backend);
       wrap.dataset.asstRaw = a.content;
       attachMessageActions(ab, () => wrap.dataset.asstRaw || "", wrap);
       wrap.appendChild(ab);
@@ -1970,6 +2073,22 @@ async function init() {
     }
   } catch {}
 
+  // Restore an active provider the same way, but verify its key is still
+  // configured -- a key removed in Preferences between sessions must not
+  // leave a provider named in the pill that 401s on send.
+  if (!modelPath) {
+    const active = providersLib.loadActive();
+    if (active) {
+      let ok = false;
+      try {
+        const state = await window.cyllama.providers.list();
+        ok = (state.configured || []).includes(providersLib.accountFor(active));
+      } catch {}
+      if (ok) setRemoteBackend(active, active.model);
+      else providersLib.saveActive(null);
+    }
+  }
+
   updateSendEnabled();
 
   // Restore the last active chat if one exists; fall back to most-recent.
@@ -2013,6 +2132,7 @@ async function init() {
 modelPicker.bind({
   pillSelector: "#pick",
   onPickPath: (p) => { if (p) setModel(p); },
+  onPickProvider: (ref, model) => setRemoteBackend(ref, model),
   onBrowsePath: () => window.cyllama.pickModel(),
 });
 ejectBtn.addEventListener("click", async () => {
@@ -2030,6 +2150,7 @@ ejectBtn.addEventListener("click", async () => {
       errorLine(`unload: ${e.message}`);
     }
   }
+  setRemoteBackendState(null);
   setModel("");
 });
 
@@ -2605,7 +2726,7 @@ function renderAgentEvent(ev) {
 // rendering and chat-history bookkeeping is uniform across variants.
 async function runAgentVariant({ label, slashName, jobKind, extraBody }, task, rawPrompt) {
   if (!task) { errorLine(`Usage: /${slashName} <task>`); return; }
-  if (!modelPath) { errorLine("Load a chat model first"); return; }
+  if (!modelPath) { errorLine(localOnlyMessage("The agent loop")); return; }
   if (!sidecar)   { errorLine("Sidecar not connected"); return; }
   // Variant availability is enforced by the sidecar (501 if the
   // bundle was built without the corresponding cyllama class); the
@@ -2881,8 +3002,8 @@ async function send() {
     if (entry) return entry.run(cmd.body, cmd.raw);
   }
 
-  if (!modelPath) { errorLine("Pick a model first"); return; }
-  if (!sidecar)   { errorLine("Sidecar not connected"); return; }
+  if (!hasBackend()) { errorLine("Pick a model first"); return; }
+  if (!sidecar)      { errorLine("Sidecar not connected"); return; }
 
   // Inline any attached documents into the prompt as
   // ``[Document: filename]\n<content>`` blocks before the user's
@@ -2938,6 +3059,11 @@ async function send() {
 
   const exchange = makeExchange(typedPrompt || " ", turnImages, turnDocs, composed);
   const { asstText } = exchange;
+  // Snapshot the backend for this turn before the stream starts: the user
+  // can switch providers mid-generation, and the record has to name what
+  // actually served it.
+  const turnBackend = remoteBackend ? { ...remoteBackend } : null;
+  let turnUsage = null;
   const render = createIncrementalRenderer(asstText);
 
   let raw = "";
@@ -2967,14 +3093,13 @@ async function send() {
         "authorization": `Bearer ${sidecar.token}`,
       },
       body: JSON.stringify({
-        model_path: modelPath,
+        // Local: ``model_path`` plus ``mmproj_path`` -- when an mmproj is
+        // pinned the sidecar routes image-bearing user messages through
+        // ImageAnalyzer instead of llm.chat(). Remote: ``provider`` +
+        // ``model``. See chatTarget().
+        ...chatTarget(),
         messages: outgoing,
         params: getCurrentParams(),
-        // Multimodal: when an mmproj is pinned, the sidecar routes
-        // image-bearing user messages through ImageAnalyzer instead
-        // of llm.chat(). Empty string is the same as omitting -- the
-        // sidecar guards on truthiness.
-        mmproj_path: getMmprojPath(),
       }),
       signal: abortCtl.signal,
     });
@@ -3002,6 +3127,8 @@ async function send() {
           try { parsed = JSON.parse(payload); }
           catch { continue; }
           if (parsed.error) { errorLine(parsed.error); return; }
+          // Sent by the provider path only, immediately before [DONE].
+          if (parsed.usage) { turnUsage = parsed.usage; continue; }
           if (typeof parsed.text === "string") {
             raw += parsed.text;
             bumpTokens(parsed.text);
@@ -3030,7 +3157,17 @@ async function send() {
     // doesn't see its own UI marker on the next turn.
     render(raw + (aborted ? "\n\n_(stopped)_" : ""), false);
     if (raw) {
-      messages.push({ role: "assistant", content: raw });
+      const asstMsg = { role: "assistant", content: raw };
+      if (turnBackend) {
+        asstMsg.backend = {
+          kind: turnBackend.kind,
+          name: turnBackend.name || "",
+          model: turnBackend.model || "",
+        };
+        if (turnUsage) asstMsg.backend.usage = turnUsage;
+        renderTurnBackend(exchange.asstBlock, asstMsg.backend);
+      }
+      messages.push(asstMsg);
       // Stash raw markdown on the exchange so the copy action yields
       // the original content rather than the rendered HTML.
       exchange.wrap.dataset.asstRaw = raw;

@@ -3,6 +3,10 @@
 //
 //   - settings.{get,set}    -- shared with the main renderer; backed
 //                              by <userData>/settings.json.
+//   - providers.{list,setKey,deleteKey}
+//                           -- external-provider credentials. ``list``
+//                              reports which accounts hold a key, never
+//                              the key itself.
 //   - getSidecarInfo        -- needed for the Sidecar / Models tabs to
 //                              show the live /info payload + extra
 //                              model dirs.
@@ -27,6 +31,11 @@ contextBridge.exposeInMainWorld("cyllama", {
   settings: {
     get: () => ipcRenderer.invoke("settings:get"),
     set: (patch) => ipcRenderer.invoke("settings:set", patch),
+  },
+  providers: {
+    list:      () => ipcRenderer.invoke("providers:list"),
+    setKey:    (account, key) => ipcRenderer.invoke("providers:setKey", account, key),
+    deleteKey: (account) => ipcRenderer.invoke("providers:deleteKey", account),
   },
   log: {
     recent: () => ipcRenderer.invoke("log:recent"),

@@ -9,6 +9,13 @@ contextBridge.exposeInMainWorld("cyllama", {
     get: () => ipcRenderer.invoke("settings:get"),
     set: (patch) => ipcRenderer.invoke("settings:set", patch),
   },
+  // External providers. No accessor returns a key: the renderer learns
+  // which accounts are configured, never what they hold.
+  providers: {
+    list:      () => ipcRenderer.invoke("providers:list"),
+    setKey:    (account, key) => ipcRenderer.invoke("providers:setKey", account, key),
+    deleteKey: (account) => ipcRenderer.invoke("providers:deleteKey", account),
+  },
   restartSidecar: () => ipcRenderer.invoke("sidecar:restart"),
   openPreferences: () => ipcRenderer.invoke("prefs:open"),
   fileExists: (path) => ipcRenderer.invoke("fs:exists", path),
