@@ -35,7 +35,16 @@ def scripts_dir(sidecar_app, tmp_path, monkeypatch):
     d = tmp_path / "scripts"
     d.mkdir(exist_ok=True)
     monkeypatch.setattr(sidecar_app, "SCRIPTS_DIR", d)
+    monkeypatch.setattr(sidecar_app, "EXAMPLE_SCRIPTS_DIR", None)
     sidecar_app._SCRIPT_RUNNING.clear()
+    return d
+
+
+@pytest.fixture
+def examples_dir(sidecar_app, scripts_dir, tmp_path, monkeypatch):
+    d = tmp_path / "example-scripts"
+    d.mkdir(exist_ok=True)
+    monkeypatch.setattr(sidecar_app, "EXAMPLE_SCRIPTS_DIR", d)
     return d
 
 
@@ -536,3 +545,131 @@ def test_example_scripts_are_valid_and_documented():
         doc = ast.get_docstring(tree)
         assert doc and len(doc.splitlines()) > 1, f"{f.name} needs a docstring with an args note"
         assert "from cyllama_desktop import app" in src, f"{f.name} should show the client library"
+
+
+# ---------------------------------------------------------------------------
+# Shipped examples: catalog + copy (docs/dev/scripting.md S17)
+# ---------------------------------------------------------------------------
+
+
+def test_examples_absent_when_no_examples_dir(client, auth, scripts_dir):
+    assert client.get("/scripts", headers=auth).json()["examples"] == []
+
+
+def test_examples_listed_with_docstring(client, auth, scripts_dir, examples_dir):
+    write_script(examples_dir, "sweep.py", '''
+        """Sampling grid."""
+        print("sweep")
+    ''')
+    body = client.get("/scripts", headers=auth).json()
+    assert body["scripts"] == []
+    assert [e["id"] for e in body["examples"]] == ["sweep"]
+    assert body["examples"][0]["doc"] == "Sampling grid."
+    assert body["examples"][0]["in_workspace"] is False
+
+
+def test_example_marked_in_workspace_when_name_taken(client, auth, scripts_dir, examples_dir):
+    write_script(examples_dir, "sweep.py", '"""Shipped."""\n')
+    write_script(scripts_dir, "sweep.py", '"""Mine."""\n')
+    body = client.get("/scripts", headers=auth).json()
+    assert body["examples"][0]["in_workspace"] is True
+
+
+def test_listing_examples_does_not_execute_them(client, auth, scripts_dir, examples_dir, tmp_path):
+    """The catalog is summarised with ast.parse, never by importing."""
+    marker = tmp_path / "example.marker"
+    write_script(examples_dir, "sideeffect.py", f'''
+        """Writes a marker at import time."""
+        from pathlib import Path
+        Path({str(marker)!r}).write_text("executed")
+    ''')
+    body = client.get("/scripts", headers=auth).json()
+    assert body["examples"][0]["doc"] == "Writes a marker at import time."
+    assert not marker.exists()
+
+
+def test_copy_example_puts_it_in_the_workspace(client, auth, scripts_dir, examples_dir):
+    write_script(examples_dir, "sweep.py", '"""Sampling grid."""\nprint("sweep")\n')
+    r = client.post("/scripts/examples/sweep/copy", headers=auth)
+    assert r.status_code == 200
+    assert r.json()["filename"] == "sweep.py"
+    assert (scripts_dir / "sweep.py").read_text() == '"""Sampling grid."""\nprint("sweep")\n'
+    body = client.get("/scripts", headers=auth).json()
+    assert [s["id"] for s in body["scripts"]] == ["sweep"]
+    assert body["examples"][0]["in_workspace"] is True
+
+
+def test_copy_never_overwrites_user_code(client, auth, scripts_dir, examples_dir):
+    write_script(examples_dir, "sweep.py", '"""Shipped."""\n')
+    write_script(scripts_dir, "sweep.py", '"""Mine, edited."""\n')
+    r = client.post("/scripts/examples/sweep/copy", headers=auth)
+    assert r.status_code == 409
+    assert (scripts_dir / "sweep.py").read_text() == '"""Mine, edited."""\n'
+
+
+def test_copy_404_on_unknown_example(client, auth, scripts_dir, examples_dir):
+    assert client.post("/scripts/examples/nope/copy", headers=auth).status_code == 404
+
+
+def test_copy_400_on_invalid_id(client, auth, scripts_dir, examples_dir):
+    assert client.post("/scripts/examples/2bad/copy", headers=auth).status_code == 400
+
+
+def test_copy_404_when_build_ships_no_examples(client, auth, scripts_dir):
+    assert client.post("/scripts/examples/sweep/copy", headers=auth).status_code == 404
+
+
+def test_catalog_flags_a_locally_edited_copy(client, auth, scripts_dir, examples_dir):
+    write_script(examples_dir, "sweep.py", '"""Shipped."""\n')
+    write_script(scripts_dir, "sweep.py", '"""Shipped."""\n')
+    body = client.get("/scripts", headers=auth).json()
+    assert body["examples"][0]["workspace_differs"] is False
+    write_script(scripts_dir, "sweep.py", '"""Shipped."""\nprint("mine")\n')
+    body = client.get("/scripts", headers=auth).json()
+    assert body["examples"][0]["workspace_differs"] is True
+
+
+def test_uninstall_removes_an_unmodified_copy(client, auth, scripts_dir, examples_dir):
+    write_script(examples_dir, "sweep.py", '"""Shipped."""\n')
+    client.post("/scripts/examples/sweep/copy", headers=auth)
+    r = client.delete("/scripts/examples/sweep", headers=auth)
+    assert r.status_code == 200
+    assert r.json()["had_edits"] is False
+    assert not (scripts_dir / "sweep.py").exists()
+    # The example itself survives, and is offered again.
+    body = client.get("/scripts", headers=auth).json()
+    assert body["examples"][0]["in_workspace"] is False
+
+
+def test_uninstall_409_on_a_modified_copy(client, auth, scripts_dir, examples_dir):
+    write_script(examples_dir, "sweep.py", '"""Shipped."""\n')
+    write_script(scripts_dir, "sweep.py", '"""Shipped."""\nprint("my edit")\n')
+    r = client.delete("/scripts/examples/sweep", headers=auth)
+    assert r.status_code == 409
+    assert (scripts_dir / "sweep.py").exists()
+
+
+def test_uninstall_force_deletes_a_modified_copy(client, auth, scripts_dir, examples_dir):
+    write_script(examples_dir, "sweep.py", '"""Shipped."""\n')
+    write_script(scripts_dir, "sweep.py", '"""Shipped."""\nprint("my edit")\n')
+    r = client.delete("/scripts/examples/sweep?force=true", headers=auth)
+    assert r.status_code == 200
+    assert r.json()["had_edits"] is True
+    assert not (scripts_dir / "sweep.py").exists()
+
+
+def test_uninstall_cannot_delete_a_user_authored_script(client, auth, scripts_dir, examples_dir):
+    """Only a name the build ships can be uninstalled.
+
+    Otherwise the route would delete any file in the workspace, and a
+    script the user wrote exists nowhere else.
+    """
+    write_script(scripts_dir, "mine.py", '"""Mine."""\n')
+    r = client.delete("/scripts/examples/mine", headers=auth)
+    assert r.status_code == 404
+    assert (scripts_dir / "mine.py").exists()
+
+
+def test_uninstall_404_when_not_installed(client, auth, scripts_dir, examples_dir):
+    write_script(examples_dir, "sweep.py", '"""Shipped."""\n')
+    assert client.delete("/scripts/examples/sweep", headers=auth).status_code == 404

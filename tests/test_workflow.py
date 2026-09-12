@@ -29,7 +29,16 @@ def workflows_dir(sidecar_app, tmp_path, monkeypatch):
     d = tmp_path / "workflows"
     d.mkdir()
     monkeypatch.setattr(sidecar_app, "WORKFLOWS_DIR", d)
+    monkeypatch.setattr(sidecar_app, "EXAMPLE_WORKFLOWS_DIR", None)
     sidecar_app._WORKFLOW_CACHE.clear()
+    return d
+
+
+@pytest.fixture
+def example_workflows_dir(sidecar_app, workflows_dir, tmp_path, monkeypatch):
+    d = tmp_path / "example-workflows"
+    d.mkdir(exist_ok=True)
+    monkeypatch.setattr(sidecar_app, "EXAMPLE_WORKFLOWS_DIR", d)
     return d
 
 
@@ -324,3 +333,63 @@ def test_resources_example_workflows_import_and_compile(sidecar_app):
         compiled = sidecar_app._resolve_workflow(path)
         assert compiled is not None, path.name
     sidecar_app._WORKFLOW_CACHE.clear()
+
+
+# ---------------------------------------------------------------------------
+# Shipped examples: catalog + copy (docs/dev/scripting.md S17)
+# ---------------------------------------------------------------------------
+
+
+def test_workflow_examples_absent_when_no_examples_dir(client, auth, workflows_dir):
+    assert client.get("/workflows", headers=auth).json()["examples"] == []
+
+
+def test_workflow_examples_are_not_imported(client, auth, workflows_dir, example_workflows_dir):
+    """_workflow_summary imports; the catalog must not.
+
+    An example that raises at import time still lists, with its
+    docstring and no error, because the summary comes from ast.parse.
+    """
+    _write_workflow(example_workflows_dir, "boom", '''
+        """Explodes on import."""
+        raise RuntimeError("imported")
+    ''')
+    body = client.get("/workflows", headers=auth).json()
+    assert [e["id"] for e in body["examples"]] == ["boom"]
+    assert body["examples"][0]["doc"] == "Explodes on import."
+    assert body["examples"][0]["error"] is None
+    assert body["examples"][0]["in_workspace"] is False
+
+
+def test_copy_workflow_example_puts_it_in_the_workspace(
+    client, auth, workflows_dir, example_workflows_dir
+):
+    _write_workflow(example_workflows_dir, "summarise", '"""Shipped."""\n')
+    r = client.post("/workflows/examples/summarise/copy", headers=auth)
+    assert r.status_code == 200
+    assert (workflows_dir / "summarise.py").read_text() == '"""Shipped."""\n'
+    assert client.get("/workflows", headers=auth).json()["examples"][0]["in_workspace"] is True
+
+
+def test_copy_workflow_example_never_overwrites(
+    client, auth, workflows_dir, example_workflows_dir
+):
+    _write_workflow(example_workflows_dir, "summarise", '"""Shipped."""\n')
+    _write_workflow(workflows_dir, "summarise", '"""Mine."""\n')
+    assert client.post("/workflows/examples/summarise/copy", headers=auth).status_code == 409
+    assert (workflows_dir / "summarise.py").read_text() == '"""Mine."""\n'
+
+
+def test_uninstall_workflow_example(client, auth, workflows_dir, example_workflows_dir):
+    _write_workflow(example_workflows_dir, "summarise", '"""Shipped."""\n')
+    client.post("/workflows/examples/summarise/copy", headers=auth)
+    assert client.delete("/workflows/examples/summarise", headers=auth).status_code == 200
+    assert not (workflows_dir / "summarise.py").exists()
+
+
+def test_uninstall_workflow_cannot_delete_user_file(
+    client, auth, workflows_dir, example_workflows_dir
+):
+    _write_workflow(workflows_dir, "mine", '"""Mine."""\n')
+    assert client.delete("/workflows/examples/mine", headers=auth).status_code == 404
+    assert (workflows_dir / "mine.py").exists()

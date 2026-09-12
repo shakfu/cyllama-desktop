@@ -88,6 +88,12 @@ const state = {
   // scripts row state:
   scripts: [],
   scriptsDir: "",
+  // Shipped examples, listed read-only. Copying one puts it in the
+  // workspace; nothing runs from the catalog itself.
+  scriptExamples: [],
+  workflowExamples: [],
+  copyingExampleId: null,
+  busyScriptId: null,
   selectedScriptId: null,
   scriptArgsText: "",
   scriptArgsError: "",
@@ -563,6 +569,62 @@ function renderDetail() {
 }
 
 
+// ---------------------------------------------------------------------------
+// Shipped example workflows. A read-only catalog: the only action is
+// Copy, which puts the file in the workspace where it becomes an
+// ordinary user file. Rows carry the docstring only -- the catalog is
+// summarised without importing anything (docs/dev/scripting.md S17).
+//
+// The scripts row does not use this: it merges the catalog into its own
+// one-row-per-script list (see scriptRows).
+// ---------------------------------------------------------------------------
+
+function renderExamplesSection(kind) {
+  const examples = state.workflowExamples;
+  if (!examples.length) return null;
+  const section = el("section", { class: "mp-section" }, el("h3", {}, "Examples"));
+  const list = el("div", { class: "agt-workflow-list" });
+  for (const ex of examples) {
+    const busy = state.copyingExampleId === `${kind}:${ex.id}`;
+    const row = el("div", { class: "mp-subnav-row scr-row", title: ex.doc || "" },
+      el("span", {}, ex.id),
+      el("button", {
+        type: "button", class: "btn btn-mini",
+        id: `ex-copy-${kind}-${ex.id}`,
+        disabled: (ex.in_workspace || busy) ? true : undefined,
+        title: ex.in_workspace
+          ? "A file with this name is already in the workspace"
+          : "Copy into the workspace",
+        onclick: () => copyExample(kind, ex.id),
+      }, ex.in_workspace ? "in workspace" : (busy ? "copying..." : "Copy")),
+    );
+    list.appendChild(row);
+  }
+  section.appendChild(list);
+  return section;
+}
+
+async function copyExample(kind, id) {
+  state.copyingExampleId = `${kind}:${id}`;
+  renderMain();
+  try {
+    const r = await sidecarFetch(`/workflows/examples/${encodeURIComponent(id)}/copy`,
+      { method: "POST" });
+    if (!r.ok) {
+      const body = await r.json().catch(() => ({}));
+      console.warn("agents-pane copyExample:", r.status, body.detail || "");
+    } else {
+      state.selectedWorkflowId = id;
+    }
+  } catch (e) {
+    console.warn("agents-pane copyExample:", e);
+  } finally {
+    state.copyingExampleId = null;
+  }
+  await refreshWorkflows();
+}
+
+
 // ===========================================================================
 // agent-workflow row: discovery + spec + initial-state + Run + trace
 // ===========================================================================
@@ -576,7 +638,8 @@ function renderWorkflowMain(host) {
       el("p", { class: "ag-hint" },
         "Author Python files under ",
         el("code", {}, state.workflowsDir || "<workspace>/workflows/"),
-        " exporting ", el("code", {}, "flow"), " or ", el("code", {}, "make_flow()"), "."),
+        " exporting ", el("code", {}, "flow"), " or ", el("code", {}, "make_flow()"),
+        state.workflowExamples.length ? ", or copy one of the examples below." : "."),
     ));
   } else {
     const fileList = el("div", { class: "agt-workflow-list" });
@@ -601,6 +664,9 @@ function renderWorkflowMain(host) {
       onclick: () => refreshWorkflows() }, "Refresh"),
   ));
   host.appendChild(listSection);
+
+  const wfExamples = renderExamplesSection("workflows");
+  if (wfExamples) host.appendChild(wfExamples);
 
   if (!state.selectedWorkflowId) return;
   const wf = state.workflows.find((w) => w.id === state.selectedWorkflowId);
@@ -734,11 +800,12 @@ async function refreshWorkflows() {
   try {
     const r = await sidecarFetch("/workflows");
     if (!r.ok) {
-      state.workflows = []; state.workflowsDir = "";
+      state.workflows = []; state.workflowsDir = ""; state.workflowExamples = [];
     } else {
       const body = await r.json();
       state.workflows = body.workflows || [];
       state.workflowsDir = body.dir || "";
+      state.workflowExamples = body.examples || [];
     }
   } catch (e) {
     console.warn("agents-pane refreshWorkflows:", e);
@@ -811,51 +878,134 @@ async function runSelectedWorkflow() {
 // /jobs/<id>/log fills any gap if the event stream was interrupted.
 // ===========================================================================
 
+// One row per script, shipped and user-authored in a single list. A
+// shipped script the user has not installed has no Run; a script the
+// user wrote has no Uninstall, because the app must not offer to delete
+// a file that exists nowhere else.
+function scriptRows() {
+  const byId = new Map();
+  for (const ex of state.scriptExamples) {
+    byId.set(ex.id, {
+      id: ex.id, doc: ex.doc, error: null,
+      installed: Boolean(ex.in_workspace), edited: Boolean(ex.workspace_differs),
+      shipped: true,
+    });
+  }
+  for (const sc of state.scripts) {
+    const shipped = byId.get(sc.id);
+    byId.set(sc.id, {
+      id: sc.id, doc: sc.doc || "", error: sc.error,
+      installed: true, edited: shipped ? shipped.edited : false,
+      shipped: Boolean(shipped),
+    });
+  }
+  return [...byId.values()].sort((a, b) => a.id.localeCompare(b.id));
+}
+
+function firstLine(text) {
+  return (text || "").split("\n")[0].trim();
+}
+
+function scriptRow(r) {
+  const isRunning = state.runningScriptId === r.id;
+  const busy = state.busyScriptId === r.id;
+  const row = el("div", {
+    class: "scr-row" + (r.id === state.selectedScriptId ? " active" : "")
+      + (r.installed ? "" : " scr-shelved"),
+    "data-script-id": r.id,
+  });
+  const name = el("button", {
+    type: "button", class: "scr-name", id: `scr-item-${r.id}`,
+    disabled: (!r.installed || r.error) ? true : undefined,
+    onclick: () => selectScript(r.id),
+  }, r.id);
+  row.appendChild(name);
+  row.appendChild(el("span", {
+    class: "scr-desc" + (r.error ? " scr-desc-error" : ""),
+    title: r.error || r.doc || "",
+  }, r.error ? r.error : firstLine(r.doc)));
+
+  // Two fixed slots, so Run is in the same column whether or not the
+  // row also has an Install, and an Install is never mistaken for it.
+  const actions = el("div", { class: "scr-actions" });
+  if (!r.shipped) actions.appendChild(el("span", {}));
+  if (r.shipped) {
+    actions.appendChild(el("button", {
+      type: "button", class: "btn btn-mini",
+      id: `scr-${r.installed ? "uninstall" : "install"}-${r.id}`,
+      disabled: busy ? true : undefined,
+      title: r.installed
+        ? (r.edited ? "Remove from the workspace -- this copy has local edits" : "Remove from the workspace")
+        : "Copy into the workspace",
+      onclick: () => (r.installed ? uninstallScript(r.id, r.edited) : installScript(r.id)),
+    }, r.installed ? "Uninstall" : "Install"));
+  }
+  if (!r.installed || r.error) actions.appendChild(el("span", {}));
+  if (r.installed && !r.error) {
+    actions.appendChild(el("button", {
+      type: "button", class: "scr-run", id: `scr-run-${r.id}`,
+      disabled: (state.scriptJob && !isRunning) ? true : undefined,
+      title: isRunning ? "Cancel this run" : "Run this script",
+      onclick: () => (isRunning ? cancelScript() : runScript(r.id)),
+    }, isRunning ? "Cancel" : "Run"));
+  }
+  row.appendChild(actions);
+  return row;
+}
+
+async function installScript(id) {
+  await scriptCatalog(`/scripts/examples/${encodeURIComponent(id)}/copy`, "POST", id);
+}
+
+async function uninstallScript(id, edited) {
+  if (edited && !confirm(`"${id}.py" has local edits. Delete it from the workspace?`)) return;
+  const path = `/scripts/examples/${encodeURIComponent(id)}`;
+  const res = await scriptCatalog(path + (edited ? "?force=true" : ""), "DELETE", null);
+  // The file may have been edited since the list was fetched: retry only
+  // once the user has agreed to lose those edits.
+  if (res === 409 && !edited
+      && confirm(`"${id}.py" has local edits. Delete it from the workspace?`)) {
+    await scriptCatalog(path + "?force=true", "DELETE", null);
+  }
+}
+
+// Returns the HTTP status on failure so a caller can react to 409.
+async function scriptCatalog(path, method, selectAfter) {
+  state.busyScriptId = selectAfter;
+  try {
+    const r = await sidecarFetch(path, { method });
+    if (!r.ok) {
+      const body = await r.json().catch(() => ({}));
+      setScriptStatus(body.detail || `${method} ${path} failed (${r.status})`);
+      return r.status;
+    }
+    if (selectAfter) state.selectedScriptId = selectAfter;
+    setScriptStatus("");
+  } catch (e) {
+    setScriptStatus(e.message || String(e));
+    return 0;
+  } finally {
+    state.busyScriptId = null;
+    await refreshScripts();
+  }
+  return 200;
+}
+
 function renderScriptsMain(host) {
-  const listSection = el("section", { class: "mp-section" },
-    el("h3", {}, "Script files"));
-  if (!state.scripts.length) {
+  const rows = scriptRows();
+  const listSection = el("section", { class: "mp-section" }, el("h3", {}, "Scripts"));
+  if (!rows.length) {
     listSection.appendChild(el("div", { class: "rt-placeholder" },
-      el("p", {}, "No script files found."),
+      el("p", {}, "No scripts found."),
       el("p", { class: "ag-hint" },
         "Author Python files under ",
         el("code", {}, state.scriptsDir || "<workspace>/scripts/"),
         ". Import ", el("code", {}, "cyllama_desktop"), " to reach the loaded model."),
     ));
   } else {
-    const fileList = el("div", { class: "agt-workflow-list" });
-    for (const sc of state.scripts) {
-      const isRunning = state.runningScriptId === sc.id;
-      const row = el("div", {
-        class: "mp-subnav-row scr-row" + (sc.id === state.selectedScriptId ? " active" : ""),
-        "data-script-id": sc.id,
-      });
-      const select = el("button", {
-        type: "button", class: "scr-select",
-        id: `scr-item-${sc.id}`,
-        disabled: sc.error ? true : undefined,
-        title: sc.error || sc.doc || "",
-      },
-        el("span", {}, sc.id),
-        el("span", { class: "mp-subnav-count" }, sc.error ? "error" : `${sc.bytes} B`),
-      );
-      if (!sc.error) select.addEventListener("click", () => selectScript(sc.id));
-      row.appendChild(select);
-      // Run where the script is, rather than past the docstring. Running
-      // an unselected row selects it first, which clears the arguments
-      // box -- so the arguments you can see are always the ones used.
-      if (!sc.error) {
-        row.appendChild(el("button", {
-          type: "button", class: "scr-run",
-          id: `scr-run-${sc.id}`,
-          disabled: (state.scriptJob && !isRunning) ? true : undefined,
-          title: isRunning ? "Cancel this run" : "Run this script",
-          onclick: () => (isRunning ? cancelScript() : runScript(sc.id)),
-        }, isRunning ? "Cancel" : "Run"));
-      }
-      fileList.appendChild(row);
-    }
-    listSection.appendChild(fileList);
+    const list = el("div", { class: "scr-list" });
+    for (const r of rows) list.appendChild(scriptRow(r));
+    listSection.appendChild(list);
   }
   listSection.appendChild(el("div", { style: "margin-top: 8px;" },
     el("button", { class: "btn btn-mini", id: "scr-refresh",
@@ -866,13 +1016,6 @@ function renderScriptsMain(host) {
   if (!state.selectedScriptId) return;
   const sc = state.scripts.find((x) => x.id === state.selectedScriptId);
   if (!sc) return;
-
-  if (sc.doc) {
-    host.appendChild(el("section", { class: "mp-section" },
-      el("h3", {}, sc.id),
-      el("p", { class: "mp-main-doc" }, sc.doc),
-    ));
-  }
 
   const argsArea = el("textarea", {
     class: "dp-input scr-args", id: "scr-args", rows: 4,
@@ -887,28 +1030,22 @@ function renderScriptsMain(host) {
     if (err) err.textContent = "";
   });
 
-  const running = Boolean(state.scriptJob);
+  // Run lives on the row, not here: the row is the only place a script
+  // can be started, so there is one button per script and no question
+  // about which one these arguments belong to.
   const formHost = el("section", { class: "mp-section", id: "scr-form" },
-    el("h3", {}, "Arguments"),
+    el("h3", {}, `Arguments for ${sc.id}`),
     el("p", { class: "ag-hint" }, "A JSON object, handed to the script on stdin. Leave empty for none."),
     argsArea,
     el("p", { class: "ag-error", id: "scr-args-error" }, state.scriptArgsError || ""),
-    el("div", { class: "ag-row" },
-      el("button", {
-        type: "button", class: "btn btn-primary", id: "scr-run",
-        disabled: running ? true : undefined,
-        onclick: () => runSelectedScript(),
-      }, "Run"),
-      el("button", {
-        type: "button", class: "btn btn-mini", id: "scr-cancel",
-        disabled: running ? undefined : true,
-        onclick: () => cancelScript(),
-      }, "Cancel"),
-      el("span", { class: "ag-hint", id: "scr-status" }, state.scriptStatus || ""),
-    ),
+    el("p", { class: "ag-hint", id: "scr-status" }, state.scriptStatus || ""),
   );
   host.appendChild(formHost);
 
+  // No empty Output frame before the first run. renderMain() runs again
+  // the moment a job starts, so the section is in place before the
+  // first log line arrives.
+  if (!state.scriptJob && !state.scriptLog.length) return;
   const logHost = el("div", { class: "agent-events scr-log", id: "scr-log" });
   host.appendChild(el("section", { class: "mp-section", id: "scr-log-section" },
     el("h3", {}, "Output"), logHost));
@@ -1014,11 +1151,12 @@ async function refreshScripts() {
   try {
     const r = await sidecarFetch("/scripts");
     if (!r.ok) {
-      state.scripts = []; state.scriptsDir = "";
+      state.scripts = []; state.scriptsDir = ""; state.scriptExamples = [];
     } else {
       const body = await r.json();
       state.scripts = body.scripts || [];
       state.scriptsDir = body.dir || "";
+      state.scriptExamples = body.examples || [];
     }
   } catch (e) {
     console.warn("agents-pane refreshScripts:", e);

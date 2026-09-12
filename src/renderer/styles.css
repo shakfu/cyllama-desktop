@@ -1883,19 +1883,47 @@ details.rt-collapsible > summary > .icon-btn { margin-right: 4px; }
 /* Scripts row in the Agents pane. The log reuses the .ag-event palette
    above (stderr lines take .ag-ev-error) and scrolls independently --
    a child process can emit far more than an agent trace. */
-/* Script row: name and size select, the trailing button runs. Putting
-   Run on the row means it is reachable without scrolling past a long
-   docstring to the Arguments section. */
-.scr-row { gap: 8px; }
-.scr-select {
-  appearance: none;
-  flex: 1; min-width: 0;
-  display: flex; align-items: center; justify-content: space-between; gap: 8px;
-  background: transparent; border: 0; padding: 0;
-  color: inherit; font: inherit;
-  cursor: pointer; text-align: left;
+/* One row per script: name, one-line description, then the actions.
+   Shipped and user-authored scripts share the list, so the actions
+   column is the only thing that differs between them -- a shipped
+   script that is not installed has no Run, and a user's own file has
+   no Uninstall. The name column is fixed-width so descriptions align
+   down the list. */
+.scr-list { display: flex; flex-direction: column; gap: 1px; }
+.scr-row {
+  display: grid;
+  grid-template-columns: minmax(7rem, 12rem) 1fr auto;
+  align-items: center; gap: 10px;
+  padding: 5px 10px;
+  border-radius: 6px;
+  font-size: 13px;
 }
-.scr-select:disabled { cursor: default; opacity: 0.6; }
+.scr-row:hover { background: var(--bg-sunken); }
+.scr-row.active { background: var(--accent, #4a9eff); color: white; }
+.scr-row.active .scr-desc { color: rgba(255, 255, 255, 0.85); }
+/* Not installed: present, but visibly not part of the workspace. */
+.scr-row.scr-shelved .scr-name { color: var(--fg-faint); }
+.scr-name {
+  appearance: none;
+  min-width: 0;
+  background: transparent; border: 0; padding: 0;
+  color: inherit; font: inherit; font-family: var(--mono, monospace);
+  cursor: pointer; text-align: left;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.scr-name:disabled { cursor: default; }
+.scr-desc {
+  min-width: 0;
+  color: var(--fg-faint); font-size: 12px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.scr-desc-error { color: var(--danger, #d05); }
+.scr-actions {
+  display: grid; grid-template-columns: 5.5rem 3.5rem;
+  align-items: center; gap: 6px; justify-items: end;
+}
+/* The status line under Arguments is empty until a run reports. */
+#scr-status:empty { display: none; }
 .scr-run {
   appearance: none;
   flex: 0 0 auto;
@@ -1905,7 +1933,8 @@ details.rt-collapsible > summary > .icon-btn { margin-right: 4px; }
 }
 .scr-run:hover:not(:disabled) { border-color: var(--border-strong, var(--border)); }
 .scr-run:disabled { opacity: 0.45; cursor: default; }
-.mp-subnav-row.active .scr-run {
+.scr-row.active .scr-run,
+.scr-row.active .btn-mini {
   background: transparent;
   border-color: rgba(255, 255, 255, 0.55);
   color: white;

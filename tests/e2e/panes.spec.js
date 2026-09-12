@@ -442,9 +442,8 @@ test("Console opens in the chat pane and in a full-area pane", async () => {
 test("Scripts row lists a workspace script and streams its run", async () => {
   ctx = await launchApp();
   const { window, userDataDir } = ctx;
-  // Drop a script into the workspace the app just created. Seeding of
-  // the shipped examples is skipped under the e2e harness, so this is
-  // the only file the pane should list.
+  // Drop a script into the workspace the app just created. Nothing is
+  // seeded on launch, so this is the only file the pane should list.
   const scriptsDir = path.join(userDataDir, "workspaces", "default", "scripts");
   fs.mkdirSync(scriptsDir, { recursive: true });
   fs.writeFileSync(
@@ -458,7 +457,8 @@ test("Scripts row lists a workspace script and streams its run", async () => {
   await row.click();
   await window.click("#scr-refresh");
   await window.click("#scr-item-smoke");
-  await expect(window.locator("#agentsPaneMain")).toContainText("Smoke script.");
+  await expect(window.locator('[data-script-id="smoke"] .scr-desc'))
+    .toHaveText("Smoke script.");
 
   // Run from the script's own row, without scrolling to the Arguments
   // section at the bottom.
@@ -468,10 +468,48 @@ test("Scripts row lists a workspace script and streams its run", async () => {
   await expect(window.locator("#agentsPaneDetail"))
     .toContainText("succeeded", { timeout: 30_000 });
 
-  // The bottom Run is the same action for the selected script.
-  await window.click("#scr-run");
-  await expect(window.locator("#agentsPaneDetail"))
-    .toContainText("succeeded", { timeout: 30_000 });
+  // The row is the only place a script starts: the Arguments section
+  // carries the input and the status line, not a second Run.
+  await expect(window.locator("#scr-run")).toHaveCount(0);
+  await expect(window.locator("#scr-form")).toContainText("Arguments for smoke");
+});
+
+test("Scripts row installs and uninstalls a shipped script", async () => {
+  ctx = await launchApp();
+  const { window, userDataDir } = ctx;
+  const sweep = path.join(userDataDir, "workspaces", "default", "scripts", "sweep.py");
+
+  await window.click("#navAgents");
+  await window.locator("#agt-row-scripts").click();
+  // Listed but not installed: Install offered, no Run.
+  await expect(window.locator("#scr-install-sweep")).toBeVisible({ timeout: 15_000 });
+  await expect(window.locator("#scr-run-sweep")).toHaveCount(0);
+  expect(fs.existsSync(sweep)).toBe(false);
+
+  await window.click("#scr-install-sweep");
+  await expect(window.locator("#scr-uninstall-sweep")).toBeVisible({ timeout: 15_000 });
+  await expect(window.locator("#scr-run-sweep")).toBeVisible();
+  expect(fs.existsSync(sweep)).toBe(true);
+
+  await window.click("#scr-uninstall-sweep");
+  await expect(window.locator("#scr-install-sweep")).toBeVisible({ timeout: 15_000 });
+  expect(fs.existsSync(sweep)).toBe(false);
+});
+
+test("Scripts row shows a user's own script with no Uninstall", async () => {
+  ctx = await launchApp();
+  const { window, userDataDir } = ctx;
+  const scriptsDir = path.join(userDataDir, "workspaces", "default", "scripts");
+  fs.mkdirSync(scriptsDir, { recursive: true });
+  fs.writeFileSync(path.join(scriptsDir, "mine.py"), '"""My own thing."""\n');
+
+  await window.click("#navAgents");
+  await window.locator("#agt-row-scripts").click();
+  await window.click("#scr-refresh");
+  await expect(window.locator("#scr-run-mine")).toBeVisible({ timeout: 15_000 });
+  // Nothing offers to delete a file the app did not put there.
+  await expect(window.locator("#scr-uninstall-mine")).toHaveCount(0);
+  await expect(window.locator('[data-script-id="mine"] .scr-desc')).toHaveText("My own thing.");
 });
 
 test("/agent-reflect slash + Reflection section render when feature is on", async () => {

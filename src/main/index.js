@@ -194,42 +194,6 @@ function resolveExamplesDir(name) {
   return path.join(__dirname, "..", "..", "resources", name);
 }
 
-// Copy shipped examples into a workspace dir on first launch.
-// Idempotent via a ``.seeded`` marker so a user who deletes the seeded
-// files doesn't get them back on next launch.
-function seedExamples(name, targetDir) {
-  try {
-    // Skip under the e2e harness so a stub-backed sidecar isn't asked
-    // to import real-cyllama-flavoured workflow files (the conftest
-    // _FakeWorkflow doesn't implement Layer C decorators).
-    if (process.env.CYLLAMA_E2E_LAUNCHER) return;
-    const marker = path.join(targetDir, ".seeded");
-    if (fs.existsSync(marker)) return;
-    const src = resolveExamplesDir(name);
-    if (!fs.existsSync(src)) {
-      // No examples shipped (dev checkout without resources, or tests
-      // pointing at a stripped tree) -- still write the marker so we
-      // don't keep retrying on every launch.
-      fs.writeFileSync(marker, new Date().toISOString());
-      return;
-    }
-    for (const name of fs.readdirSync(src)) {
-      if (!name.endsWith(".py")) continue;
-      const from = path.join(src, name);
-      const to = path.join(targetDir, name);
-      // Don't overwrite a file the user may already have authored
-      // with the same name -- skip and let the marker still land.
-      if (fs.existsSync(to)) continue;
-      fs.copyFileSync(from, to);
-    }
-    fs.writeFileSync(marker, new Date().toISOString());
-  } catch (e) {
-    // Seeding is a best-effort UX nicety. A failure shouldn't break
-    // sidecar startup; surface it on the main-process log instead.
-    console.warn(`[main] seedExamples(${name}) failed:`, e && e.message ? e.message : e);
-  }
-}
-
 async function getFreePort() {
   return new Promise((resolve, reject) => {
     const srv = net.createServer();
@@ -283,12 +247,12 @@ async function startSidecar() {
   // runs them as child processes for /scripts + /jobs/script/run.
   const scriptsDir = path.join(workspaceDir(), "scripts");
   fs.mkdirSync(scriptsDir, { recursive: true });
-  // First-launch seeding: copy examples from resources/ into the
-  // workspace, once. A ``.seeded`` marker file records that we did this
-  // so a user who later empties a directory doesn't get the examples
-  // re-pushed back in on next launch.
-  seedExamples("example-workflows", workflowsDir);
-  seedExamples("example-scripts", scriptsDir);
+  // Shipped examples are a read-only catalog the sidecar lists beside
+  // the user's own files; a copy action puts one in the workspace. The
+  // app never writes to workspaceDir() on launch, so everything in
+  // these two directories is something the user put there.
+  const exampleWorkflowsDir = resolveExamplesDir("example-workflows");
+  const exampleScriptsDir = resolveExamplesDir("example-scripts");
 
   sidecarProc = spawn(pythonBin, [script], {
     env: {
@@ -302,6 +266,8 @@ async function startSidecar() {
       CYLLAMA_SIDECAR_UPLOADS: uploadsDir,
       CYLLAMA_SIDECAR_WORKFLOWS: workflowsDir,
       CYLLAMA_SIDECAR_SCRIPTS: scriptsDir,
+      CYLLAMA_SIDECAR_EXAMPLE_WORKFLOWS: exampleWorkflowsDir,
+      CYLLAMA_SIDECAR_EXAMPLE_SCRIPTS: exampleScriptsDir,
       // Additional read-only model search roots from Preferences.
       // Joined with the OS path delimiter (':' on Unix, ';' on Windows).
       // Empty when the user hasn't added any extras.

@@ -371,8 +371,9 @@ runtime.)
 ### Authoring a workflow
 
 Workflows are **Python files** in your workspace under
-`<workspace>/workflows/`. On first launch the app seeds an example
-file (`word_count.py`) you can read as a starting point.
+`<workspace>/workflows/`. The pane lists the examples shipped with the
+app below your own files; Copy puts one in the workspace, where it is
+yours to edit. Nothing is written to the workspace until you copy it.
 
 Each file exports either:
 

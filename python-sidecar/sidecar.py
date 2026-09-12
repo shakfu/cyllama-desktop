@@ -759,6 +759,90 @@ SCRIPTS_DIR = Path(
 ).resolve()
 SCRIPTS_DIR.mkdir(parents=True, exist_ok=True)
 
+
+def _resolve_examples_dir(env_var: str) -> Optional[Path]:
+    """Read-only source of shipped example files, or None when absent.
+
+    The app passes a directory inside its own bundle. Nothing here is
+    created or written. Examples reach a workspace only when the user
+    copies one, so a file in SCRIPTS_DIR or WORKFLOWS_DIR is always
+    something the user put there -- see docs/dev/scripting.md S17.
+    """
+    raw = (os.environ.get(env_var) or "").strip()
+    if not raw:
+        return None
+    try:
+        path = Path(raw).resolve()
+    except OSError:
+        return None
+    return path if path.is_dir() else None
+
+
+EXAMPLE_SCRIPTS_DIR = _resolve_examples_dir("CYLLAMA_SIDECAR_EXAMPLE_SCRIPTS")
+EXAMPLE_WORKFLOWS_DIR = _resolve_examples_dir("CYLLAMA_SIDECAR_EXAMPLE_WORKFLOWS")
+
+
+def _copy_example(src_dir: Optional[Path], dst_dir: Path, file_id: str, id_re: re.Pattern) -> dict:
+    """Copy one shipped example into the workspace.
+
+    Never overwrites: the create is exclusive, so a name already in the
+    workspace fails with 409 rather than replacing code the user may
+    have edited. The id shape rules out separators, so the source stays
+    inside ``src_dir``.
+    """
+    if not id_re.match(file_id):
+        raise HTTPException(400, f"invalid example id: {file_id!r}")
+    if src_dir is None:
+        raise HTTPException(404, "no examples shipped with this build")
+    src = src_dir / f"{file_id}.py"
+    if not src.is_file():
+        raise HTTPException(404, f"no example named {file_id!r}")
+    dst_dir.mkdir(parents=True, exist_ok=True)
+    dst = dst_dir / src.name
+    try:
+        with open(dst, "xb") as fh:
+            fh.write(src.read_bytes())
+    except FileExistsError:
+        raise HTTPException(409, f"{src.name} already exists in the workspace")
+    except OSError as exc:
+        raise HTTPException(500, f"{type(exc).__name__}: {exc}")
+    return {"id": file_id, "filename": src.name, "path": str(dst)}
+
+
+def _uninstall_example(
+    src_dir: Optional[Path],
+    dst_dir: Path,
+    file_id: str,
+    id_re: re.Pattern,
+    force: bool = False,
+) -> dict:
+    """Remove a workspace file that came from the shipped examples.
+
+    Only a name the build actually ships can be removed here, so the
+    route cannot delete a script the user wrote. A copy whose bytes no
+    longer match the shipped file has been edited: that fails with 409
+    unless the caller passes ``force``, because the edit exists nowhere
+    else.
+    """
+    if not id_re.match(file_id):
+        raise HTTPException(400, f"invalid example id: {file_id!r}")
+    if src_dir is None:
+        raise HTTPException(404, "no examples shipped with this build")
+    src = src_dir / f"{file_id}.py"
+    if not src.is_file():
+        raise HTTPException(404, f"no example named {file_id!r}")
+    dst = dst_dir / src.name
+    if not dst.is_file():
+        raise HTTPException(404, f"{src.name} is not installed")
+    try:
+        edited = dst.read_bytes() != src.read_bytes()
+        if edited and not force:
+            raise HTTPException(409, f"{src.name} has local edits; pass force=true to delete it")
+        dst.unlink()
+    except OSError as exc:
+        raise HTTPException(500, f"{type(exc).__name__}: {exc}")
+    return {"id": file_id, "filename": src.name, "removed": str(dst), "had_edits": edited}
+
 # The client library a script imports as ``cyllama_desktop``. It ships
 # next to this file, in the repo and under <Resources>/python-sidecar in
 # the packaged app, and is put on the child's PYTHONPATH.
@@ -4303,18 +4387,21 @@ _WORKFLOW_CACHE: dict[str, tuple[Path, float, Any]] = {}
 _WORKFLOW_ID_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*$")
 
 
-def _list_workflow_files() -> list[Path]:
-    """Return *.py files in WORKFLOWS_DIR with valid id-shape names.
+def _list_workflow_files(directory: Optional[Path] = None) -> list[Path]:
+    """Return *.py files in a workflow directory with valid id-shape names.
 
     A valid workflow id is a leading-letter alphanumeric (plus ``_-``)
     -- the same shape the renderer can put on a URL or DOM id. Files
     whose stem violates this are skipped silently (e.g. ``__init__.py``,
     ``.foo.py``, ``2024_thing.py``).
+
+    Defaults to WORKFLOWS_DIR; the example catalog passes its own.
     """
-    if not WORKFLOWS_DIR.is_dir():
+    src = WORKFLOWS_DIR if directory is None else directory
+    if src is None or not src.is_dir():
         return []
     out: list[Path] = []
-    for p in sorted(WORKFLOWS_DIR.iterdir()):
+    for p in sorted(src.iterdir()):
         if p.suffix != ".py":
             continue
         if not _WORKFLOW_ID_RE.match(p.stem):
@@ -4416,9 +4503,27 @@ async def workflows_list():
     can render a disabled row pointing at the file.
     """
     if not _FEATURE_FLAGS.get("workflow"):
-        return {"workflows": [], "dir": str(WORKFLOWS_DIR)}
+        return {"workflows": [], "dir": str(WORKFLOWS_DIR), "examples": []}
     items = [_workflow_summary(p) for p in _list_workflow_files()]
-    return {"workflows": items, "dir": str(WORKFLOWS_DIR)}
+    return {
+        "workflows": items,
+        "dir": str(WORKFLOWS_DIR),
+        "examples": _example_catalog(EXAMPLE_WORKFLOWS_DIR, WORKFLOWS_DIR),
+    }
+
+
+@app.post("/workflows/examples/{example_id}/copy")
+async def workflow_example_copy(example_id: str):
+    """Install a shipped example workflow into the workspace."""
+    return _copy_example(EXAMPLE_WORKFLOWS_DIR, WORKFLOWS_DIR, example_id, _WORKFLOW_ID_RE)
+
+
+@app.delete("/workflows/examples/{example_id}")
+async def workflow_example_uninstall(example_id: str, force: bool = False):
+    """Uninstall a shipped example workflow from the workspace."""
+    return _uninstall_example(
+        EXAMPLE_WORKFLOWS_DIR, WORKFLOWS_DIR, example_id, _WORKFLOW_ID_RE, force
+    )
 
 
 @app.get("/workflows/{workflow_id}/spec")
@@ -4602,17 +4707,20 @@ _WIN_CREATE_NEW_PROCESS_GROUP = 0x00000200
 _SCRIPT_RUNNING: set[str] = set()
 
 
-def _list_script_files() -> list[Path]:
-    """Return *.py files in SCRIPTS_DIR with valid id-shape names.
+def _list_script_files(directory: Optional[Path] = None) -> list[Path]:
+    """Return *.py files in a script directory with valid id-shape names.
 
     Same rule as workflows: a leading-letter alphanumeric stem, so the id
     is safe in a URL and a DOM id. ``__init__.py`` and friends are
     skipped silently.
+
+    Defaults to SCRIPTS_DIR; the example catalog passes its own.
     """
-    if not SCRIPTS_DIR.is_dir():
+    src = SCRIPTS_DIR if directory is None else directory
+    if src is None or not src.is_dir():
         return []
     out: list[Path] = []
-    for p in sorted(SCRIPTS_DIR.iterdir()):
+    for p in sorted(src.iterdir()):
         if p.suffix != ".py":
             continue
         if not _SCRIPT_ID_RE.match(p.stem):
@@ -4656,6 +4764,35 @@ def _script_summary(path: Path) -> dict:
     return summary
 
 
+def _example_catalog(src_dir: Optional[Path], workspace_dir: Path) -> list[dict]:
+    """Summaries of shipped examples, with whether each is already copied.
+
+    Uses the ast-based summary for scripts *and* workflows: listing must
+    not execute what it lists, and ``_workflow_summary`` imports and
+    compiles the module. A catalog row therefore carries only the
+    docstring; entry, exits and inputs appear once the file is in the
+    workspace. Script and workflow ids have the same shape, so one
+    lister serves both.
+    """
+    if src_dir is None:
+        return []
+    out = []
+    for path in _list_script_files(src_dir):
+        summary = _script_summary(path)
+        installed = workspace_dir / path.name
+        summary["in_workspace"] = installed.exists()
+        # Whether the installed copy still matches what the build ships.
+        # The pane needs it to warn before an uninstall throws away work.
+        summary["workspace_differs"] = False
+        if summary["in_workspace"]:
+            try:
+                summary["workspace_differs"] = installed.read_bytes() != path.read_bytes()
+            except OSError:
+                summary["workspace_differs"] = True
+        out.append(summary)
+    return out
+
+
 @app.get("/scripts")
 def scripts_list():
     """Discover *.py files in the scripts directory.
@@ -4667,9 +4804,24 @@ def scripts_list():
     return {
         "scripts": [_script_summary(p) for p in _list_script_files()],
         "dir": str(SCRIPTS_DIR),
+        "examples": _example_catalog(EXAMPLE_SCRIPTS_DIR, SCRIPTS_DIR),
         "running": len(_SCRIPT_RUNNING),
         "max_concurrent": _SCRIPT_MAX_CONCURRENT,
     }
+
+
+@app.post("/scripts/examples/{example_id}/copy")
+def script_example_copy(example_id: str):
+    """Install a shipped example script into the workspace."""
+    return _copy_example(EXAMPLE_SCRIPTS_DIR, SCRIPTS_DIR, example_id, _SCRIPT_ID_RE)
+
+
+@app.delete("/scripts/examples/{example_id}")
+def script_example_uninstall(example_id: str, force: bool = False):
+    """Uninstall a shipped example script from the workspace."""
+    return _uninstall_example(
+        EXAMPLE_SCRIPTS_DIR, SCRIPTS_DIR, example_id, _SCRIPT_ID_RE, force
+    )
 
 
 def _script_env(job: Job, cwd: Path) -> dict:

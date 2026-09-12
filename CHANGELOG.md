@@ -4,6 +4,16 @@ All notable changes to cyllama-desktop are documented here. The format is based 
 
 ## [Unreleased]
 
+### Changed
+
+- **Example scripts and workflows are a catalog, not a first-launch copy.** The app no longer writes to the workspace on launch. Both panes list the shipped examples below your own files, and Copy puts one into `<workspace>/scripts/` or `<workspace>/workflows/`, where it becomes an ordinary file you own. The old `.seeded` marker recorded a single bit -- that seeding had run -- so it could not distinguish an example the user deleted from one that did not exist when the install first launched. Honouring the deletion meant an install never received an example added in a later release. Copy never overwrites: a name already in the workspace is shown as "in workspace", and the endpoint returns 409 rather than replacing a file you may have edited.
+
+  Installs that already seeded keep those files and the now-inert marker; the catalog marks them as already in the workspace. Catalog rows carry the docstring only. Summarising an example must not import it, and the workflow summary works by importing and compiling the module, so `entry`, `exits`, and `inputs_required` appear only once a workflow is in the workspace.
+
+- **The scripts pane is one row per script.** Name, the first line of the docstring, Install or Uninstall, Run. Shipped and user-authored scripts share one list, so a script the app ships and one you wrote differ only in which buttons the row carries. Uninstall appears only where the build ships that name, and `DELETE /scripts/examples/{id}` refuses any other file, so nothing in the UI or the API offers to delete a script you wrote. A copy whose bytes no longer match the shipped file has local edits: the delete returns 409, and the pane asks before passing `force`.
+
+  The old layout repeated each script's name and docstring in a second section, carried two Run buttons and two Cancels for the same script, and showed a byte count and an empty Output frame. Run now lives only on the row, so the arguments box below is unambiguously the one that run uses.
+
 ## [0.3.0]
 
 ### Changed
