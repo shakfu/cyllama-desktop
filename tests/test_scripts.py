@@ -1,0 +1,538 @@
+"""Workspace scripts: discovery, execution, cancel, timeout, backpressure.
+
+Scripts are *.py files under SCRIPTS_DIR run as child processes. These
+tests spawn real interpreters, so the fixtures write self-contained
+scripts that import nothing from cyllama.
+"""
+from __future__ import annotations
+
+import json
+import os
+import textwrap
+import time
+from pathlib import Path
+
+import pytest
+
+
+# ---------------------------------------------------------------------------
+# Fixtures + helpers
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture()
+def client(live_client):
+    """Override the default client for this module.
+
+    A script job spawns a child process and outlives the POST that
+    started it, which the per-request TestClient portal cannot support.
+    """
+    return live_client
+
+
+@pytest.fixture
+def scripts_dir(sidecar_app, tmp_path, monkeypatch):
+    d = tmp_path / "scripts"
+    d.mkdir(exist_ok=True)
+    monkeypatch.setattr(sidecar_app, "SCRIPTS_DIR", d)
+    sidecar_app._SCRIPT_RUNNING.clear()
+    return d
+
+
+def write_script(scripts_dir: Path, name: str, body: str) -> Path:
+    p = scripts_dir / name
+    p.write_text(textwrap.dedent(body).lstrip(), encoding="utf-8")
+    return p
+
+
+def start(client, auth, script_id, **body):
+    r = client.post(
+        "/jobs/script/run",
+        json={"script_id": script_id, **body},
+        headers=auth,
+    )
+    return r
+
+
+def run_ok(client, auth, script_id, **body):
+    r = start(client, auth, script_id, **body)
+    assert r.status_code == 200, r.text
+    return r.json()["job_id"]
+
+
+def drain(client, auth, job_id, timeout_s=20.0):
+    """Read the SSE stream to completion and return the event list."""
+    events = []
+    deadline = time.time() + timeout_s
+    with client.stream("GET", f"/jobs/{job_id}/events", headers=auth) as r:
+        assert r.status_code == 200
+        buf = ""
+        for chunk in r.iter_text():
+            buf += chunk
+            while "\n\n" in buf:
+                frame, buf = buf.split("\n\n", 1)
+                for line in frame.splitlines():
+                    if line.startswith("data: "):
+                        events.append(json.loads(line[6:]))
+                if events and events[-1].get("type") == "done":
+                    return events
+            if time.time() > deadline:
+                raise AssertionError(f"timeout draining {job_id}; got {events}")
+    return events
+
+
+def wait_terminal(client, auth, job_id, timeout_s=30.0):
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        r = client.get(f"/jobs/{job_id}", headers=auth)
+        assert r.status_code == 200
+        body = r.json()
+        if body["state"] in ("succeeded", "failed", "cancelled"):
+            return body
+        time.sleep(0.05)
+    raise AssertionError(f"job {job_id} never finished")
+
+
+def logs_of(events, stream=None):
+    return [
+        e["message"] for e in events
+        if e.get("type") == "log" and (stream is None or e.get("stream") == stream)
+    ]
+
+
+def pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def wait_dead(pid: int, timeout_s=10.0) -> bool:
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        if not pid_alive(pid):
+            return True
+        time.sleep(0.05)
+    return not pid_alive(pid)
+
+
+# ---------------------------------------------------------------------------
+# Discovery
+# ---------------------------------------------------------------------------
+
+
+def test_scripts_list_empty_when_dir_empty(client, auth, scripts_dir):
+    r = client.get("/scripts", headers=auth)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["scripts"] == []
+    assert body["dir"] == str(scripts_dir)
+
+
+def test_scripts_list_returns_docstring_summary(client, auth, scripts_dir):
+    write_script(scripts_dir, "hello.py", '''
+        """First line of the doc.
+
+        More detail.
+        """
+        print("hi")
+    ''')
+    body = client.get("/scripts", headers=auth).json()
+    assert len(body["scripts"]) == 1
+    item = body["scripts"][0]
+    assert item["id"] == "hello"
+    assert item["filename"] == "hello.py"
+    assert item["doc"].startswith("First line of the doc.")
+    assert item["error"] is None
+    assert item["bytes"] > 0
+
+
+def test_scripts_list_skips_invalid_filenames(client, auth, scripts_dir):
+    for name in ("__init__.py", "2024_thing.py", ".hidden.py", "notes.txt"):
+        (scripts_dir / name).write_text("print('x')\n", encoding="utf-8")
+    write_script(scripts_dir, "ok.py", "print('ok')\n")
+    body = client.get("/scripts", headers=auth).json()
+    assert [s["id"] for s in body["scripts"]] == ["ok"]
+
+
+def test_scripts_list_surfaces_syntax_errors(client, auth, scripts_dir):
+    write_script(scripts_dir, "broken.py", "def (:\n")
+    item = client.get("/scripts", headers=auth).json()["scripts"][0]
+    assert item["id"] == "broken"
+    assert "SyntaxError" in item["error"]
+    assert item["doc"] == ""
+
+
+def test_scripts_list_does_not_execute_scripts(client, auth, scripts_dir, tmp_path):
+    """Listing a directory must never run what is in it."""
+    marker = tmp_path / "imported.marker"
+    write_script(scripts_dir, "sideeffect.py", f'''
+        """Writes a marker at import time."""
+        from pathlib import Path
+        Path({str(marker)!r}).write_text("executed")
+    ''')
+    body = client.get("/scripts", headers=auth).json()
+    assert body["scripts"][0]["doc"] == "Writes a marker at import time."
+    assert not marker.exists()
+
+
+# ---------------------------------------------------------------------------
+# Run: success, args, result, artifacts
+# ---------------------------------------------------------------------------
+
+
+def test_run_streams_stdout_and_succeeds(client, auth, scripts_dir):
+    write_script(scripts_dir, "chatty.py", '''
+        print("line one")
+        print("line two")
+    ''')
+    job_id = run_ok(client, auth, "chatty")
+    events = drain(client, auth, job_id)
+    out = logs_of(events, "stdout")
+    assert "line one" in out and "line two" in out
+    result = next(e for e in events if e["type"] == "result")["result"]
+    assert result["exit_code"] == 0
+    assert result["script_id"] == "chatty"
+    assert result["duration_s"] >= 0
+
+
+def test_run_passes_args_on_stdin(client, auth, scripts_dir):
+    write_script(scripts_dir, "echo_args.py", '''
+        import json, sys
+        args = json.loads(sys.stdin.read())
+        print(json.dumps(args, sort_keys=True))
+    ''')
+    job_id = run_ok(client, auth, "echo_args", args={"b": 2, "a": 1})
+    events = drain(client, auth, job_id)
+    assert '{"a": 1, "b": 2}' in logs_of(events, "stdout")
+
+
+def test_run_result_json_becomes_result_payload(client, auth, scripts_dir):
+    write_script(scripts_dir, "producer.py", '''
+        import json, pathlib
+        pathlib.Path("result.json").write_text(json.dumps({"rows": 3}))
+    ''')
+    job_id = run_ok(client, auth, "producer")
+    events = drain(client, auth, job_id)
+    result = next(e for e in events if e["type"] == "result")["result"]
+    assert result["result"] == {"rows": 3}
+    assert result["result_error"] is None
+
+
+def test_run_invalid_result_json_reported_not_fatal(client, auth, scripts_dir):
+    write_script(scripts_dir, "badresult.py", '''
+        import pathlib
+        pathlib.Path("result.json").write_text("{not json")
+    ''')
+    job_id = run_ok(client, auth, "badresult")
+    events = drain(client, auth, job_id)
+    result = next(e for e in events if e["type"] == "result")["result"]
+    assert result["result"] is None
+    assert "JSONDecodeError" in result["result_error"] or "Expecting" in result["result_error"]
+
+
+def test_artifacts_are_listed_and_downloadable(client, auth, scripts_dir):
+    write_script(scripts_dir, "writer.py", '''
+        import pathlib
+        pathlib.Path("report.csv").write_text("a,b\\n1,2\\n")
+    ''')
+    job_id = run_ok(client, auth, "writer")
+    events = drain(client, auth, job_id)
+    result = next(e for e in events if e["type"] == "result")["result"]
+    names = [a["name"] for a in result["artifacts"]]
+    assert "report.csv" in names
+    r = client.get(f"/artifacts/{job_id}/report.csv", headers=auth)
+    assert r.status_code == 200
+    assert r.text == "a,b\n1,2\n"
+
+
+def test_progress_sentinel_becomes_progress_event(client, auth, scripts_dir):
+    write_script(scripts_dir, "progressive.py", '''
+        import json, sys
+        for i in (1, 2):
+            sys.stdout.write("\\x1e" + json.dumps({"progress": i / 2, "message": f"step {i}"}) + "\\n")
+        sys.stdout.flush()
+    ''')
+    job_id = run_ok(client, auth, "progressive")
+    events = drain(client, auth, job_id)
+    progress = [e for e in events if e["type"] == "progress"]
+    assert [p["value"] for p in progress] == [0.5, 1.0]
+    assert progress[-1]["message"] == "step 2"
+    # A progress line is not also logged as output.
+    assert not any("\x1e" in m for m in logs_of(events))
+
+
+def test_carriage_return_only_output_still_emits(client, auth, scripts_dir):
+    """A progress bar that only writes \\r must not look hung."""
+    write_script(scripts_dir, "bar.py", '''
+        import sys
+        for i in range(3):
+            sys.stdout.write(f"{i}%\\r")
+        sys.stdout.flush()
+        sys.stdout.write("\\n")
+    ''')
+    job_id = run_ok(client, auth, "bar")
+    events = drain(client, auth, job_id)
+    assert "0%" in logs_of(events, "stdout")
+    assert "2%" in logs_of(events, "stdout")
+
+
+# ---------------------------------------------------------------------------
+# Failure paths
+# ---------------------------------------------------------------------------
+
+
+def test_failing_script_surfaces_exit_code_and_stderr_tail(client, auth, scripts_dir):
+    write_script(scripts_dir, "boom.py", '''
+        import sys
+        print("about to fail", file=sys.stderr)
+        sys.exit(3)
+    ''')
+    job_id = run_ok(client, auth, "boom")
+    events = drain(client, auth, job_id)
+    error = next(e for e in events if e["type"] == "error")
+    assert "exited 3" in error["message"]
+    assert "about to fail" in error["message"]
+    assert wait_terminal(client, auth, job_id)["state"] == "failed"
+
+
+def test_run_404_on_unknown_script(client, auth, scripts_dir):
+    assert start(client, auth, "nope").status_code == 404
+
+
+def test_run_400_on_invalid_id(client, auth, scripts_dir):
+    assert start(client, auth, "../etc/passwd").status_code == 400
+
+
+def test_run_400_on_non_object_args(client, auth, scripts_dir):
+    write_script(scripts_dir, "noop.py", "pass\n")
+    assert start(client, auth, "noop", args=[1, 2]).status_code == 400
+
+
+def test_run_400_on_oversized_args(client, auth, scripts_dir, sidecar_app):
+    write_script(scripts_dir, "noop.py", "pass\n")
+    blob = "x" * (sidecar_app._SCRIPT_MAX_ARGS_BYTES + 100)
+    assert start(client, auth, "noop", args={"blob": blob}).status_code == 400
+
+
+def test_timeout_kills_the_script(client, auth, scripts_dir):
+    write_script(scripts_dir, "sleeper.py", '''
+        import time
+        time.sleep(60)
+    ''')
+    job_id = run_ok(client, auth, "sleeper", timeout_s=1)
+    events = drain(client, auth, job_id)
+    error = next(e for e in events if e["type"] == "error")
+    assert "timed out" in error["message"]
+    assert wait_terminal(client, auth, job_id)["state"] == "failed"
+
+
+# ---------------------------------------------------------------------------
+# Cancel
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="liveness probe is POSIX-only: os.kill(pid, 0) terminates on Windows",
+)
+def test_cancel_kills_the_whole_process_tree(client, auth, scripts_dir):
+    """Cancel must reach grandchildren, not just the script itself."""
+    write_script(scripts_dir, "forker.py", '''
+        import pathlib, subprocess, sys, time
+        child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"])
+        pathlib.Path("pids.txt").write_text(f"{pathlib.os.getpid()} {child.pid}")
+        print("spawned", flush=True)
+        time.sleep(120)
+    ''')
+    job_id = run_ok(client, auth, "forker")
+    pids_file = Path(client.get("/info", headers=auth).json()["sidecar"]["artifacts_dir"]) / job_id / "pids.txt"
+
+    deadline = time.time() + 20
+    while time.time() < deadline and not pids_file.exists():
+        time.sleep(0.05)
+    assert pids_file.exists(), "script never started"
+    parent_pid, child_pid = (int(x) for x in pids_file.read_text().split())
+
+    r = client.post(f"/jobs/{job_id}/cancel", headers=auth)
+    assert r.status_code == 200
+
+    assert wait_dead(parent_pid), "script process survived cancel"
+    assert wait_dead(child_pid), "grandchild survived cancel"
+    assert wait_terminal(client, auth, job_id)["state"] == "cancelled"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="checks the non-Windows fallbacks")
+def test_windows_job_helpers_are_inert_off_windows(sidecar_app):
+    """The job-object path must never fire on POSIX, where killpg rules."""
+    assert sidecar_app._win_create_job_for(os.getpid()) is None
+    assert sidecar_app._win_terminate_job(None) is False
+    assert sidecar_app._win_terminate_job(object()) is False
+    sidecar_app._win_close_job(None)          # no raise
+    sidecar_app._win_close_job(object())      # no raise
+
+
+def test_spawn_kwargs_isolate_the_child(sidecar_app):
+    kwargs = sidecar_app._script_spawn_kwargs()
+    if os.name == "nt":
+        assert kwargs["creationflags"] & sidecar_app._WIN_CREATE_NEW_PROCESS_GROUP
+    else:
+        assert kwargs == {"start_new_session": True}
+
+
+# ---------------------------------------------------------------------------
+# Concurrency cap
+# ---------------------------------------------------------------------------
+
+
+def test_concurrency_cap_rejects_extra_runs(client, auth, scripts_dir, sidecar_app):
+    write_script(scripts_dir, "sleeper.py", '''
+        import time
+        time.sleep(30)
+    ''')
+    started = []
+    for _ in range(sidecar_app._SCRIPT_MAX_CONCURRENT):
+        started.append(run_ok(client, auth, "sleeper", timeout_s=30))
+    r = start(client, auth, "sleeper")
+    assert r.status_code == 429
+    for job_id in started:
+        client.post(f"/jobs/{job_id}/cancel", headers=auth)
+    for job_id in started:
+        wait_terminal(client, auth, job_id)
+
+
+# ---------------------------------------------------------------------------
+# Backpressure (Phase 0 regression)
+# ---------------------------------------------------------------------------
+
+
+def test_chatty_script_completes_with_no_subscriber(client, auth, scripts_dir):
+    """A flood of output with nobody listening must not wedge the job.
+
+    The event queue is bounded and the SSE stream takes one subscriber
+    and never replays. Before the lossy path, the producer blocked
+    forever once the queue filled and the script stalled mid-run with no
+    error and no timeout.
+    """
+    write_script(scripts_dir, "flood.py", '''
+        for i in range(20000):
+            print(f"line {i}")
+    ''')
+    job_id = run_ok(client, auth, "flood")
+    body = wait_terminal(client, auth, job_id, timeout_s=60)
+    assert body["state"] == "succeeded"
+    assert body["dropped"] > 0
+
+
+def test_job_log_replays_retained_events(client, auth, scripts_dir, sidecar_app):
+    write_script(scripts_dir, "three.py", '''
+        for i in range(3):
+            print(f"line {i}")
+    ''')
+    job_id = run_ok(client, auth, "three")
+    wait_terminal(client, auth, job_id)
+
+    body = client.get(f"/jobs/{job_id}/log", headers=auth).json()
+    messages = [e["message"] for e in body["events"] if e["type"] == "log"]
+    assert "line 0" in messages and "line 2" in messages
+    assert body["capacity"] == sidecar_app._JOB_LOG_RING
+    seqs = [e["seq"] for e in body["events"]]
+    assert seqs == sorted(seqs)
+
+    # ``after`` returns only newer entries.
+    tail = client.get(f"/jobs/{job_id}/log?after={seqs[-2]}", headers=auth).json()
+    assert [e["seq"] for e in tail["events"]] == [seqs[-1]]
+
+
+def test_job_log_ring_is_bounded(client, auth, scripts_dir, sidecar_app):
+    write_script(scripts_dir, "flood.py", '''
+        for i in range(3000):
+            print(f"line {i}")
+    ''')
+    job_id = run_ok(client, auth, "flood")
+    wait_terminal(client, auth, job_id, timeout_s=60)
+    body = client.get(f"/jobs/{job_id}/log", headers=auth).json()
+    assert body["retained"] <= sidecar_app._JOB_LOG_RING
+
+
+# ---------------------------------------------------------------------------
+# Client library wiring
+# ---------------------------------------------------------------------------
+
+
+def test_client_library_is_importable_from_a_script(client, auth, scripts_dir):
+    """The child finds cyllama_desktop on PYTHONPATH and sees its job."""
+    write_script(scripts_dir, "usesclient.py", '''
+        import json
+        from cyllama_desktop import app
+        app.progress(0.5, "halfway")
+        print(json.dumps({
+            "job_id": app.job_id,
+            "args": app.args,
+            "artifacts_dir": str(app.artifacts_dir),
+        }, sort_keys=True))
+    ''')
+    job_id = run_ok(client, auth, "usesclient", args={"k": "v"})
+    events = drain(client, auth, job_id)
+    line = next(m for m in logs_of(events, "stdout") if m.startswith("{"))
+    payload = json.loads(line)
+    assert payload["job_id"] == job_id
+    assert payload["args"] == {"k": "v"}
+    assert payload["artifacts_dir"].endswith(job_id)
+    progress = [e for e in events if e["type"] == "progress"]
+    assert progress and progress[0]["message"] == "halfway"
+
+
+def test_client_library_errors_clearly_outside_the_app(client, auth, scripts_dir, monkeypatch):
+    """Run by hand with no sidecar env, the failure must name the cause."""
+    import importlib
+    import sys as _sys
+
+    lib_dir = Path(__file__).resolve().parent.parent / "python-sidecar"
+    _sys.path.insert(0, str(lib_dir))
+    try:
+        for var in ("CYLLAMA_SIDECAR_URL", "CYLLAMA_SIDECAR_TOKEN"):
+            monkeypatch.delenv(var, raising=False)
+        _sys.modules.pop("cyllama_desktop", None)
+        mod = importlib.import_module("cyllama_desktop")
+        with pytest.raises(mod.NotRunningUnderDesktop) as exc:
+            mod.app.models()
+        assert "cyllama-desktop" in str(exc.value)
+    finally:
+        _sys.modules.pop("cyllama_desktop", None)
+        _sys.path.remove(str(lib_dir))
+
+
+# ---------------------------------------------------------------------------
+# Packaging
+# ---------------------------------------------------------------------------
+
+
+def test_client_library_ships_next_to_the_sidecar():
+    lib = Path(__file__).resolve().parent.parent / "python-sidecar" / "cyllama_desktop.py"
+    assert lib.is_file(), "cyllama_desktop.py must sit next to sidecar.py"
+
+
+def test_example_scripts_are_valid_and_documented():
+    """Each example must parse, be discoverable, and explain itself.
+
+    The pane shows the module docstring as the description and derives
+    the id from the filename, so a missing docstring or a filename the
+    discovery regex rejects makes an example useless on arrival.
+    """
+    import ast
+    import re
+
+    d = Path(__file__).resolve().parent.parent / "resources" / "example-scripts"
+    files = sorted(d.glob("*.py"))
+    assert len(files) >= 5, "the shipped examples should cover the documented use cases"
+    for f in files:
+        src = f.read_text(encoding="utf-8")
+        tree = ast.parse(src)
+        assert re.match(r"^[A-Za-z][A-Za-z0-9_-]*$", f.stem), f"{f.name} would be skipped by discovery"
+        doc = ast.get_docstring(tree)
+        assert doc and len(doc.splitlines()) > 1, f"{f.name} needs a docstring with an args note"
+        assert "from cyllama_desktop import app" in src, f"{f.name} should show the client library"

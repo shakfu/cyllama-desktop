@@ -153,21 +153,22 @@
           </div>
         </div>
 
-        <!-- Sidecar log: lives inside .main-col so it's bounded by the
-             middle column rather than spanning the full window. Toggled
-             by the nav-rail Terminal button. Sits below the composer. -->
-        <section class="console" id="console" aria-hidden="true" hidden>
-          <header class="console-header">
-            <span class="console-title">Sidecar log</span>
-            <div class="console-actions">
-              <button class="icon-btn" id="consoleClear" title="Clear"><svg><use href="#i-trash"/></svg></button>
-              <button class="icon-btn" id="consoleClose" title="Close"><svg><use href="#i-chev-down"/></svg></button>
-            </div>
-          </header>
-          <div class="console-body" id="consoleBody"></div>
-        </section>
-
       </main>
+
+      <!-- Sidecar log: a drawer across the bottom of the whole shell, so
+           it stays reachable from the full-area panes. It used to live
+           inside .main-col, which the pane router hides outside the chat
+           view -- the toggle worked and the panel was invisible. -->
+      <section class="console" id="console" aria-hidden="true" hidden>
+        <header class="console-header">
+          <span class="console-title">Sidecar log</span>
+          <div class="console-actions">
+            <button class="icon-btn" id="consoleClear" title="Clear"><svg><use href="#i-trash"/></svg></button>
+            <button class="icon-btn" id="consoleClose" title="Close"><svg><use href="#i-chev-down"/></svg></button>
+          </div>
+        </header>
+        <div class="console-body" id="consoleBody"></div>
+      </section>
 
       <!-- Right: tabbed sidebar.
            Tab strip across the top, scrollable body per tab. Each tab body

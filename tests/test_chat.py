@@ -159,3 +159,41 @@ def test_supported_params_in_info(client, auth, sidecar_app):
     # _supported_gc_params returns empty -- _SUPPORTED_PARAMS is then
     # just ['stop_sequences']. We assert the shape, not contents.
     assert all(isinstance(s, str) for s in body["supported_params"])
+
+
+# ---------------------------------------------------------------------------
+# Model cache. The claim that matters for parameter sweeps
+# (docs/dev/scripting.md 5.1): varying sampling fields must not reload.
+# ---------------------------------------------------------------------------
+
+
+def _chat_once(client, auth, model_path, **params):
+    r = client.post("/chat", json={
+        "model_path": model_path,
+        "messages": [{"role": "user", "content": "hi"}],
+        "params": params,
+    }, headers=auth)
+    assert r.status_code == 200, r.text
+    r.read()
+    return r
+
+
+def test_sampling_params_do_not_reload_the_model(client, auth, fake_model, sidecar_app):
+    # Reach the stub through the sidecar module: pytest imports conftest
+    # under its own name, so importing it again would yield a second
+    # class object with its own (empty) instances list.
+    loads = sidecar_app.LLM.instances
+    loads.clear()
+    for temperature in (0.2, 0.7, 1.0):
+        for top_p in (0.9, 0.95):
+            _chat_once(client, auth, fake_model, temperature=temperature, top_p=top_p)
+    assert len(loads) == 1, "a sweep over sampling params must reuse one resident model"
+
+
+def test_load_time_params_do_reload_the_model(client, auth, fake_model, sidecar_app):
+    loads = sidecar_app.LLM.instances
+    loads.clear()
+    _chat_once(client, auth, fake_model, n_gpu_layers=10)
+    _chat_once(client, auth, fake_model, n_gpu_layers=20)
+    assert len(loads) == 2
+    assert loads[0].closed is True

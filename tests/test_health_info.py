@@ -70,3 +70,14 @@ def test_info_exposes_granular_agent_flags(client, auth):
     # into the conftest). Asserting key existence + value catches
     # accidental removal of the probe.
     assert feats.get("agents.rag_tool") is False
+
+
+def test_info_reports_workspace_dirs_and_runtime(client, auth, sidecar_app):
+    """Preferences renders these; a bug report and a failing script need them."""
+    sc = client.get("/info", headers=auth).json()["sidecar"]
+    assert sc["workflows_dir"] == str(sidecar_app.WORKFLOWS_DIR)
+    assert sc["scripts_dir"] == str(sidecar_app.SCRIPTS_DIR)
+    import sys
+    assert sc["python_bin"] == sys.executable
+    assert sc["python_version"].startswith("3.")
+    assert sc["site_packages"]

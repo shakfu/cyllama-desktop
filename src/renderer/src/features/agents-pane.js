@@ -35,6 +35,10 @@ const AGENT_TYPES = [
   { id: "agent-plan",     label: "agent-plan",     desc: "Planner emits ordered steps; an executor runs each step in sequence." },
   { id: "agent-reflect",  label: "agent-reflect",  desc: "Worker drafts; critic accepts or asks for revisions. Loops until accepted or budget hits." },
   { id: "agent-workflow", label: "agent-workflow", desc: "Run a workspace-scoped DAG workflow (Python files under <workspace>/workflows/)." },
+  // Not an agent type and not a slash command: a script is plain Python
+  // run as a job in a child process. It shares this pane because it
+  // shares the file-list / run / result shape.
+  { id: "scripts", label: "scripts", slash: false, desc: "Run a workspace Python script as a job (files under <workspace>/scripts/)." },
 ];
 
 
@@ -81,7 +85,25 @@ const state = {
   liveEvents: [],
   lastResult: null,
   currentJob: null,
+  // scripts row state:
+  scripts: [],
+  scriptsDir: "",
+  selectedScriptId: null,
+  scriptArgsText: "",
+  scriptArgsError: "",
+  // Log lines are kept here, not only in the DOM, so switching panes
+  // mid-run and coming back rebuilds what already arrived.
+  scriptLog: [],
+  scriptSeq: 0,
+  scriptStatus: "",
+  scriptResult: null,
+  scriptJob: null,
+  runningScriptId: null,
 };
+
+// Cap on retained log lines. The sidecar's own ring is 1000; this only
+// has to bound the DOM.
+const SCRIPT_LOG_MAX = 400;
 
 
 // ---------------------------------------------------------------------------
@@ -479,7 +501,7 @@ function renderSubnav() {
       id: `agt-row-${t.id}`,
       "data-agent-type": t.id,
       onclick: () => selectType(t.id),
-    }, el("span", {}, "/" + t.label));
+    }, el("span", {}, (t.slash === false ? "" : "/") + t.label));
     host.appendChild(row);
   }
 }
@@ -491,6 +513,7 @@ function selectType(id) {
   renderMain();
   renderDetail();
   if (id === "agent-workflow") refreshWorkflows();
+  if (id === "scripts") refreshScripts();
 }
 
 function renderMain() {
@@ -500,12 +523,16 @@ function renderMain() {
 
   const t = AGENT_TYPES.find((x) => x.id === state.selectedId) || AGENT_TYPES[0];
   host.appendChild(el("div", { class: "mp-main-head" },
-    el("h2", {}, "/" + t.label),
+    el("h2", {}, (t.slash === false ? "" : "/") + t.label),
     el("p", { class: "mp-main-doc" }, t.desc),
   ));
 
   if (t.id === "agent-workflow") {
     renderWorkflowMain(host);
+    return;
+  }
+  if (t.id === "scripts") {
+    renderScriptsMain(host);
     return;
   }
   // Common (tools + max_iterations) for every other agent type.
@@ -524,6 +551,10 @@ function renderDetail() {
 
   if (state.selectedId === "agent-workflow") {
     renderWorkflowDetail(host);
+    return;
+  }
+  if (state.selectedId === "scripts") {
+    renderScriptsDetail(host);
     return;
   }
   host.appendChild(el("div", { class: "rt-placeholder" },
@@ -771,6 +802,358 @@ async function runSelectedWorkflow() {
 }
 
 
+// ===========================================================================
+// scripts row: file list + args + Run / Cancel + streamed log
+//
+// A script is a child process, so unlike the agent rows there is real
+// output to stream and a real cancel. Log lines live in state as well as
+// the DOM: leaving the pane mid-run and coming back rebuilds them, and
+// /jobs/<id>/log fills any gap if the event stream was interrupted.
+// ===========================================================================
+
+function renderScriptsMain(host) {
+  const listSection = el("section", { class: "mp-section" },
+    el("h3", {}, "Script files"));
+  if (!state.scripts.length) {
+    listSection.appendChild(el("div", { class: "rt-placeholder" },
+      el("p", {}, "No script files found."),
+      el("p", { class: "ag-hint" },
+        "Author Python files under ",
+        el("code", {}, state.scriptsDir || "<workspace>/scripts/"),
+        ". Import ", el("code", {}, "cyllama_desktop"), " to reach the loaded model."),
+    ));
+  } else {
+    const fileList = el("div", { class: "agt-workflow-list" });
+    for (const sc of state.scripts) {
+      const isRunning = state.runningScriptId === sc.id;
+      const row = el("div", {
+        class: "mp-subnav-row scr-row" + (sc.id === state.selectedScriptId ? " active" : ""),
+        "data-script-id": sc.id,
+      });
+      const select = el("button", {
+        type: "button", class: "scr-select",
+        id: `scr-item-${sc.id}`,
+        disabled: sc.error ? true : undefined,
+        title: sc.error || sc.doc || "",
+      },
+        el("span", {}, sc.id),
+        el("span", { class: "mp-subnav-count" }, sc.error ? "error" : `${sc.bytes} B`),
+      );
+      if (!sc.error) select.addEventListener("click", () => selectScript(sc.id));
+      row.appendChild(select);
+      // Run where the script is, rather than past the docstring. Running
+      // an unselected row selects it first, which clears the arguments
+      // box -- so the arguments you can see are always the ones used.
+      if (!sc.error) {
+        row.appendChild(el("button", {
+          type: "button", class: "scr-run",
+          id: `scr-run-${sc.id}`,
+          disabled: (state.scriptJob && !isRunning) ? true : undefined,
+          title: isRunning ? "Cancel this run" : "Run this script",
+          onclick: () => (isRunning ? cancelScript() : runScript(sc.id)),
+        }, isRunning ? "Cancel" : "Run"));
+      }
+      fileList.appendChild(row);
+    }
+    listSection.appendChild(fileList);
+  }
+  listSection.appendChild(el("div", { style: "margin-top: 8px;" },
+    el("button", { class: "btn btn-mini", id: "scr-refresh",
+      onclick: () => refreshScripts() }, "Refresh"),
+  ));
+  host.appendChild(listSection);
+
+  if (!state.selectedScriptId) return;
+  const sc = state.scripts.find((x) => x.id === state.selectedScriptId);
+  if (!sc) return;
+
+  if (sc.doc) {
+    host.appendChild(el("section", { class: "mp-section" },
+      el("h3", {}, sc.id),
+      el("p", { class: "mp-main-doc" }, sc.doc),
+    ));
+  }
+
+  const argsArea = el("textarea", {
+    class: "dp-input scr-args", id: "scr-args", rows: 4,
+    spellcheck: "false",
+    placeholder: "{}",
+  });
+  argsArea.value = state.scriptArgsText;
+  argsArea.addEventListener("input", () => {
+    state.scriptArgsText = argsArea.value;
+    state.scriptArgsError = "";
+    const err = document.getElementById("scr-args-error");
+    if (err) err.textContent = "";
+  });
+
+  const running = Boolean(state.scriptJob);
+  const formHost = el("section", { class: "mp-section", id: "scr-form" },
+    el("h3", {}, "Arguments"),
+    el("p", { class: "ag-hint" }, "A JSON object, handed to the script on stdin. Leave empty for none."),
+    argsArea,
+    el("p", { class: "ag-error", id: "scr-args-error" }, state.scriptArgsError || ""),
+    el("div", { class: "ag-row" },
+      el("button", {
+        type: "button", class: "btn btn-primary", id: "scr-run",
+        disabled: running ? true : undefined,
+        onclick: () => runSelectedScript(),
+      }, "Run"),
+      el("button", {
+        type: "button", class: "btn btn-mini", id: "scr-cancel",
+        disabled: running ? undefined : true,
+        onclick: () => cancelScript(),
+      }, "Cancel"),
+      el("span", { class: "ag-hint", id: "scr-status" }, state.scriptStatus || ""),
+    ),
+  );
+  host.appendChild(formHost);
+
+  const logHost = el("div", { class: "agent-events scr-log", id: "scr-log" });
+  host.appendChild(el("section", { class: "mp-section", id: "scr-log-section" },
+    el("h3", {}, "Output"), logHost));
+  for (const line of state.scriptLog) logHost.appendChild(scriptLogRow(line));
+  logHost.scrollTop = logHost.scrollHeight;
+}
+
+function scriptLogRow(line) {
+  return el("div", { class: `ag-event ag-ev-${line.stream === "stderr" ? "error" : "log"}` },
+    el("span", { class: "ag-ev-type" }, line.stream || "out"),
+    el("span", { class: "ag-ev-content" }, line.message || ""),
+  );
+}
+
+function pushScriptLog(line) {
+  state.scriptLog.push(line);
+  if (state.scriptLog.length > SCRIPT_LOG_MAX) {
+    state.scriptLog.splice(0, state.scriptLog.length - SCRIPT_LOG_MAX);
+  }
+  const host = document.getElementById("scr-log");
+  if (!host) return;
+  host.appendChild(scriptLogRow(line));
+  while (host.childElementCount > SCRIPT_LOG_MAX) host.removeChild(host.firstChild);
+  host.scrollTop = host.scrollHeight;
+}
+
+function setScriptStatus(text) {
+  state.scriptStatus = text;
+  const node = document.getElementById("scr-status");
+  if (node) node.textContent = text;
+}
+
+function renderScriptsDetail(host) {
+  const r = state.scriptResult;
+  if (!r) {
+    host.appendChild(el("div", { class: "rt-placeholder" },
+      el("p", {}, "Run a script to see its result here.")));
+    return;
+  }
+  host.appendChild(el("div", { class: "ag-row" },
+    el("label", { class: "ag-label" }, "Status"),
+    el("span", {}, r.error ? "failed" : "succeeded")));
+  if (r.error) {
+    host.appendChild(el("div", { class: "mp-detail-section" },
+      el("h4", {}, "Error"), el("pre", { class: "ag-error" }, r.error)));
+    return;
+  }
+  host.appendChild(el("div", { class: "ag-row" },
+    el("label", { class: "ag-label" }, "Duration"),
+    el("span", {}, `${r.duration_s}s`)));
+  if (r.dropped_events) {
+    host.appendChild(el("div", { class: "ag-row" },
+      el("label", { class: "ag-label" }, "Dropped"),
+      el("span", {}, `${r.dropped_events} events`)));
+  }
+  if (r.result_error) {
+    host.appendChild(el("div", { class: "mp-detail-section" },
+      el("h4", {}, "result.json"), el("pre", { class: "ag-error" }, r.result_error)));
+  }
+  if (r.result != null) {
+    host.appendChild(el("div", { class: "mp-detail-section" },
+      el("h4", {}, "Result"), el("pre", {}, JSON.stringify(r.result, null, 2))));
+  }
+  const artifacts = r.artifacts || [];
+  if (artifacts.length) {
+    const list = el("div", { class: "mp-detail-section" }, el("h4", {}, "Artifacts"));
+    for (const a of artifacts) {
+      list.appendChild(el("div", { class: "ag-row" },
+        el("a", {
+          href: "#", class: "scr-artifact",
+          onclick: (e) => { e.preventDefault(); openScriptArtifact(r.job_id, a.name); },
+        }, a.name),
+        el("span", { class: "ag-hint" }, `${a.bytes} B`)));
+    }
+    host.appendChild(list);
+  }
+}
+
+async function openScriptArtifact(jobId, name) {
+  if (!jobId) return;
+  try {
+    const r = await sidecarFetch(`/artifacts/${jobId}/${encodeURIComponent(name)}`);
+    if (!r.ok) return;
+    const blob = await r.blob();
+    const url = URL.createObjectURL(blob);
+    window.open(url, "_blank");
+    // Revoke on the next tick; the new context has already taken it.
+    setTimeout(() => URL.revokeObjectURL(url), 10_000);
+  } catch (e) {
+    console.warn("agents-pane openScriptArtifact:", e);
+  }
+}
+
+function selectScript(id) {
+  if (state.selectedScriptId === id) return;
+  state.selectedScriptId = id;
+  state.scriptArgsText = "";
+  state.scriptArgsError = "";
+  renderMain();
+}
+
+async function refreshScripts() {
+  try {
+    const r = await sidecarFetch("/scripts");
+    if (!r.ok) {
+      state.scripts = []; state.scriptsDir = "";
+    } else {
+      const body = await r.json();
+      state.scripts = body.scripts || [];
+      state.scriptsDir = body.dir || "";
+    }
+  } catch (e) {
+    console.warn("agents-pane refreshScripts:", e);
+    state.scripts = [];
+  }
+  const validIds = state.scripts.filter((x) => !x.error).map((x) => x.id);
+  if (!state.selectedScriptId || !validIds.includes(state.selectedScriptId)) {
+    state.selectedScriptId = validIds[0] || null;
+  }
+  if (state.selectedId === "scripts") {
+    renderMain();
+    renderDetail();
+  }
+}
+
+// Fill gaps left by an interrupted event stream. The sidecar retains
+// recent progressive events per job; ``after`` asks for anything newer
+// than the last sequence number this pane rendered.
+async function catchUpScriptLog() {
+  const job = state.scriptJob;
+  if (!job) return;
+  try {
+    const r = await sidecarFetch(`/jobs/${job.id}/log?after=${state.scriptSeq}`);
+    if (!r.ok) return;
+    const body = await r.json();
+    for (const ev of body.events || []) applyScriptEvent(ev);
+  } catch (e) {
+    console.warn("agents-pane catchUpScriptLog:", e);
+  }
+}
+
+function applyScriptEvent(ev) {
+  if (typeof ev.seq === "number") {
+    if (ev.seq <= state.scriptSeq) return;   // already rendered
+    state.scriptSeq = ev.seq;
+  }
+  if (ev.type === "log") {
+    pushScriptLog({ stream: ev.stream || "stdout", message: ev.message || "" });
+  } else if (ev.type === "progress") {
+    const pct = typeof ev.value === "number" ? `${Math.round(ev.value * 100)}% ` : "";
+    setScriptStatus(pct + (ev.message || ""));
+  }
+}
+
+// Row Run: select the script if it is not current, then run it. The
+// selection change clears the arguments box, so a row button never runs
+// with arguments the user cannot see.
+async function runScript(id) {
+  if (state.scriptJob) return;
+  if (id !== state.selectedScriptId) selectScript(id);
+  await runSelectedScript();
+}
+
+async function runSelectedScript() {
+  if (!state.selectedScriptId || state.scriptJob) return;
+
+  let args = {};
+  const raw = (state.scriptArgsText || "").trim();
+  if (raw) {
+    try {
+      args = JSON.parse(raw);
+    } catch (e) {
+      state.scriptArgsError = `Invalid JSON: ${e.message}`;
+      renderMain();
+      return;
+    }
+    if (args === null || typeof args !== "object" || Array.isArray(args)) {
+      state.scriptArgsError = "Arguments must be a JSON object.";
+      renderMain();
+      return;
+    }
+  }
+
+  state.scriptLog = [];
+  state.scriptSeq = 0;
+  state.scriptResult = null;
+  state.scriptArgsError = "";
+  setScriptStatus("starting...");
+  renderDetail();
+
+  let job;
+  try {
+    job = await startJob("script/run", { script_id: state.selectedScriptId, args });
+  } catch (e) {
+    state.scriptResult = { error: e.message || String(e) };
+    setScriptStatus("");
+    renderMain();
+    renderDetail();
+    return;
+  }
+  state.scriptJob = job;
+  state.runningScriptId = state.selectedScriptId;
+  renderMain();
+  setScriptStatus("running");
+  // The event stream attaches a moment after the job starts, and the
+  // sidecar does not queue progressive events for an absent subscriber.
+  // Pull anything emitted in that window from the ring.
+  catchUpScriptLog();
+
+  const off = job.onEvent((ev) => {
+    if (ev.type === "log" || ev.type === "progress") {
+      applyScriptEvent(ev);
+    } else if (ev.type === "result") {
+      state.scriptResult = { ...(ev.result || {}), job_id: job.id };
+      renderDetail();
+    } else if (ev.type === "error") {
+      state.scriptResult = { error: ev.message || "unknown error", job_id: job.id };
+      renderDetail();
+    } else if (ev.type === "cancelled") {
+      setScriptStatus("cancelled");
+    }
+  });
+  try { await job.done; }
+  catch (e) {
+    if (!state.scriptResult) {
+      state.scriptResult = { error: e.message || String(e), job_id: job.id };
+      renderDetail();
+    }
+  } finally {
+    off();
+    state.scriptJob = null;
+    state.runningScriptId = null;
+    setScriptStatus(state.scriptResult && state.scriptResult.error ? "failed" : "done");
+    renderMain();
+  }
+}
+
+async function cancelScript() {
+  const job = state.scriptJob;
+  if (!job) return;
+  setScriptStatus("cancelling...");
+  await job.cancel();
+}
+
+
 // ---------------------------------------------------------------------------
 // Public getters -- consumed by main.js's slash handlers.
 // ---------------------------------------------------------------------------
@@ -915,6 +1298,10 @@ export async function show() {
   renderSubnav(); renderMain(); renderDetail();
   if (state.selectedId === "agent-workflow") {
     await refreshWorkflows();
+  }
+  if (state.selectedId === "scripts") {
+    await refreshScripts();
+    await catchUpScriptLog();
   }
 }
 

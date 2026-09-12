@@ -19,8 +19,15 @@ function pickPython() {
   // -e python-sidecar`` already has them; CI installs them
   // explicitly.
   if (process.env.CYLLAMA_E2E_PYTHON) return process.env.CYLLAMA_E2E_PYTHON;
-  // Prefer the bundled env if it exists -- it has FastAPI + uvicorn
-  // wired up via build-python-env.sh, so no system pip is needed.
+  // The test venv first: the stub sidecar imports tests/conftest.py,
+  // which imports pytest at module level, and pytest deliberately does
+  // not live in the bundled env (see the Makefile's tests section). The
+  // venv borrows that env, so FastAPI and uvicorn come with it.
+  const testenv = path.join(ROOT, "build", "testenv",
+    process.platform === "win32" ? "Scripts/python.exe" : "bin/python3");
+  if (fs.existsSync(testenv)) return testenv;
+  // Then the bundled env -- it has FastAPI + uvicorn wired up via
+  // build-python-env.sh, so no system pip is needed.
   const arch = process.arch === "arm64" ? "arm64" : "x64";
   const plat = process.platform === "darwin" ? "mac"
              : process.platform === "win32" ? "win" : "linux";

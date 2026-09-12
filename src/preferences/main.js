@@ -180,6 +180,35 @@ function fmtBackends(b) {
   return on.length ? on.join(", ") : "(none enabled)";
 }
 
+
+// One key/value row holding a filesystem path. The path itself reveals
+// in the file manager; the adjacent button copies it, which is what a
+// bug report or a shell command needs.
+function appendPathRow(host, label, value) {
+  if (!value) return;
+  host.appendChild(el("div", { class: "k" }, label));
+  const copyBtn = el("button", {
+    type: "button", class: "prefs-copy", title: "Copy path",
+  }, "copy");
+  copyBtn.addEventListener("click", async () => {
+    try {
+      await navigator.clipboard.writeText(value);
+      copyBtn.textContent = "copied";
+      setTimeout(() => { copyBtn.textContent = "copy"; }, 1200);
+    } catch {
+      copyBtn.textContent = "failed";
+      setTimeout(() => { copyBtn.textContent = "copy"; }, 1200);
+    }
+  });
+  host.appendChild(el("div", { class: "v mono prefs-path" },
+    el("button", {
+      type: "button", class: "prefs-link",
+      title: "Reveal in file manager",
+      onclick: () => window.cyllama.revealItem && window.cyllama.revealItem(value),
+    }, value),
+    copyBtn,
+  ));
+}
 function renderSidecarTab() {
   const host = document.getElementById("prefsSidecar");
   if (!host) return;
@@ -208,19 +237,25 @@ function renderSidecarTab() {
     ["artifacts_dir", "artifacts"],
     ["rag_dir", "rag"],
     ["uploads_dir", "uploads"],
+    ["workflows_dir", "workflows"],
+    ["scripts_dir", "scripts"],
   ]) {
-    const v = sc[k];
-    if (!v) continue;
-    paths.appendChild(el("div", { class: "k" }, label));
-    paths.appendChild(el("div", { class: "v mono" },
-      el("button", {
-        type: "button", class: "prefs-link",
-        title: "Reveal in file manager",
-        onclick: () => window.cyllama.revealItem && window.cyllama.revealItem(v),
-      }, v),
-    ));
+    appendPathRow(paths, label, sc[k]);
   }
   host.appendChild(paths);
+
+  // Runtime. Diagnostics for bug reports and for scripts, which run in
+  // a child of this interpreter -- an import that fails there is asking
+  // which environment it ran in.
+  host.appendChild(el("h3", { class: "prefs-section" }, "Runtime"));
+  const runtime = el("div", { class: "prefs-kv" });
+  if (sc.python_version) {
+    runtime.appendChild(el("div", { class: "k" }, "python"));
+    runtime.appendChild(el("div", { class: "v" }, sc.python_version));
+  }
+  appendPathRow(runtime, "interpreter", sc.python_bin);
+  appendPathRow(runtime, "packages", sc.site_packages);
+  host.appendChild(runtime);
 
   // Devices.
   const devices = Array.isArray(info.devices) ? info.devices : [];

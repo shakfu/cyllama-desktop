@@ -3,7 +3,7 @@
 # release.yml.
 #
 # Each job runs on a host matching its target: build-python-env.sh
-# cannot cross-build. The matrix lists only combinations cyllama 0.4.5
+# cannot cross-build. The matrix lists only combinations cyllama
 # publishes a wheel for (see VARIANTS in scripts/set-cyllama-variant.py).
 # macOS arm64 builds cpu only; that wheel already includes Metal.
 #

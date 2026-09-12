@@ -1,6 +1,6 @@
 appId: com.shakfu.cyllama-desktop
 productName: Cyllama Desktop
-artifactName: ${name}-${version}-cyllama-0.4.5-metal-${arch}.${ext}
+artifactName: ${name}-${version}-cyllama-0.4.6-metal-${arch}.${ext}
 directories:
   output: dist
   buildResources: resources
@@ -21,10 +21,17 @@ extraResources:
   - from: "python-sidecar"
     to: "python-sidecar"
     filter:
+      # cyllama_desktop.py is the client library scripts import; it is put
+      # on the child process's PYTHONPATH from this directory.
       - "sidecar.py"
-  # Phase D: example workflows seeded into the workspace on first launch.
+      - "cyllama_desktop.py"
+  # Examples seeded into the workspace on first launch.
   - from: "resources/example-workflows"
     to: "example-workflows"
+    filter:
+      - "*.py"
+  - from: "resources/example-scripts"
+    to: "example-scripts"
     filter:
       - "*.py"
 

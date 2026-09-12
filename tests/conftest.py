@@ -1309,6 +1309,7 @@ def sidecar_app(tmp_path, monkeypatch):
     monkeypatch.setenv("CYLLAMA_SIDECAR_MODELS", str(tmp_path / "models"))
     monkeypatch.setenv("CYLLAMA_SIDECAR_RAG", str(tmp_path / "rag"))
     monkeypatch.setenv("CYLLAMA_SIDECAR_UPLOADS", str(tmp_path / "uploads"))
+    monkeypatch.setenv("CYLLAMA_SIDECAR_SCRIPTS", str(tmp_path / "scripts"))
 
     sidecar_path = Path(__file__).resolve().parent.parent / "python-sidecar"
     sys.path.insert(0, str(sidecar_path))
@@ -1354,6 +1355,22 @@ def sidecar_app(tmp_path, monkeypatch):
 def client(sidecar_app):
     from fastapi.testclient import TestClient
     return TestClient(sidecar_app.app)
+
+
+@pytest.fixture()
+def live_client(sidecar_app):
+    """TestClient whose event loop spans the whole test, not one request.
+
+    A bare TestClient starts a portal per request, so a job task created
+    during a POST is cancelled when that request's loop goes away. Most
+    job tests never notice: their producers are stub-driven and finish
+    inside the POST. A script job spawns a child process and genuinely
+    outlives the request, so it needs the client entered as a context
+    manager.
+    """
+    from fastapi.testclient import TestClient
+    with TestClient(sidecar_app.app) as c:
+        yield c
 
 
 @pytest.fixture()

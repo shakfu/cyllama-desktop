@@ -13,7 +13,7 @@ PBS_RELEASE="${PBS_RELEASE:-20241016}"
 # Pin cyllama so a re-bundle is reproducible. Bump deliberately when a
 # new release exposes APIs we want; the renderer auto-adapts to whatever
 # fields cyllama.GenerationConfig accepts (see _build_config and /info).
-CYLLAMA_VERSION="${CYLLAMA_VERSION:-0.4.5}"
+CYLLAMA_VERSION="${CYLLAMA_VERSION:-0.4.6}"
 
 # Detect target triple if not provided.
 detect_triple() {

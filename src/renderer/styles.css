@@ -105,6 +105,9 @@ svg circle, svg rect, svg polygon { fill: none; }
 .app {
   display: grid;
   grid-template-columns: var(--col-rail) var(--col-sidebar) 1fr var(--col-panel);
+  /* Row 2 holds the console drawer. It is ``auto``, so it collapses to
+     nothing while the console is hidden. */
+  grid-template-rows: 1fr auto;
   height: 100vh;
   transition: grid-template-columns 200ms ease;
 }
@@ -145,7 +148,7 @@ svg circle, svg rect, svg polygon { fill: none; }
   /* Subnav | Table | Detail rail. Subnav fixed, detail rail fixed,
      table flexes to fill. */
   grid-template-columns: 200px 1fr 360px;
-  height: 100vh;
+  height: 100%;
   background: var(--bg);
 }
 /* Workflows pane mirrors the Models layout: hide the chat layout
@@ -163,7 +166,7 @@ svg circle, svg rect, svg polygon { fill: none; }
 .app[data-pane="agents"] .app-pane[data-pane-view="agents"] {
   display: grid;
   grid-template-columns: 220px 1fr 320px;
-  height: 100vh;
+  height: 100%;
   background: var(--bg);
 }
 
@@ -1015,9 +1018,11 @@ dialog.agent-modal .agent-modal-actions {
    Console (sidecar log panel)
    ============================================================ */
 .console {
-  /* In-flow at the bottom of the chat main column, below the composer.
-     ``.main-col`` is a flex column already; this just sits as the last
-     child and takes up to 38vh / down to 160px. */
+  /* Bottom drawer across the whole shell, so it is reachable from the
+     full-area panes and not just the chat column. Takes up to 38vh /
+     down to 160px. */
+  grid-column: 1 / -1;
+  grid-row: 2;
   display: flex;
   flex-direction: column;
   border-top: 1px solid var(--border);
@@ -1060,7 +1065,10 @@ dialog.agent-modal .agent-modal-actions {
   border: 2px solid var(--bg-sunken);
 }
 .console-body .log-line { color: var(--fg); }
-.console-body .log-line.err { color: var(--error); }
+/* No colour by stream. ggml and llama.cpp write all of their output to
+   stderr, including the load banner on a clean run, so painting stderr
+   red made a successful sweep look like twenty errors. The ``.err``
+   class still records which pipe a line came from. */
 .console-body .log-line .ts {
   color: var(--fg-faint);
   margin-right: 8px;
@@ -1871,6 +1879,47 @@ details.rt-collapsible > summary > .icon-btn { margin-right: 4px; }
   display: flex; flex-direction: column; gap: 4px;
   margin-top: 6px;
 }
+
+/* Scripts row in the Agents pane. The log reuses the .ag-event palette
+   above (stderr lines take .ag-ev-error) and scrolls independently --
+   a child process can emit far more than an agent trace. */
+/* Script row: name and size select, the trailing button runs. Putting
+   Run on the row means it is reachable without scrolling past a long
+   docstring to the Arguments section. */
+.scr-row { gap: 8px; }
+.scr-select {
+  appearance: none;
+  flex: 1; min-width: 0;
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  background: transparent; border: 0; padding: 0;
+  color: inherit; font: inherit;
+  cursor: pointer; text-align: left;
+}
+.scr-select:disabled { cursor: default; opacity: 0.6; }
+.scr-run {
+  appearance: none;
+  flex: 0 0 auto;
+  background: var(--bg); border: 1px solid var(--border); border-radius: 4px;
+  color: var(--fg); font: inherit; font-size: 11px;
+  padding: 2px 10px; cursor: pointer;
+}
+.scr-run:hover:not(:disabled) { border-color: var(--border-strong, var(--border)); }
+.scr-run:disabled { opacity: 0.45; cursor: default; }
+.mp-subnav-row.active .scr-run {
+  background: transparent;
+  border-color: rgba(255, 255, 255, 0.55);
+  color: white;
+}
+
+.scr-args {
+  width: 100%; resize: vertical;
+  font-family: var(--mono, monospace); font-size: 12px;
+}
+.scr-log {
+  max-height: 320px; overflow-y: auto;
+  font-family: var(--mono, monospace);
+}
+.scr-artifact { color: var(--accent); cursor: pointer; }
 
 /* Transcribe + Image sidebar views reuse the .dp-* primitives that the
    Documents pane defines; only the narrow-sidebar overrides + truly

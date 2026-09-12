@@ -182,21 +182,22 @@ function resolveSidecarScript() {
   return path.join(__dirname, "..", "..", "python-sidecar", "sidecar.py");
 }
 
-// Locate the shipped example-workflows directory. In dev the dir lives
-// alongside the repo root under resources/; in packaged builds
-// electron-builder copies it under process.resourcesPath via the
-// ``extraResources`` map in electron-builder.yml.
-function resolveExampleWorkflowsDir() {
+// Locate a shipped examples directory by name ("example-workflows",
+// "example-scripts"). In dev the dir lives alongside the repo root under
+// resources/; in packaged builds electron-builder copies it under
+// process.resourcesPath via the ``extraResources`` map in
+// electron-builder.yml.
+function resolveExamplesDir(name) {
   if (app.isPackaged) {
-    return path.join(process.resourcesPath, "example-workflows");
+    return path.join(process.resourcesPath, name);
   }
-  return path.join(__dirname, "..", "..", "resources", "example-workflows");
+  return path.join(__dirname, "..", "..", "resources", name);
 }
 
-// Copy example workflows into the workspace's workflows/ dir on first
-// launch. Idempotent via a ``.seeded`` marker so a user who deletes
-// the seeded files doesn't get them back on next launch.
-function seedExampleWorkflows(targetDir) {
+// Copy shipped examples into a workspace dir on first launch.
+// Idempotent via a ``.seeded`` marker so a user who deletes the seeded
+// files doesn't get them back on next launch.
+function seedExamples(name, targetDir) {
   try {
     // Skip under the e2e harness so a stub-backed sidecar isn't asked
     // to import real-cyllama-flavoured workflow files (the conftest
@@ -204,7 +205,7 @@ function seedExampleWorkflows(targetDir) {
     if (process.env.CYLLAMA_E2E_LAUNCHER) return;
     const marker = path.join(targetDir, ".seeded");
     if (fs.existsSync(marker)) return;
-    const src = resolveExampleWorkflowsDir();
+    const src = resolveExamplesDir(name);
     if (!fs.existsSync(src)) {
       // No examples shipped (dev checkout without resources, or tests
       // pointing at a stripped tree) -- still write the marker so we
@@ -225,7 +226,7 @@ function seedExampleWorkflows(targetDir) {
   } catch (e) {
     // Seeding is a best-effort UX nicety. A failure shouldn't break
     // sidecar startup; surface it on the main-process log instead.
-    console.warn("[main] seedExampleWorkflows failed:", e && e.message ? e.message : e);
+    console.warn(`[main] seedExamples(${name}) failed:`, e && e.message ? e.message : e);
   }
 }
 
@@ -278,11 +279,16 @@ async function startSidecar() {
   // here; the sidecar imports them on demand for /workflows + /jobs/workflow/run.
   const workflowsDir = path.join(workspaceDir(), "workflows");
   fs.mkdirSync(workflowsDir, { recursive: true });
-  // First-launch seeding: copy example workflows from resources/
-  // into the workspace's workflows/ dir, once. A ``.seeded`` marker
-  // file records that we did this so a user who later empties the
-  // directory doesn't get the examples re-pushed back in on next launch.
-  seedExampleWorkflows(workflowsDir);
+  // Workspace-scoped script files. Users author Python here; the sidecar
+  // runs them as child processes for /scripts + /jobs/script/run.
+  const scriptsDir = path.join(workspaceDir(), "scripts");
+  fs.mkdirSync(scriptsDir, { recursive: true });
+  // First-launch seeding: copy examples from resources/ into the
+  // workspace, once. A ``.seeded`` marker file records that we did this
+  // so a user who later empties a directory doesn't get the examples
+  // re-pushed back in on next launch.
+  seedExamples("example-workflows", workflowsDir);
+  seedExamples("example-scripts", scriptsDir);
 
   sidecarProc = spawn(pythonBin, [script], {
     env: {
@@ -295,6 +301,7 @@ async function startSidecar() {
       CYLLAMA_SIDECAR_RAG: ragDir,
       CYLLAMA_SIDECAR_UPLOADS: uploadsDir,
       CYLLAMA_SIDECAR_WORKFLOWS: workflowsDir,
+      CYLLAMA_SIDECAR_SCRIPTS: scriptsDir,
       // Additional read-only model search roots from Preferences.
       // Joined with the OS path delimiter (':' on Unix, ';' on Windows).
       // Empty when the user hasn't added any extras.

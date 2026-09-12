@@ -5,6 +5,8 @@
 // flag wiring regressed and the pane stayed hidden" -- *not* to
 // exercise the full feature path (the pytest suite covers that).
 
+const fs = require("fs");
+const path = require("path");
 const { test, expect } = require("@playwright/test");
 const { launchApp, openSidebarView, openRightTab } = require("./_harness.js");
 
@@ -394,6 +396,82 @@ test("Agents nav-button surfaces and pane renders six agent rows", async () => {
   }
   // Default selection is /agent (plain ReAct).
   await expect(window.locator("#agt-row-agent.active")).toBeVisible();
+});
+
+test("Preferences Sidecar tab lists workspace paths and the runtime", async () => {
+  ctx = await launchApp();
+  const { electron, window } = ctx;
+  await window.evaluate(() => window.cyllama.openPreferences());
+  const prefs = await electron.waitForEvent("window");
+  await prefs.waitForLoadState("domcontentloaded");
+  await prefs.click('[data-prefs-tab="sidecar"]');
+
+  const pane = prefs.locator("#prefsSidecar");
+  // Workspace dirs, including the two the scripts work added.
+  for (const label of ["models", "artifacts", "rag", "uploads", "workflows", "scripts"]) {
+    await expect(pane).toContainText(label, { timeout: 15_000 });
+  }
+  // Runtime diagnostics: which interpreter runs the sidecar and its scripts.
+  await expect(pane).toContainText("interpreter");
+  await expect(pane).toContainText("packages");
+  await expect(pane.locator(".prefs-copy").first()).toBeVisible();
+});
+
+test("Console opens in the chat pane and in a full-area pane", async () => {
+  ctx = await launchApp();
+  const { window } = ctx;
+  const drawer = window.locator("#console");
+  await expect(drawer).toBeHidden();
+
+  // Chat pane: the case that always worked.
+  await window.click("#navConsole");
+  await expect(drawer).toBeVisible();
+  await window.click("#navConsole");
+  await expect(drawer).toBeHidden();
+
+  // Agents pane hides .main-col, which used to contain the console --
+  // the toggle flipped [hidden] on an element inside a display:none
+  // ancestor, so nothing appeared.
+  await window.click("#navAgents");
+  await expect(window.locator("#app")).toHaveAttribute("data-pane", "agents");
+  await window.click("#navConsole");
+  await expect(drawer).toBeVisible();
+  await expect(window.locator("#agentsPane")).toBeVisible();
+});
+
+test("Scripts row lists a workspace script and streams its run", async () => {
+  ctx = await launchApp();
+  const { window, userDataDir } = ctx;
+  // Drop a script into the workspace the app just created. Seeding of
+  // the shipped examples is skipped under the e2e harness, so this is
+  // the only file the pane should list.
+  const scriptsDir = path.join(userDataDir, "workspaces", "default", "scripts");
+  fs.mkdirSync(scriptsDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(scriptsDir, "smoke.py"),
+    '"""Smoke script."""\nprint("hello from the script")\n',
+  );
+
+  await window.click("#navAgents");
+  const row = window.locator("#agt-row-scripts");
+  await expect(row).toBeVisible({ timeout: 15_000 });
+  await row.click();
+  await window.click("#scr-refresh");
+  await window.click("#scr-item-smoke");
+  await expect(window.locator("#agentsPaneMain")).toContainText("Smoke script.");
+
+  // Run from the script's own row, without scrolling to the Arguments
+  // section at the bottom.
+  await window.click("#scr-run-smoke");
+  await expect(window.locator("#scr-log"))
+    .toContainText("hello from the script", { timeout: 30_000 });
+  await expect(window.locator("#agentsPaneDetail"))
+    .toContainText("succeeded", { timeout: 30_000 });
+
+  // The bottom Run is the same action for the selected script.
+  await window.click("#scr-run");
+  await expect(window.locator("#agentsPaneDetail"))
+    .toContainText("succeeded", { timeout: 30_000 });
 });
 
 test("/agent-reflect slash + Reflection section render when feature is on", async () => {

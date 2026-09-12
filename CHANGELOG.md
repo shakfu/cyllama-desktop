@@ -4,6 +4,45 @@ All notable changes to cyllama-desktop are documented here. The format is based 
 
 ## [Unreleased]
 
+## [0.3.0]
+
+### Changed
+
+- **The script client library dropped its one third-party dependency.** `cyllama_desktop` was written against `httpx` and broke on the first bundled-cyllama bump: 0.4.6 pulls openai 3.x and anthropic 1.x, which moved to `httpx2`, so plain `httpx` stopped being installed and every script died on import. It is stdlib `urllib` now. Scripts inherit whatever this module imports and the bundled environment is not a stable API -- urllib cannot be uninstalled out from under a script. The public API is unchanged.
+
+### Added
+
+- **Model loads and evictions are logged.** `[llm] loading <path>` and `[llm] evicting <path>` on the sidecar log. cyllama silences llama.cpp's own loader output, so there was previously no way to tell one model load from fifty -- which is the whole question a parameter sweep asks.
+
+- **Preferences > Sidecar lists every workspace path and the runtime behind them.** The workflows and scripts directories join models/artifacts/rag/uploads, and a Runtime block names the Python version, the interpreter running the sidecar, and its site-packages. Each path reveals in the file manager on click and has a copy button. The interpreter matters because scripts run in a child of it: an import that fails there needs to say which environment it ran in. These are diagnostics, not an API -- nothing about the bundle layout is promised.
+
+- **Workspace scripts.** A `.py` file under `<workspace>/scripts/` now runs as a job from the Agents pane: streamed stdout and stderr, a working cancel, a timeout, and any file it writes served as a job artifact. The script runs in a child process with the bundled interpreter and reaches the app back over the loopback API, so `app.chat()` uses the model the sidecar already has resident -- a 50-cell parameter sweep pays one model load instead of fifty. A child rather than in-process execution (which is how workflow files run): a segfault in cyllama's native layer would otherwise take the sidecar down with every chat and loaded model, and Python cannot interrupt a thread parked in llama.cpp, so cancel would report success while the work continued. Cancel reaches the whole process tree, so a script that spawns its own children does not leave them behind: a process group on POSIX, a kill-on-close job object on Windows. The Windows path is written but unverified -- CI runs pytest on Linux only, and the cancel test's liveness probe is POSIX-only.
+
+  The client library ships as `cyllama_desktop` and wraps app state only -- the resident model, the model list, RAG retrieval, progress, artifacts. A script wanting low-level control imports cyllama directly and gets the real thing.
+
+  ```python
+  from cyllama_desktop import app
+
+  for temperature in (0.2, 0.7, 1.0):
+      app.progress(message=f"temperature={temperature}")
+      print(app.chat("name three primes", temperature=temperature))
+  app.set_result({"done": True})
+  ```
+
+  Scripts run with the user's full privileges. The child process buys crash containment and a real cancel, not a sandbox. Five examples seed into the workspace on first launch: `sweep.py` (sampling grid), `eval_prompts.py` (expected-substring checks), `prompt_ab.py` (two system prompts over one question set), `model_triage.py` (tokens/sec per model), and `rag_audit.py` (which questions a collection cannot answer, retrieval only, no model loaded). A workspace that already has the seed marker keeps whatever is in it; copy new examples in by hand. Design, alternatives, and risks: `docs/dev/scripting.md`.
+
+### Fixed
+
+- **`make python` did nothing after a version bump.** `$(PY_BIN)` was a file target with no prerequisites, so make saw the interpreter already existed and stopped -- a bumped `CYLLAMA_VERSION` or a switched backend variant stayed unbuilt, silently, until someone deleted the directory by hand. It now depends on `scripts/build-python-env.sh` and `python-sidecar/pyproject.toml`, the two files that determine what the env contains.
+
+- **`make test` installed pytest and httpx into the env that gets packaged.** Test dependencies now go in `build/testenv`, a venv borrowing the bundled env via `--system-site-packages`, so packages the app already has resolve as satisfied and only the test-only ones land in the venv. Beyond shipping pytest inside the dmg, the old behaviour masked a real break: when a rebuild dropped `httpx`, the next `make test` put it back before anything noticed the script client library no longer had it. `--without-pip` because `build-python-env.sh` prunes `ensurepip`; the base env's pip installs into the venv when run under the venv's interpreter. The Playwright harness prefers this venv too, since the stub sidecar imports `tests/conftest.py`, which imports pytest.
+
+- **`pip install ./python-sidecar` stopped working once the client library shipped.** Two top-level modules in one flat-layout directory (`sidecar.py` and `cyllama_desktop.py`) makes setuptools refuse to guess -- "Multiple top-level modules discovered". `pyproject.toml` now declares `py-modules` explicitly. Nothing in day-to-day work touches that install, so it surfaced only on a full `build-python-env.sh` run, which is what CI does for every published variant.
+
+- **The Console could not be opened from the Agents or Models pane.** `#console` lived inside `.main-col`, which the pane router sets to `display: none` outside the chat view, so the nav-rail button flipped `[hidden]` on an element whose ancestor was already hidden -- the toggle worked and nothing appeared. It is now a drawer across the bottom of the whole shell, in a second grid row that collapses to zero while hidden. This matters more than it did: a script run is the case where you most want the log, and scripts live in the Agents pane. Log lines are also no longer coloured by stream -- ggml and llama.cpp write everything to stderr, so a clean run rendered as twenty red error lines.
+
+- **A job could stall forever when its event subscriber went away.** Job events went onto a 1024-entry `asyncio.Queue` that the producer *awaited*, while `/jobs/{id}/events` accepts one subscriber and never replays. A client that started a job and then dropped the stream left the producer blocked on a full queue with no error and no timeout -- the job simply stopped. Workflow, batch, ingest and quantize jobs were all exposed; none emitted enough events to hit it in practice, and a script's stdout does. Events now go into a deque the producer can always append to: overflow evicts the oldest display-only event (`log`, `progress`, `trace`) and counts it, while terminal events (`result`, `error`, `cancelled`, `done`) are never dropped, since a lost `done` leaves a client waiting. Each job also retains its recent events, replayed by `GET /jobs/{id}/log?after=<seq>` for a client that attached late or lost its stream.
+
 ## [0.2.1]
 
 ### Fixed

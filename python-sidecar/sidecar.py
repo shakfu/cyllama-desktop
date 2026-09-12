@@ -9,6 +9,7 @@ Started by the Electron main process with these env vars:
 from __future__ import annotations
 
 import asyncio
+import ast
 import importlib
 import inspect
 import json
@@ -17,9 +18,11 @@ import re
 import shutil
 import signal
 import sys
+import sysconfig
 import threading
 import time
 import uuid
+from collections import deque
 from pathlib import Path
 from typing import Any, Optional
 
@@ -742,6 +745,25 @@ WORKFLOWS_DIR = Path(
 ).resolve()
 WORKFLOWS_DIR.mkdir(parents=True, exist_ok=True)
 
+# Workspace-scoped script files. Each *.py is user-authored code run as a
+# job in a child process (see the scripts section further down, and
+# docs/dev/scripting.md).
+#
+# Trust boundary: a script runs with the user's full privileges -- it can
+# import cyllama, read any file the user can read, and reach the network.
+# Nothing in-language can restrict that. The child process is what buys
+# us crash containment and a working cancel, not a sandbox.
+SCRIPTS_DIR = Path(
+    os.environ.get("CYLLAMA_SIDECAR_SCRIPTS")
+    or (Path.home() / ".cache" / "cyllama-desktop" / "scripts")
+).resolve()
+SCRIPTS_DIR.mkdir(parents=True, exist_ok=True)
+
+# The client library a script imports as ``cyllama_desktop``. It ships
+# next to this file, in the repo and under <Resources>/python-sidecar in
+# the packaged app, and is put on the child's PYTHONPATH.
+_CLIENT_LIB_DIR = Path(__file__).resolve().parent
+
 # HF cache locations to enumerate read-only as a secondary listing. Both
 # the llama.cpp-flavoured cache and the standard HuggingFace hub cache
 # are scanned; missing dirs are silently skipped.
@@ -793,17 +815,26 @@ _llm_hw_sig: tuple = ()
 
 
 def _get_llm(model_path: str, params: dict | None = None) -> LLM:
+    """Return the resident LLM, loading it only when the slot cannot serve.
+
+    Loads and evictions are logged. cyllama silences llama.cpp's own
+    loader output, so without these lines there is no way to tell one
+    load from fifty -- which is exactly the question a parameter sweep
+    is asking (docs/dev/scripting.md 5.1).
+    """
     global _llm, _llm_path, _llm_hw_sig
     hw_sig = _hw_signature(params)
     with _llm_lock:
         if _llm is not None and _llm_path == model_path and _llm_hw_sig == hw_sig:
             return _llm
         if _llm is not None:
+            print(f"[llm] evicting {_llm_path}", file=sys.stderr, flush=True)
             try:
                 _llm.close()
             except Exception:
                 pass
             _llm = None
+        print(f"[llm] loading {model_path}", file=sys.stderr, flush=True)
         if not os.path.isfile(model_path):
             raise HTTPException(status_code=400, detail=f"model not found: {model_path}")
         # Build a load-only config: only fields cyllama actually takes,
@@ -893,6 +924,16 @@ _INFO_CACHE: dict = {
         "models_extra": [str(p) for p in MODELS_EXTRA],
         "rag_dir": str(RAG_DIR),
         "uploads_dir": str(UPLOADS_DIR),
+        "workflows_dir": str(WORKFLOWS_DIR),
+        "scripts_dir": str(SCRIPTS_DIR),
+        # Diagnostics, deliberately not an API: which interpreter runs the
+        # sidecar and the scripts it spawns, and where its packages live.
+        # Worth a row in Preferences because a script that dies on an
+        # import needs to say which environment it ran in, and a bug
+        # report needs the same. Nothing about this layout is promised.
+        "python_bin": sys.executable,
+        "python_version": sys.version.split()[0],
+        "site_packages": sysconfig.get_paths()["purelib"],
     },
     # Subset of _ALLOWED_PARAMS that ``GenerationConfig`` in the
     # installed cyllama actually accepts. Renderer hides UI rows whose
@@ -988,10 +1029,17 @@ def register_job_kind(name: str) -> None:
     _JOB_KINDS.add(name)
 
 
+# Progressive events retained per job so a client that re-attaches can
+# rebuild what it missed. 1000 entries is ~10s of a chatty script's
+# stdout; jobs are GC'd an hour after they finish (_JOB_DONE_TTL_SECONDS).
+_JOB_LOG_RING = 1000
+
+
 class Job:
     __slots__ = (
         "id", "kind", "state", "created_at", "updated_at", "task",
-        "queue", "subscribers", "result", "error", "artifact_path",
+        "pending", "wake", "subscribers", "result", "error", "artifact_path",
+        "log", "dropped", "seq",
     )
 
     def __init__(self, kind: str) -> None:
@@ -1001,13 +1049,19 @@ class Job:
         self.created_at = time.time()
         self.updated_at = self.created_at
         self.task: Optional[asyncio.Task] = None
-        # Bounded so a runaway producer can't grow memory unboundedly. Events
-        # past the cap block the producer until subscribers drain.
-        self.queue: asyncio.Queue = asyncio.Queue(maxsize=1024)
+        # Events awaiting the subscriber. A deque rather than a Queue so
+        # the producer never blocks: overflow evicts the oldest
+        # progressive event instead of waiting for someone to drain.
+        self.pending: deque = deque()
+        self.wake: asyncio.Event = asyncio.Event()
         self.subscribers: int = 0
         self.result: Any = None
         self.error: Optional[str] = None
         self.artifact_path: Optional[Path] = None
+        # Ring of recent progressive events, replayed by /jobs/{id}/log.
+        self.log: deque = deque(maxlen=_JOB_LOG_RING)
+        self.dropped: int = 0
+        self.seq: int = 0
 
     def to_dict(self) -> dict:
         return {
@@ -1019,6 +1073,7 @@ class Job:
             "hasResult": self.result is not None,
             "hasArtifact": self.artifact_path is not None,
             "error": self.error,
+            "dropped": self.dropped,
         }
 
 
@@ -1061,11 +1116,51 @@ def _get_job(job_id: str) -> Job:
     return job
 
 
+# Display-only event types. Every producer that emits these also emits a
+# terminal ``result`` carrying the full data, so losing one degrades live
+# rendering and nothing else. Terminal events (result / error / cancelled
+# / done) are never evicted: a lost ``done`` leaves a client waiting.
+_PROGRESSIVE_EVENT_TYPES = {"log", "progress", "trace"}
+
+# Cap on undelivered events. Reached only when a producer outruns its
+# subscriber, or when none has attached yet.
+_JOB_PENDING_MAX = 1024
+
+
+def _push(job: Job, event: dict) -> None:
+    """Hand an event to the subscriber, dropping old ones if it is behind.
+
+    Never blocks and never waits. The subscriber may be slow, may not
+    have attached yet, or may have disconnected mid-job -- none of which
+    may stall the producer. Overflow evicts the oldest progressive event;
+    the ring buffer behind /jobs/{id}/log keeps the record.
+    """
+    job.pending.append(event)
+    while len(job.pending) > _JOB_PENDING_MAX:
+        for i, old_ev in enumerate(job.pending):
+            if old_ev.get("type") in _PROGRESSIVE_EVENT_TYPES:
+                del job.pending[i]
+                job.dropped += 1
+                break
+        else:
+            # Nothing evictable (all terminal). Let it grow; this cannot
+            # happen in practice, since terminal events arrive last and
+            # at most a few per job.
+            break
+    job.wake.set()
+
+
 async def _emit(job: Job, event: dict) -> None:
     """Push an event onto the job's queue from inside the producer coroutine.
 
     Use this instead of ``queue.put`` directly so we get one place to bump
     ``updated_at`` and stamp the job state on terminal events.
+
+    This never blocks. Progressive events also land in the job's ring
+    buffer, which ``/jobs/{id}/log`` replays for a client that attached
+    late or lost its stream. Before that, the bounded queue plus a
+    single non-replaying subscriber meant a client navigating away
+    mid-job wedged the producer forever, with no error and no timeout.
     """
     job.updated_at = time.time()
     t = event.get("type")
@@ -1074,7 +1169,11 @@ async def _emit(job: Job, event: dict) -> None:
     elif t == "error":
         job.state = "failed"
         job.error = str(event.get("message") or "")
-    await job.queue.put(event)
+    if t in _PROGRESSIVE_EVENT_TYPES:
+        job.seq += 1
+        event = {**event, "seq": job.seq}
+        job.log.append(event)
+    _push(job, event)
 
 
 async def run_job(
@@ -1095,10 +1194,7 @@ async def run_job(
             await coro_factory(job)
         except asyncio.CancelledError:
             job.state = "cancelled"
-            try:
-                await job.queue.put({"type": "cancelled"})
-            except Exception:  # noqa: BLE001
-                pass
+            _push(job, {"type": "cancelled"})
             raise
         except Exception as exc:  # noqa: BLE001
             await _emit(job, {"type": "error", "message": str(exc)})
@@ -1106,10 +1202,7 @@ async def run_job(
             if job.state == "running":
                 job.state = "succeeded"
         finally:
-            try:
-                await job.queue.put({"type": "done"})
-            except Exception:  # noqa: BLE001
-                pass
+            _push(job, {"type": "done"})
 
     job.task = asyncio.create_task(runner())
     return job
@@ -1156,19 +1249,49 @@ async def jobs_events(job_id: str):
         job.subscribers += 1
         try:
             while True:
-                ev = await job.queue.get()
-                yield "data: " + json.dumps(ev) + "\n\n"
-                if ev.get("type") == "done":
-                    return
+                if job.pending:
+                    ev = job.pending.popleft()
+                    yield "data: " + json.dumps(ev) + "\n\n"
+                    if ev.get("type") == "done":
+                        return
+                    continue
+                job.wake.clear()
+                if job.pending:
+                    # Producer appended between the check and the clear.
+                    continue
+                await job.wake.wait()
         except asyncio.CancelledError:
             # Client disconnected; do NOT cancel the job -- cancel is
-            # explicit via /cancel. The producer keeps running and any
-            # late events are dropped when the queue fills.
+            # explicit via /cancel. The producer keeps running and its
+            # progressive events age out of the pending deque.
             raise
         finally:
             job.subscribers = max(0, job.subscribers - 1)
 
     return StreamingResponse(stream(), media_type="text/event-stream")
+
+
+@app.get("/jobs/{job_id}/log")
+def jobs_log(job_id: str, after: int = 0):
+    """Replay the progressive events this job retained.
+
+    ``/jobs/{id}/events`` takes a single subscriber and does not replay,
+    so a renderer that navigates away and back cannot rebuild what it
+    missed. Every retained event carries a monotonic ``seq``; pass the
+    last one seen as ``after`` to fetch only newer entries. A gap in the
+    sequence means events were dropped under backpressure, and
+    ``dropped`` is the running total for the job.
+    """
+    job = _get_job(job_id)
+    events = [e for e in job.log if e.get("seq", 0) > after]
+    return {
+        "events": events,
+        "dropped": job.dropped,
+        "retained": len(job.log),
+        "capacity": _JOB_LOG_RING,
+        "state": job.state,
+        "seq": job.seq,
+    }
 
 
 _ARTIFACT_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
@@ -4419,6 +4542,636 @@ async def jobs_workflow_run(req: Request):
 
 
 register_job_kind("workflow.run")
+
+
+# ---------------------------------------------------------------------------
+# Workspace scripts (docs/dev/scripting.md).
+#
+# A script is a *.py file under SCRIPTS_DIR, run in a child process with
+# the bundled interpreter. Why a child and not this process, the way
+# workflows run: a segfault in cyllama's native layer would take the
+# sidecar down with every chat and loaded model, and Python cannot
+# interrupt a thread parked in llama.cpp, so cancel would be a lie.
+#
+# The child reaches app state back over the loopback API using the same
+# bearer token, which is the point: app.chat() in the client library
+# talks to the model _get_llm already has resident, so a 50-cell sweep
+# pays one model load instead of fifty.
+#
+# Contract with the script:
+#   stdin            one JSON object (the ``args`` from the run body)
+#   stdout / stderr  streamed back as ``log`` events, line by line
+#   \x1e-prefixed    a JSON progress record, re-emitted as ``progress``
+#   cwd              ARTIFACTS_DIR/<job_id>; files written here are
+#                    served by /artifacts/<job_id>/<name>
+#   result.json      parsed after a clean exit into the ``result`` event
+#   exit code        nonzero fails the job, with the stderr tail attached
+# ---------------------------------------------------------------------------
+
+_SCRIPT_ID_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*$")
+_SCRIPT_LINE_SPLIT_RE = re.compile(rb"[\r\n]")
+
+# One record-separator byte marks a progress line. Chosen because no
+# ordinary print() emits it, so a script needs no escaping discipline.
+_SCRIPT_PROGRESS_SENTINEL = b"\x1e"
+
+_SCRIPT_DEFAULT_TIMEOUT_S = 600
+_SCRIPT_MAX_TIMEOUT_S = 24 * 3600
+# Two at once. The cap exists because a script may load its own model:
+# _get_llm is deliberately single-slot to bound VRAM, and a child's own
+# load is invisible to it.
+_SCRIPT_MAX_CONCURRENT = 2
+_SCRIPT_TERM_GRACE_S = 3.0
+# Flush a partial line after this long with no output, so a script that
+# prints without a newline doesn't look hung.
+_SCRIPT_IDLE_FLUSH_S = 0.5
+_SCRIPT_MAX_LINE_BYTES = 8192
+_SCRIPT_STDERR_TAIL_LINES = 20
+_SCRIPT_RESULT_MAX_BYTES = 1_000_000
+_SCRIPT_MAX_ARTIFACTS = 200
+_SCRIPT_MAX_SOURCE_BYTES = 1_000_000
+# Args are written to the child's stdin in one go. Keeping this under a
+# pipe buffer means the write never blocks on a script that ignores
+# stdin. Bigger input belongs in a file the script opens itself.
+_SCRIPT_MAX_ARGS_BYTES = 16_000
+# Windows CreateProcess flag. Named here so the POSIX build doesn't need
+# the subprocess import for one constant.
+_WIN_CREATE_NEW_PROCESS_GROUP = 0x00000200
+
+# Job ids of scripts currently running, for the concurrency cap.
+_SCRIPT_RUNNING: set[str] = set()
+
+
+def _list_script_files() -> list[Path]:
+    """Return *.py files in SCRIPTS_DIR with valid id-shape names.
+
+    Same rule as workflows: a leading-letter alphanumeric stem, so the id
+    is safe in a URL and a DOM id. ``__init__.py`` and friends are
+    skipped silently.
+    """
+    if not SCRIPTS_DIR.is_dir():
+        return []
+    out: list[Path] = []
+    for p in sorted(SCRIPTS_DIR.iterdir()):
+        if p.suffix != ".py":
+            continue
+        if not _SCRIPT_ID_RE.match(p.stem):
+            continue
+        out.append(p)
+    return out
+
+
+def _script_summary(path: Path) -> dict:
+    """Discovery summary for one script.
+
+    The docstring comes from ``ast.parse``, never from importing. Listing
+    a directory must not execute what is in it.
+    """
+    summary: dict[str, Any] = {
+        "id": path.stem,
+        "filename": path.name,
+        "doc": "",
+        "bytes": 0,
+        "modified": 0.0,
+        "error": None,
+    }
+    try:
+        st = path.stat()
+        summary["bytes"] = st.st_size
+        summary["modified"] = st.st_mtime
+    except OSError as exc:
+        summary["error"] = f"{type(exc).__name__}: {exc}"
+        return summary
+    if st.st_size > _SCRIPT_MAX_SOURCE_BYTES:
+        summary["error"] = f"source larger than {_SCRIPT_MAX_SOURCE_BYTES} bytes; not summarised"
+        return summary
+    try:
+        tree = ast.parse(path.read_text("utf-8"))
+    except (OSError, UnicodeDecodeError, SyntaxError, ValueError) as exc:
+        lineno = getattr(exc, "lineno", None)
+        where = f" line {lineno}" if lineno else ""
+        summary["error"] = f"{type(exc).__name__}{where}: {exc}"
+        return summary
+    summary["doc"] = (ast.get_docstring(tree) or "").strip()
+    return summary
+
+
+@app.get("/scripts")
+def scripts_list():
+    """Discover *.py files in the scripts directory.
+
+    Returns one summary per file. A file that fails to parse has
+    ``error`` populated and an empty docstring, so the pane can render a
+    disabled row that points at the problem.
+    """
+    return {
+        "scripts": [_script_summary(p) for p in _list_script_files()],
+        "dir": str(SCRIPTS_DIR),
+        "running": len(_SCRIPT_RUNNING),
+        "max_concurrent": _SCRIPT_MAX_CONCURRENT,
+    }
+
+
+def _script_env(job: Job, cwd: Path) -> dict:
+    """Environment for the child.
+
+    Carries the sidecar URL and token so the client library can reach the
+    resident model, plus the workspace dirs so a script never has to
+    guess at the packaged-app layout.
+    """
+    env = dict(os.environ)
+    existing = env.get("PYTHONPATH", "")
+    lib = str(_CLIENT_LIB_DIR)
+    env.update({
+        "PYTHONUNBUFFERED": "1",
+        "PYTHONPATH": lib + (os.pathsep + existing if existing else ""),
+        "CYLLAMA_SIDECAR_URL": f"http://127.0.0.1:{PORT}",
+        "CYLLAMA_SIDECAR_TOKEN": TOKEN,
+        "CYLLAMA_JOB_ID": job.id,
+        "CYLLAMA_MODELS_DIR": str(MODELS_DIR),
+        "CYLLAMA_ARTIFACTS_DIR": str(cwd),
+        "CYLLAMA_SCRIPTS_DIR": str(SCRIPTS_DIR),
+    })
+    return env
+
+
+# ---------------------------------------------------------------------------
+# Windows process-tree termination.
+#
+# POSIX kills a tree with one signal to a process group (_signal_child).
+# Windows has no equivalent: TerminateProcess kills exactly one process
+# and orphans its children, and console control events are cooperative
+# notifications a process may ignore. The mechanism that does work is a
+# job object -- descendants join their parent's job automatically, and
+# TerminateJobObject kills the whole set at once.
+#
+# JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE also makes the handle a dead-man
+# switch: whether the sidecar closes it deliberately or dies holding it,
+# anything still in the job goes with it.
+#
+# Unverified on Windows: CI runs pytest on Linux only, and the cancel
+# test's liveness probe is POSIX-only (os.kill(pid, 0) terminates the
+# target on Windows rather than probing it). See docs/dev/scripting.md.
+# ---------------------------------------------------------------------------
+
+_WIN_JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000
+_WIN_JOBOBJECT_EXTENDED_LIMIT_INFORMATION = 9  # JOBOBJECTINFOCLASS
+_WIN_PROCESS_TERMINATE = 0x0001
+_WIN_PROCESS_SET_QUOTA = 0x0100
+
+
+def _win_kernel32():
+    """Return kernel32 with the prototypes this module uses, or None."""
+    import ctypes
+    from ctypes import wintypes
+
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    k32.CreateJobObjectW.argtypes = [wintypes.LPVOID, wintypes.LPCWSTR]
+    k32.CreateJobObjectW.restype = wintypes.HANDLE
+    k32.SetInformationJobObject.argtypes = [
+        wintypes.HANDLE, ctypes.c_int, wintypes.LPVOID, wintypes.DWORD,
+    ]
+    k32.SetInformationJobObject.restype = wintypes.BOOL
+    k32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    k32.OpenProcess.restype = wintypes.HANDLE
+    k32.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
+    k32.AssignProcessToJobObject.restype = wintypes.BOOL
+    k32.TerminateJobObject.argtypes = [wintypes.HANDLE, wintypes.UINT]
+    k32.TerminateJobObject.restype = wintypes.BOOL
+    k32.CloseHandle.argtypes = [wintypes.HANDLE]
+    k32.CloseHandle.restype = wintypes.BOOL
+    return k32
+
+
+def _win_extended_limit_struct():
+    """JOBOBJECT_EXTENDED_LIMIT_INFORMATION, built lazily.
+
+    Defined inside a function because ``ctypes.wintypes`` does not
+    import on POSIX, and this file is imported on every platform.
+    """
+    import ctypes
+    from ctypes import wintypes
+
+    class IO_COUNTERS(ctypes.Structure):
+        _fields_ = [
+            ("ReadOperationCount", ctypes.c_ulonglong),
+            ("WriteOperationCount", ctypes.c_ulonglong),
+            ("OtherOperationCount", ctypes.c_ulonglong),
+            ("ReadTransferCount", ctypes.c_ulonglong),
+            ("WriteTransferCount", ctypes.c_ulonglong),
+            ("OtherTransferCount", ctypes.c_ulonglong),
+        ]
+
+    class BASIC_LIMIT_INFORMATION(ctypes.Structure):
+        _fields_ = [
+            ("PerProcessUserTimeLimit", wintypes.LARGE_INTEGER),
+            ("PerJobUserTimeLimit", wintypes.LARGE_INTEGER),
+            ("LimitFlags", wintypes.DWORD),
+            ("MinimumWorkingSetSize", ctypes.c_size_t),
+            ("MaximumWorkingSetSize", ctypes.c_size_t),
+            ("ActiveProcessLimit", wintypes.DWORD),
+            ("Affinity", ctypes.c_size_t),   # ULONG_PTR
+            ("PriorityClass", wintypes.DWORD),
+            ("SchedulingClass", wintypes.DWORD),
+        ]
+
+    class EXTENDED_LIMIT_INFORMATION(ctypes.Structure):
+        _fields_ = [
+            ("BasicLimitInformation", BASIC_LIMIT_INFORMATION),
+            ("IoInfo", IO_COUNTERS),
+            ("ProcessMemoryLimit", ctypes.c_size_t),
+            ("JobMemoryLimit", ctypes.c_size_t),
+            ("PeakProcessMemoryUsed", ctypes.c_size_t),
+            ("PeakJobMemoryUsed", ctypes.c_size_t),
+        ]
+
+    return EXTENDED_LIMIT_INFORMATION
+
+
+def _win_create_job_for(pid: int):
+    """Put ``pid`` in a fresh kill-on-close job object; return its handle.
+
+    Returns None on any failure, including a Windows too old for nested
+    jobs -- the caller falls back to killing the direct child, which is
+    what happened before job objects were used at all.
+
+    The child is assigned just after CreateProcess rather than being
+    started suspended, since ``subprocess`` closes the thread handle and
+    leaves no way to resume. A grandchild spawned in that window escapes
+    the job; the window is microseconds and a Python child cannot reach
+    user code inside it.
+    """
+    if os.name != "nt":
+        return None
+    try:
+        import ctypes
+
+        k32 = _win_kernel32()
+        job = k32.CreateJobObjectW(None, None)
+        if not job:
+            return None
+        info_cls = _win_extended_limit_struct()
+        info = info_cls()
+        info.BasicLimitInformation.LimitFlags = _WIN_JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        ok = k32.SetInformationJobObject(
+            job,
+            _WIN_JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+            ctypes.byref(info),
+            ctypes.sizeof(info),
+        )
+        if not ok:
+            k32.CloseHandle(job)
+            return None
+        handle = k32.OpenProcess(
+            _WIN_PROCESS_TERMINATE | _WIN_PROCESS_SET_QUOTA, False, pid,
+        )
+        if not handle:
+            k32.CloseHandle(job)
+            return None
+        assigned = k32.AssignProcessToJobObject(job, handle)
+        k32.CloseHandle(handle)
+        if not assigned:
+            k32.CloseHandle(job)
+            return None
+        return job
+    except Exception:  # noqa: BLE001
+        # ctypes failures, a missing export on an unexpected build: fall
+        # back rather than failing the run.
+        return None
+
+
+def _win_terminate_job(job) -> bool:
+    if not job or os.name != "nt":
+        return False
+    try:
+        return bool(_win_kernel32().TerminateJobObject(job, 1))
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _win_close_job(job) -> None:
+    """Close the job handle. Kills anything still in it (kill-on-close)."""
+    if not job or os.name != "nt":
+        return
+    try:
+        _win_kernel32().CloseHandle(job)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _script_spawn_kwargs() -> dict:
+    """Isolate the child so cancel can reach its whole tree.
+
+    POSIX: ``start_new_session`` makes it a process-group leader, so
+    ``killpg`` reaches grandchildren. Windows: a new process group gives
+    the graceful Ctrl+Break path a target and keeps a Ctrl+C in the
+    sidecar's console from reaching the child. Killing the tree there is
+    the job object's job (_win_create_job_for), not this flag's.
+    """
+    if os.name == "nt":
+        return {"creationflags": _WIN_CREATE_NEW_PROCESS_GROUP}
+    return {"start_new_session": True}
+
+
+def _signal_child(proc, *, hard: bool, win_job=None) -> bool:
+    """Signal the child's whole tree. False means nothing was delivered.
+
+    POSIX signals the process group. Windows terminates the job object,
+    falling back to the direct child when there is no job -- which
+    orphans grandchildren, the behaviour before job objects.
+
+    The soft path on Windows is Ctrl+Break to the process group. It is
+    cooperative and needs a console the sidecar usually does not have,
+    so a False return here is expected and the caller escalates
+    immediately rather than waiting out the grace period.
+    """
+    if proc.returncode is not None:
+        return False
+    try:
+        if os.name == "nt":
+            if hard:
+                if _win_terminate_job(win_job):
+                    return True
+                proc.kill()
+            else:
+                proc.send_signal(signal.CTRL_BREAK_EVENT)
+        else:
+            os.killpg(
+                os.getpgid(proc.pid),
+                signal.SIGKILL if hard else signal.SIGTERM,
+            )
+    except (ProcessLookupError, PermissionError, OSError, ValueError):
+        return False
+    return True
+
+
+async def _hard_kill(proc, win_job=None) -> None:
+    _signal_child(proc, hard=True, win_job=win_job)
+    try:
+        await asyncio.wait_for(asyncio.shield(proc.wait()), _SCRIPT_TERM_GRACE_S)
+    except (asyncio.TimeoutError, asyncio.CancelledError):
+        pass
+
+
+async def _terminate_process(proc, win_job=None) -> None:
+    """Stop the child and anything it spawned. Safe to call twice.
+
+    The graceful signal goes out before the first await, so it lands even
+    when this runs from a ``finally`` on an already-cancelled task. If
+    the grace period is itself cancelled, the hard kill is handed to a
+    detached task so it still happens.
+    """
+    if proc.returncode is not None:
+        return
+    if not _signal_child(proc, hard=False, win_job=win_job):
+        # Nothing accepted the graceful signal; waiting out the grace
+        # period would only delay the kill.
+        await _hard_kill(proc, win_job)
+        return
+    try:
+        await asyncio.wait_for(asyncio.shield(proc.wait()), _SCRIPT_TERM_GRACE_S)
+        return
+    except asyncio.TimeoutError:
+        pass
+    except asyncio.CancelledError:
+        asyncio.ensure_future(_hard_kill(proc, win_job))
+        raise
+    await _hard_kill(proc, win_job)
+
+
+def _parse_progress(payload: bytes) -> Optional[dict]:
+    """Turn a sentinel line's JSON body into a progress event, or None."""
+    try:
+        body = json.loads(payload.decode("utf-8", "replace"))
+    except ValueError:
+        return None
+    if not isinstance(body, dict):
+        return None
+    ev: dict = {"type": "progress"}
+    value = body.get("progress")
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        ev["value"] = max(0.0, min(1.0, float(value)))
+    message = body.get("message")
+    if message is not None:
+        ev["message"] = str(message)[:1000]
+    return ev
+
+
+async def _script_line(job: Job, raw: bytes, stream_name: str, stderr_tail) -> None:
+    if raw.startswith(_SCRIPT_PROGRESS_SENTINEL):
+        ev = _parse_progress(raw[len(_SCRIPT_PROGRESS_SENTINEL):])
+        if ev is not None:
+            await _emit(job, ev)
+            return
+    text = raw.decode("utf-8", "replace")
+    if stream_name == "stderr":
+        stderr_tail.append(text)
+    await _emit(job, {"type": "log", "stream": stream_name, "message": text})
+
+
+async def _pump(job: Job, stream, stream_name: str, stderr_tail) -> None:
+    """Stream one pipe back as log events.
+
+    Splits on CR as well as LF so progress-bar output still emits, and
+    flushes a partial line after an idle interval so a script printing
+    without a newline is visible. Over-long lines are split at the cap
+    rather than buffered, so a script emitting one enormous line cannot
+    grow memory here.
+    """
+    buf = b""
+    while True:
+        try:
+            chunk = await asyncio.wait_for(stream.read(4096), _SCRIPT_IDLE_FLUSH_S)
+        except asyncio.TimeoutError:
+            if buf:
+                await _script_line(job, buf, stream_name, stderr_tail)
+                buf = b""
+            continue
+        if not chunk:
+            break
+        buf += chunk
+        parts = _SCRIPT_LINE_SPLIT_RE.split(buf)
+        buf = parts.pop()
+        for raw in parts:
+            if raw:
+                await _script_line(job, raw, stream_name, stderr_tail)
+        while len(buf) > _SCRIPT_MAX_LINE_BYTES:
+            await _script_line(job, buf[:_SCRIPT_MAX_LINE_BYTES], stream_name, stderr_tail)
+            buf = buf[_SCRIPT_MAX_LINE_BYTES:]
+    if buf:
+        await _script_line(job, buf, stream_name, stderr_tail)
+
+
+def _collect_script_result(job: Job, script_id: str, cwd: Path, started: float) -> dict:
+    """Build the result payload from what the script left in its cwd."""
+    artifacts: list[dict] = []
+    try:
+        entries = sorted(p for p in cwd.iterdir() if p.is_file())
+    except OSError:
+        entries = []
+    for p in entries[:_SCRIPT_MAX_ARTIFACTS]:
+        try:
+            artifacts.append({"name": p.name, "bytes": p.stat().st_size})
+        except OSError:
+            continue
+
+    payload = None
+    result_error = None
+    rp = cwd / "result.json"
+    if rp.is_file():
+        try:
+            size = rp.stat().st_size
+            if size > _SCRIPT_RESULT_MAX_BYTES:
+                # Left on disk as an artifact rather than failing the run.
+                result_error = (
+                    f"result.json is {size} bytes, over the "
+                    f"{_SCRIPT_RESULT_MAX_BYTES} cap; read it as an artifact"
+                )
+            else:
+                payload = json.loads(rp.read_text("utf-8"))
+        except (OSError, ValueError) as exc:
+            result_error = f"{type(exc).__name__}: {exc}"
+
+    return {
+        "script_id": script_id,
+        "exit_code": 0,
+        "duration_s": round(time.time() - started, 3),
+        "result": payload,
+        "result_error": result_error,
+        "artifacts": artifacts,
+        "dropped_events": job.dropped,
+    }
+
+
+@app.post("/jobs/script/run")
+async def jobs_script_run(req: Request):
+    """Run a workspace script as a job.
+
+    Body: ``{script_id: str, args?: dict, timeout_s?: number}``. The args
+    object is handed to the script on stdin. Returns ``{job_id}``; output
+    streams over /jobs/<id>/events and files land in the job's artifact
+    directory.
+    """
+    body = await req.json()
+    script_id = (body.get("script_id") or "").strip()
+    if not _SCRIPT_ID_RE.match(script_id):
+        raise HTTPException(400, f"invalid script_id: {script_id!r}")
+    path = SCRIPTS_DIR / f"{script_id}.py"
+    if not path.is_file():
+        raise HTTPException(404, f"script not found: {script_id!r}")
+
+    args = body.get("args")
+    if args is None:
+        args = {}
+    if not isinstance(args, dict):
+        raise HTTPException(400, "args must be a JSON object")
+    args_blob = json.dumps(args).encode("utf-8")
+    if len(args_blob) > _SCRIPT_MAX_ARGS_BYTES:
+        raise HTTPException(
+            400,
+            f"args larger than {_SCRIPT_MAX_ARGS_BYTES} bytes; "
+            "write the input to a file and pass its path",
+        )
+
+    try:
+        timeout_s = float(body.get("timeout_s") or _SCRIPT_DEFAULT_TIMEOUT_S)
+    except (TypeError, ValueError):
+        timeout_s = float(_SCRIPT_DEFAULT_TIMEOUT_S)
+    timeout_s = max(1.0, min(float(_SCRIPT_MAX_TIMEOUT_S), timeout_s))
+
+    if len(_SCRIPT_RUNNING) >= _SCRIPT_MAX_CONCURRENT:
+        raise HTTPException(
+            429,
+            f"{len(_SCRIPT_RUNNING)} scripts already running "
+            f"(cap {_SCRIPT_MAX_CONCURRENT}); cancel one or wait",
+        )
+
+    async def producer(job: Job) -> None:
+        try:
+            await run_body(job)
+        finally:
+            # One release point. A cancel delivered before the spawn
+            # would otherwise leak the slot for the life of the sidecar.
+            _SCRIPT_RUNNING.discard(job.id)
+
+    async def run_body(job: Job) -> None:
+        cwd = (ARTIFACTS_DIR / job.id).resolve()
+        cwd.mkdir(parents=True, exist_ok=True)
+        started = time.time()
+        stderr_tail: deque = deque(maxlen=_SCRIPT_STDERR_TAIL_LINES)
+        await _emit(job, {
+            "type": "log",
+            "stream": "sidecar",
+            "message": f"running {path.name}",
+        })
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                sys.executable, "-u", str(path),
+                cwd=str(cwd),
+                env=_script_env(job, cwd),
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                **_script_spawn_kwargs(),
+            )
+        except OSError as exc:
+            raise RuntimeError(f"failed to start script: {exc}") from exc
+
+        # Windows only: a kill-on-close job object holding the child, so
+        # cancel reaches grandchildren. None everywhere else, and on any
+        # Windows where the job could not be created.
+        win_job = _win_create_job_for(proc.pid)
+
+        try:
+            try:
+                proc.stdin.write(args_blob)
+                await proc.stdin.drain()
+            except (BrokenPipeError, ConnectionResetError):
+                # The script exited without reading stdin. Not an error.
+                pass
+            finally:
+                try:
+                    proc.stdin.close()
+                except OSError:
+                    pass
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(
+                        _pump(job, proc.stdout, "stdout", stderr_tail),
+                        _pump(job, proc.stderr, "stderr", stderr_tail),
+                        proc.wait(),
+                    ),
+                    timeout=timeout_s,
+                )
+            except asyncio.TimeoutError:
+                await _terminate_process(proc, win_job)
+                raise RuntimeError(
+                    f"script timed out after {timeout_s:.0f}s"
+                ) from None
+        finally:
+            await _terminate_process(proc, win_job)
+            # Closing the handle is both cleanup and a last resort:
+            # kill-on-close takes anything still in the job with it.
+            _win_close_job(win_job)
+
+        rc = proc.returncode
+        if rc != 0:
+            tail = "".join(f"\n  {ln}" for ln in list(stderr_tail)[-5:])
+            raise RuntimeError(f"script exited {rc}{tail}")
+        await _emit(job, {
+            "type": "result",
+            "result": _collect_script_result(job, script_id, cwd, started),
+        })
+
+    job = await run_job("script.run", producer)
+    # Safe after the fact: run_job only schedules the task, and there is
+    # no await between here and the return, so the producer cannot have
+    # run its finally yet.
+    _SCRIPT_RUNNING.add(job.id)
+    return {"job_id": job.id}
+
+
+register_job_kind("script.run")
 
 
 # ---------------------------------------------------------------------------

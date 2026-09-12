@@ -19,3 +19,10 @@ dependencies = [
   # tables / images) is opt-in by the user via a future Settings action.
   "pypdf>=4.0",
 ]
+
+# Two top-level modules live here: the sidecar itself and the client
+# library its child scripts import. Without this, setuptools' flat-layout
+# auto-discovery refuses to build ("Multiple top-level modules
+# discovered"), which breaks the bundled-env rebuild and CI.
+[tool.setuptools]
+py-modules = ["sidecar", "cyllama_desktop"]

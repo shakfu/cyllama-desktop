@@ -61,7 +61,7 @@ help:
 	@echo "                 Switch variant and build the installer for it"
 	@echo "                 (macOS arm64: 'cpu' already includes Metal)"
 	@echo "  make npm       npm install"
-	@echo "  make test      Run the sidecar pytest suite"
+	@echo "  make test      Run the sidecar pytest suite (in build/testenv)"
 	@echo "  make e2e       Run the Playwright per-pane smoke suite"
 	@echo "  make release-notes [VERSION=x.y.z]"
 	@echo "                 Preview the release body CI builds from CHANGELOG.md"
@@ -76,7 +76,11 @@ node_modules: package.json
 
 npm: node_modules
 
-$(PY_BIN):
+# Prerequisites, not just a file check: the pin and the backend variant
+# live in these two files, so editing either must rebuild. Without them
+# ``make python`` sees the interpreter already exists and does nothing,
+# leaving a bumped CYLLAMA_VERSION silently unbuilt.
+$(PY_BIN): scripts/build-python-env.sh python-sidecar/pyproject.toml
 	bash scripts/build-python-env.sh
 
 python: $(PY_BIN)
@@ -173,23 +177,40 @@ endif
 # --- tests ------------------------------------------------------------------
 #
 # Tests stub ``cyllama`` (see tests/conftest.py), so they only need pytest +
-# fastapi + httpx. We install these into the bundled Python env if it exists
-# (avoids polluting the user's system Python), otherwise fall back to whatever
-# ``python3`` is on PATH. Pytest is *not* shipped in the dmg -- it's reinstalled
-# into the bundled env on demand and pruned by build-python-env.sh on rebuild.
+# fastapi + httpx. Those go in build/testenv, a venv borrowing the bundled
+# env through --system-site-packages: the app's own dependencies stay
+# visible, and nothing test-only is ever written into what gets packaged.
 
-PYTEST_PY := $(shell test -x "$(PY_BIN)" && echo "$(PY_BIN)" || command -v python3)
+# Interpreter the test venv borrows from: the bundled env when it exists,
+# so cyllama and the sidecar's own deps are visible, else the host python.
+TEST_BASE_PY := $(shell test -x "$(PY_BIN)" && echo "$(PY_BIN)" || command -v python3)
+# Tests install into their own venv. Installing pytest and httpx into the
+# bundled env would ship them inside the app, and it masks missing runtime
+# deps: a rebuild once dropped httpx, and ``make test`` put it back before
+# anything noticed the client library was broken.
+# ``--without-pip``: build-python-env.sh prunes ensurepip from the bundled
+# env, so venv cannot bootstrap its own pip. With --system-site-packages
+# the base env's pip is on the path instead, and running it under the venv
+# interpreter installs into the venv. Packages the base already has (fastapi,
+# uvicorn) resolve as satisfied and are not copied.
+TESTENV_DIR := build/testenv
+TEST_PY     := $(TESTENV_DIR)/bin/python3
 
 test-deps:
-	@if [ -z "$(PYTEST_PY)" ]; then \
+	@if [ -z "$(TEST_BASE_PY)" ]; then \
 	  echo "no python3 found"; exit 1; \
 	fi
-	@$(PYTEST_PY) -c "import pytest, fastapi, httpx, multipart" 2>/dev/null || \
-	  $(PYTEST_PY) -m pip install --quiet pytest "fastapi>=0.115" "httpx>=0.27" \
+	@if ! $(TEST_PY) -m pip --version >/dev/null 2>&1; then \
+	  echo "Creating test venv at $(TESTENV_DIR) from $(TEST_BASE_PY)"; \
+	  rm -rf "$(TESTENV_DIR)"; \
+	  "$(TEST_BASE_PY)" -m venv --without-pip --system-site-packages "$(TESTENV_DIR)"; \
+	fi
+	@$(TEST_PY) -c "import pytest, fastapi, httpx, multipart" 2>/dev/null || \
+	  $(TEST_PY) -m pip install --quiet pytest "fastapi>=0.115" "httpx>=0.27" \
 	    "python-multipart>=0.0.9"
 
 test: test-deps
-	$(PYTEST_PY) -m pytest tests/ --ignore=tests/e2e -v
+	$(TEST_PY) -m pytest tests/ --ignore=tests/e2e -v
 
 # Playwright per-pane smoke. Boots Electron against a stubbed sidecar
 # (tests/e2e/sidecar_launcher.py installs the same conftest cyllama
@@ -197,7 +218,7 @@ test: test-deps
 # or any GGUF files. node_modules covers @playwright/test; the
 # bundled Python env covers fastapi + uvicorn already.
 e2e: node_modules test-deps
-	npm run test:e2e
+	CYLLAMA_E2E_PYTHON="$(abspath $(TEST_PY))" npm run test:e2e
 
 # Writes release-notes.md, as the publish job in build.yml does.
 VERSION ?= $(shell python3 -c "import json; print(json.load(open('package.json'))['version'])")

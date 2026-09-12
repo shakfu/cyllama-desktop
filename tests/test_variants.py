@@ -265,3 +265,70 @@ def test_makefile_targets_actually_have_a_recipe(backend):
         assert "set-cyllama-variant.py" in out.stdout, (
             f"{target} does not run the variant selector"
         )
+
+
+# ---------------------------------------------------------------------------
+# Packaging inputs. electron-builder does not fail on a missing
+# extraResources source -- it logs "file source doesn't exist" and exits 0
+# -- and a filter naming a file that is not there simply copies nothing.
+# Either way the installer is built, published, and quietly missing a
+# file that only fails at runtime in a user's hands.
+# ---------------------------------------------------------------------------
+
+
+def _extra_resources():
+    """Yield (source_dir, [literal filter entries]) from electron-builder.yml.
+
+    Hand-parsed rather than via PyYAML: CI installs only pytest, fastapi,
+    httpx and multipart for the test job.
+    """
+    lines = (ROOT / "electron-builder.yml").read_text().splitlines()
+    try:
+        start = lines.index("extraResources:")
+    except ValueError:
+        return
+    entries: list[tuple[str, list[str]]] = []
+    current: str | None = None
+    in_filter = False
+    for line in lines[start + 1:]:
+        if line and not line[0].isspace():
+            break                      # next top-level key
+        stripped = line.strip()
+        m = re.match(r'^-\s*from:\s*"?([^"]+)"?$', stripped)
+        if m:
+            current = m.group(1)
+            entries.append((current, []))
+            in_filter = False
+            continue
+        if stripped == "filter:":
+            in_filter = True
+            continue
+        if in_filter and stripped.startswith("- "):
+            entries[-1][1].append(stripped[2:].strip().strip('"'))
+    for source, filters in entries:
+        yield source, filters
+
+
+def test_extra_resource_sources_exist():
+    """Every packaged source must be present in the checkout."""
+    for source, _ in _extra_resources():
+        if "${" in source:
+            continue               # per-arch python env, built not committed
+        assert (ROOT / source).exists(), (
+            f"electron-builder.yml packages {source!r}, which does not exist. "
+            "electron-builder only warns, so the installer would ship without it."
+        )
+
+
+def test_extra_resource_named_files_exist():
+    """A filter naming an exact file must match something."""
+    for source, filters in _extra_resources():
+        if "${" in source:
+            continue
+        for entry in filters:
+            if any(ch in entry for ch in "*?["):
+                continue           # a glob may legitimately match nothing
+            assert (ROOT / source / entry).exists(), (
+                f"electron-builder.yml packages {source}/{entry}, which does not "
+                "exist. The filter would silently match nothing."
+            )

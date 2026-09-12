@@ -10,6 +10,8 @@ Electron desktop app that runs [cyllama](https://github.com/shakfu/cyllama) via 
 
 - **Sidecar.** The bundled Python process running cyllama via FastAPI on `127.0.0.1`, gated by a per-launch bearer token. The renderer is a thin client; the sidecar is the single source of truth for inference, models, and jobs.
 
+- **Script.** A Python file in `<workspace>/scripts/`, run as a job from the Agents pane. It executes in a child process with the bundled interpreter and talks back to the app over the loopback API, so `cyllama_desktop.app.chat()` reuses the model the sidecar already has loaded instead of loading a second copy. Output streams into the pane, cancel kills the process group, and files the script writes are downloadable as job artifacts. Scripts run with your full privileges -- the child process is for crash containment and a working cancel, not a sandbox. See [`docs/dev/scripting.md`](docs/dev/scripting.md).
+
 - **Slash commands.** A `/`-prefixed entry in the chat composer routes the prompt to a specific handler instead of `/chat`. The agent family of commands (`/agent`, `/agent-constrained`, `/agent-contract`, `/agent-plan`, `/agent-reflect`) runs an agent loop against the loaded chat model with the sidebar's tool config; the trace + answer render inline in the chat stream. Tab autocompletes a unique prefix (`/a<Tab>` -> `/agent `). See `docs/slash-commands.md` for the taxonomy and roadmap.
 
 See `PLAN.md` for the phased rollout and `CHANGELOG.md` for what has shipped.

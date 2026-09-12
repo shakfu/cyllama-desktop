@@ -1,6 +1,7 @@
 # SCRIPTING: Workspace Python Scripts as Sidecar Jobs
 
-Status: proposed, not approved. Owner: @shakfu. Last updated: 2026-09-12.
+Status: implemented (Phases 0-3). Owner: @shakfu. Last updated: 2026-09-12.
+See Section 16 for where the build deviated from this spec.
 
 Companion docs: `docs/dev/plan.md` (overall rollout), `docs/dev/agent_plan.md` (agent + workflow layer), `TODO.md`, `CHANGELOG.md`. This document is scoped to one question: should the app run user-authored Python scripts as jobs, and if so, how.
 
@@ -319,9 +320,11 @@ A script writing directly to `RAG_DIR/<id>.sqlite` while an ingest job runs give
 
 ### 10.7 Windows process termination
 
-`start_new_session` is POSIX-only. Windows needs `CREATE_NEW_PROCESS_GROUP` plus `taskkill /T /F`, or a Job Object for reliable tree kill.
+`start_new_session` is POSIX-only, and Windows has no equivalent primitive: `TerminateProcess` kills one process and orphans its children, while console control events are cooperative notifications a process may ignore.
 
-*Mitigation:* implement `_terminate` per platform behind one function. Do not ship the Windows build of this feature until the tree-kill test passes there.
+*Mitigation:* the child is assigned to a job object at spawn (`_win_create_job_for`). Descendants join their parent's job automatically, so `TerminateJobObject` kills the set at once. `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` also makes the handle a dead-man switch: if the sidecar dies holding it, the tree goes too. Ctrl+Break to the process group is the graceful attempt first; it needs a console the sidecar usually lacks, so a failed delivery escalates immediately instead of waiting out the grace period. Job creation failing for any reason falls back to killing the direct child.
+
+*Residual risk:* unverified. CI runs pytest on Linux only, and the cancel test's liveness probe is POSIX-only -- `os.kill(pid, 0)` terminates the target on Windows rather than probing it. A grandchild spawned between `CreateProcess` and the job assignment also escapes the job; starting the child suspended would close that window, but `subprocess` discards the thread handle and leaves no way to resume it.
 
 ### 10.8 Output that never yields a line
 
@@ -431,7 +434,39 @@ Phases 0 through 3: about two days, plus tests. Phase 0 alone is a half day and 
 
 - **Q6.** Is the Windows build in scope at all for this feature, or is it POSIX-only until someone asks?
 
-## 15. References
+## 15. Implementation notes
+
+Three things landed differently from the plan above.
+
+**15.1 Phase 0 became a deque, not a lossy queue.** The plan was
+`put_nowait` plus a dropped counter on the existing bounded
+`asyncio.Queue`. That is not sufficient: progressive events still
+*occupy* the queue, so a terminal event arriving after 1024 of them
+blocks behind events nobody is reading. Skipping the queue entirely
+when `subscribers == 0` fixes the stall but loses every event emitted
+between the POST and the client attaching its stream -- which is the
+order every existing pane uses, and it broke four existing test files.
+The queue is now a `deque` the producer can always append to, drained by
+the subscriber and woken by an `asyncio.Event`. Overflow evicts the
+oldest progressive event; terminal events are never evicted. `_emit`
+no longer awaits anything.
+
+**15.2 Script jobs are the first that outlive their request.** Every
+existing job test drives a stub that finishes inside the POST handler,
+so a bare `TestClient` -- which starts a portal per request -- was
+enough. A script spawns a real child process, and its task was cancelled
+the moment the POST's event loop went away. `tests/conftest.py` gains a
+`live_client` fixture that enters the client as a context manager;
+`tests/test_scripts.py` overrides the module's `client` with it.
+
+**15.3 Windows tree-kill uses a job object, and is unverified.**
+`_signal_child` signals the process group on POSIX. On Windows it
+terminates a kill-on-close job object created at spawn, falling back to
+the direct child when the job could not be created. Section 10.7 has the
+mechanism and what remains unproven; Q6 stays open, since nothing in CI
+exercises it.
+
+## 16. References
 
 - `sidecar.py:637` `_hw_signature` -- what evicts the model cache.
 

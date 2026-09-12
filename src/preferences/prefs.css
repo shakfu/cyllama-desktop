@@ -126,6 +126,23 @@ body.prefs {
 }
 .prefs-link:hover { color: var(--accent, #4a9eff); }
 
+/* Path row: the path reveals on click, the trailing button copies it. */
+.prefs-path { display: flex; align-items: baseline; gap: 8px; }
+.prefs-path .prefs-link { text-align: left; word-break: break-all; }
+.prefs-copy {
+  appearance: none;
+  flex: 0 0 auto;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--fg-faint);
+  font: inherit;
+  font-size: 10px;
+  padding: 1px 6px;
+  cursor: pointer;
+}
+.prefs-copy:hover { color: var(--fg); border-color: var(--border-strong, var(--border)); }
+
 /* Logs tab. Same layout as the main window's Console drawer. */
 .prefs-logs {
   background: var(--bg-sunken);
