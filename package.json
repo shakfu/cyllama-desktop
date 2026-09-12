@@ -1,15 +1,15 @@
 {
   "name": "cyllama-desktop",
   "productName": "Cyllama Desktop",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "Desktop app for cyllama (Electron + bundled Python sidecar)",
   "main": "src/main/index.js",
   "scripts": {
     "start": "npm run build:renderer && electron .",
     "dev": "npm run build:renderer && electron . --enable-logging",
     "vendor": "bash scripts/copy-vendor.sh",
-    "build:renderer": "esbuild src/renderer/src/main.js --bundle --outfile=src/renderer/dist/renderer.js --format=iife --target=chrome120 --sourcemap=inline && esbuild src/preferences/main.js --bundle --outfile=src/preferences/dist/preferences.js --format=iife --target=chrome120 --sourcemap=inline",
-    "watch:renderer": "esbuild src/renderer/src/main.js --bundle --outfile=src/renderer/dist/renderer.js --format=iife --target=chrome120 --sourcemap=inline --watch",
+    "build:renderer": "esbuild src/renderer/src/main.js --bundle --outfile=src/renderer/dist/renderer.js --format=iife --target=chrome120 --minify --sourcemap=linked && esbuild src/preferences/main.js --bundle --outfile=src/preferences/dist/preferences.js --format=iife --target=chrome120 --minify --sourcemap=linked",
+    "watch:renderer": "esbuild src/renderer/src/main.js --bundle --outfile=src/renderer/dist/renderer.js --format=iife --target=chrome120 --sourcemap=linked --watch",
     "test:e2e": "npm run build:renderer && playwright test",
     "build:python": "bash scripts/build-python-env.sh",
     "build:mac-arm64": "npm run build:renderer && electron-builder --mac --arm64",
@@ -26,6 +26,7 @@
     "electron": "^33.0.0",
     "electron-builder": "^25.1.8",
     "esbuild": "^0.24.0",
+    "highlight.js": "^11.12.0",
     "katex": "^0.16.11",
     "marked": "^14.1.3"
   },

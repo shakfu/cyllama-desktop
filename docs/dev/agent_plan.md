@@ -2,7 +2,7 @@
 
 Status: proposed. Owner: @shakfu. Last updated: 2026-05-11.
 
-Companion docs: `PLAN.md` (overall feature rollout), `TODO.md` (tactical checklist), `CHANGELOG.md`. This document is scoped to the agent layer: what's new in cyllama, what to wire, and how. The general phasing rules from PLAN.md still apply.
+Companion docs: [`plan.md`](plan.md) (overall feature rollout), `TODO.md` (tactical checklist), `CHANGELOG.md`. This document is scoped to the agent layer: what's new in cyllama, what to wire, and how. The general phasing rules from `plan.md` still apply.
 
 ---
 
@@ -22,55 +22,64 @@ Concrete acceptance criterion: a user can pick any of the new agent types from t
 
 - A workflow-authoring UI. Workflows are specified as Python in workspace-scoped files (Section 7); a visual graph editor is out of scope for this round.
 
-## 3. Current state (2026-05-11)
+## 3. Current state (2026-09-12)
 
-Sidecar (`python-sidecar/sidecar.py`):
+Phases A through F have shipped. What follows records the outcome; the
+original plan is preserved below it, with per-item status, because the
+reasoning still explains why the surface has the shape it does.
 
-- **Wired:** `cyllama.agents.ReActAgent` via `/jobs/agent/run` (sidecar.py:2975), SSE-streamed. Feature-detected at module load via `_AGENT_REACT_CLS = _resolve_attr(...)`; gated by `_FEATURE_FLAGS["agents"]`.
+Shipped:
 
-- **Tool catalog:** `_build_agent_tools()` constructs file-read, file-write, fetch-url, and Python-exec tools from a sandbox dir. Each tool has a hard byte cap (`_AGENT_MAX_FILE_BYTES` etc).
+- Six agent types behind slash commands: `/agent`,
+  `/agent-constrained` (aliased `/agent-strict`), `/agent-contract`,
+  `/agent-plan`, `/agent-reflect`, and `/agent-workflow`. Endpoints
+  `/jobs/agent/{run,constrained,contract,plan,reflect}` plus
+  `/info/contract-presets`.
 
-- **Slash command:** `/agent <task>` in the chat composer routes through `/jobs/agent/run`; the renderer renders the agent trace inline under the chat stream (`src/renderer/dist/renderer.js:4236`).
+- Tool catalog: stock cyllama tools (`calculator`, `current_time`,
+  `word_count`), sandboxed `read_file`, `web_fetch`,
+  `search_wikipedia`, `quarto_render`, `rag_query`, and
+  `semantic_memory` (`remember` / `recall`). The last three are
+  Phase E.
 
-- **Right-sidebar tab:** `agents` for configuring sandbox dir, max iterations, model pin, and tool catalog (`src/renderer/index.html:172`, `:397`).
+- Workflows: `/workflows`, `/workflows/{id}/spec`,
+  `/jobs/workflow/run`, authored as Python in
+  `<workspace>/workflows/`.
 
-cyllama (`~/projects/personal/cyllama`, currently in `[Unreleased]` relative to the bundle):
+- A full-area Agents pane (Phase F) that absorbed the right-sidebar
+  `agents` tab, the standalone Workflows pane, and per-call modals for
+  the four configurable agent types. It also hosts workspace scripts,
+  which are not part of this plan -- see
+  [`scripting.md`](scripting.md).
 
-- **New agent classes:** `ConstrainedAgent`, `ContractAgent`, `AsyncReActAgent`, `AsyncConstrainedAgent`, `ACPAgent` (experimental).
-
-- **Composition primitives:** `agent_as_tool`, `TieredAgentTeam`, `ReflectionLoop`, `plan_and_execute`, `mcp_agent_tool`, `rag_as_tool`.
-
-- **Long-term memory:** `SemanticMemory`.
-
-- **DAG workflow runtime:** `Workflow` / `CompiledWorkflow` (Phases 1-5), Layer B + Layer C authoring, streaming events, contracts, reducers, sub-workflows, `as_agent()` adapter.
-
-None of the items in the second list are exercised by the desktop app today. This document is the plan to get them there.
+Not shipped: items 3, 9, 10 and 11 of Section 4, and Phase F.4
+(per-agent-type run history), which is tracked in `TODO.md`.
 
 ## 4. Surface to wire (priority order)
 
 Ordered by "tested value per LoC of integration." Higher entries exercise more cyllama internals for the same desktop-side effort.
 
-1. **`ConstrainedAgent`** -- same loop as ReAct but grammar-enforced tool calls. Reuses tool catalog, sandbox, sidebar config. Only the agent class changes. ~50 sidecar LoC.
+1. **`ConstrainedAgent`** [shipped] -- same loop as ReAct but grammar-enforced tool calls. Reuses tool catalog, sandbox, sidebar config. Only the agent class changes. ~50 sidecar LoC.
 
-2. **`ContractAgent`** -- ReAct + pre/post-condition checks + `ContractPolicy`. Renders `CONTRACT_CHECK` / `CONTRACT_VIOLATION` events the existing trace renderer doesn't yet display. ~80 sidecar LoC, plus event-renderer extension.
+2. **`ContractAgent`** [shipped] -- ReAct + pre/post-condition checks + `ContractPolicy`. Renders `CONTRACT_CHECK` / `CONTRACT_VIOLATION` events the existing trace renderer doesn't yet display. ~80 sidecar LoC, plus event-renderer extension.
 
-3. **`AsyncReActAgent` / `AsyncConstrainedAgent`** -- async wrappers. Sidecar already runs the sync agent on a thread; the async variants would let us drop the thread hop. Probably a sidecar- internal refactor rather than a new endpoint -- defer unless profiling shows the thread hop matters.
+3. **`AsyncReActAgent` / `AsyncConstrainedAgent`** [not done; the thread hop has not shown up in profiling] -- async wrappers. Sidecar already runs the sync agent on a thread; the async variants would let us drop the thread hop. Probably a sidecar- internal refactor rather than a new endpoint -- defer unless profiling shows the thread hop matters.
 
-4. **`Workflow` / `CompiledWorkflow`** -- the big new feature. New endpoint `/jobs/workflow/run`. Workflow specs live in workspace files (Section 7); the endpoint takes a workflow id + initial state and streams `WORKFLOW_START` / `NODE_START` / `NODE_END` / `ANSWER` / `WORKFLOW_END` / `CONTRACT_VIOLATION` events.
+4. **`Workflow` / `CompiledWorkflow`** [shipped] -- the big new feature. New endpoint `/jobs/workflow/run`. Workflow specs live in workspace files (Section 7); the endpoint takes a workflow id + initial state and streams `WORKFLOW_START` / `NODE_START` / `NODE_END` / `ANSWER` / `WORKFLOW_END` / `CONTRACT_VIOLATION` events.
 
-5. **`ReflectionLoop`** -- worker + critic loop. The shape is "two agents in sequence, repeat until accepted." A `/jobs/agent/reflect` endpoint takes worker config + critic config + max_attempts. Streams agent events from both with `source` tagging the role. ~120 sidecar LoC.
+5. **`ReflectionLoop`** [shipped] -- worker + critic loop. The shape is "two agents in sequence, repeat until accepted." A `/jobs/agent/reflect` endpoint takes worker config + critic config + max_attempts. Streams agent events from both with `source` tagging the role. ~120 sidecar LoC.
 
-6. **`plan_and_execute`** -- planner emits steps, executor runs each. Endpoint streams planner trace, then per-step executor traces. Same `source` tagging pattern. ~100 sidecar LoC.
+6. **`plan_and_execute`** [shipped] -- planner emits steps, executor runs each. Endpoint streams planner trace, then per-step executor traces. Same `source` tagging pattern. ~100 sidecar LoC.
 
-7. **`rag_as_tool`** -- bridge to the existing `/rag` collection surface. Adds a "rag_search" entry to the agent tool catalog gated on whether the workspace has an active collection. ~30 sidecar LoC; the renderer just sees one more tool.
+7. **`rag_as_tool`** [shipped, as `rag_query`] -- bridge to the existing `/rag` collection surface. Adds a "rag_search" entry to the agent tool catalog gated on whether the workspace has an active collection. ~30 sidecar LoC; the renderer just sees one more tool.
 
-8. **`SemanticMemory`** -- long-term per-workspace memory backed by a workspace RAG collection. Exposed as a tool (`remember` / `recall`) for any agent type. Storage lives under `<workspace>/memory/`. ~80 sidecar LoC plus a small "Memory" surface in the right sidebar listing recalled hits.
+8. **`SemanticMemory`** [shipped; storage is a workspace RAG collection plus a namespace, not `<workspace>/memory/`] -- long-term per-workspace memory backed by a workspace RAG collection. Exposed as a tool (`remember` / `recall`) for any agent type. Storage lives under `<workspace>/memory/`. ~80 sidecar LoC plus a small "Memory" surface in the right sidebar listing recalled hits.
 
-9. **`mcp_agent_tool`** -- requires an MCP server to dispatch to. Defer unless we have a concrete remote agent to target; the wiring is trivial but the value depends on a real other side.
+9. **`mcp_agent_tool`** [deferred] -- requires an MCP server to dispatch to. Defer unless we have a concrete remote agent to target; the wiring is trivial but the value depends on a real other side.
 
-10. **`TieredAgentTeam`** -- supervisor + named workers, each with its own model pin. Big in feature scope (multi-model loading, GPU-budget concerns) and minimal vs. composing `agent_as_tool` manually. Defer until single-agent surfaces are validated.
+10. **`TieredAgentTeam`** [deferred] -- supervisor + named workers, each with its own model pin. Big in feature scope (multi-model loading, GPU-budget concerns) and minimal vs. composing `agent_as_tool` manually. Defer until single-agent surfaces are validated.
 
-11. **`ACPAgent`** -- experimental upstream; cyllama itself warns the API may change. Skip until upstream stabilizes.
+11. **`ACPAgent`** [deferred] -- experimental upstream; cyllama itself warns the API may change. Skip until upstream stabilizes.
 
 ## 5. Endpoint design (uniform shape)
 
@@ -184,7 +193,7 @@ Pros: leverages existing chat-stream trace rendering; minimal new UI. Cons: hide
 
 **Option B: new "Workflows" pane.** A left-nav-rail entry next to Chats/Documents/etc. Lists discovered workflow files, "Run" button per workflow opens a modal for initial state, trace renders in the pane itself rather than the chat stream.
 
-Pros: discoverable; matches the "pane per capability" model in PLAN.md S.5; keeps long workflow traces out of the chat history. Cons: more renderer LoC; duplicates the trace-rendering code.
+Pros: discoverable; matches the "pane per capability" model in `plan.md` S5; keeps long workflow traces out of the chat history. Cons: more renderer LoC; duplicates the trace-rendering code.
 
 **Recommendation: A for agent variants, B for workflows.**
 
@@ -192,38 +201,72 @@ The agent variants (Constrained, Contract, Reflect, Plan) are "chat-shaped" -- s
 
 This is also the cheapest staging: Option A is ~3 hours of renderer work per command (slash registration, validation, trace adapter). Option B is ~2 days but only needs to be built once.
 
+**What shipped, and how it differs.** Option A, with every command
+under an `/agent-` prefix -- `/agent-constrained`, `/agent-contract`,
+`/agent-plan`, `/agent-reflect`, `/agent-workflow` -- so Tab
+completion from `/agent` surfaces the family. The bare names proposed
+above (`/constrained`, `/reflect`) were never registered.
+
+Option B was built and then folded in. Workflows shipped as a separate
+full-area pane, then Phase F made them the `agent-workflow` row of the
+Agents pane, which also absorbed the right-sidebar `agents` tab. So
+there is one pane, not one per capability, and the trace-rendering
+duplication the Cons list warned about was the reason: one pane, one
+renderer.
+
+The four configurable variants gained a per-call modal, pre-filled
+from the pane's defaults. That was not in either option. It resolves
+the tension the Cons list named -- commands are discoverable and
+configuration is visible at the point of use, rather than only in a
+sidebar the user has to find first.
+
 ## 9. Phasing
 
-Five short phases, each shippable on its own. Each ends with a Playwright smoke test, a CHANGELOG entry, and a feature-flag expansion. No phase blocks on cyllama-side changes -- the cyllama work has landed.
+Five short phases, each shippable on its own. All five shipped, plus
+an unplanned Phase F; status is marked per phase. Each ends with a Playwright smoke test, a CHANGELOG entry, and a feature-flag expansion. No phase blocks on cyllama-side changes -- the cyllama work has landed.
 
-**Phase A. Bundle bump.** Update `python-sidecar/pyproject.toml` cyllama pin. Run existing pytest + Playwright suite. Resolve any breakage from the bump itself (signature changes, removed APIs). Add `_resolve_attr` probes from Section 6. No new endpoints. No new UI. Single CHANGELOG entry: "bump cyllama; detect new agent capabilities."
+**Phase A. Bundle bump.** [shipped] Update `python-sidecar/pyproject.toml` cyllama pin. Run existing pytest + Playwright suite. Resolve any breakage from the bump itself (signature changes, removed APIs). Add `_resolve_attr` probes from Section 6. No new endpoints. No new UI. Single CHANGELOG entry: "bump cyllama; detect new agent capabilities."
 
-**Phase B. Three slash-command agents.** `/constrained`, `/contract`, `/plan`. New endpoints `/jobs/agent/constrained`, `/jobs/agent/contract`, `/jobs/agent/plan`. Renderer extension: slash registration, contract-violation event rendering (new event type the existing renderer doesn't know about). Playwright tests follow the `/agent` test shape. Sidebar `agents` tab gains a contract-spec editor and a planner/executor selector.
+**Phase B. Three slash-command agents.** [shipped] `/constrained`, `/contract`, `/plan`. New endpoints `/jobs/agent/constrained`, `/jobs/agent/contract`, `/jobs/agent/plan`. Renderer extension: slash registration, contract-violation event rendering (new event type the existing renderer doesn't know about). Playwright tests follow the `/agent` test shape. Sidebar `agents` tab gains a contract-spec editor and a planner/executor selector.
 
-**Phase C. ReflectionLoop.** `/reflect` command. New endpoint `/jobs/agent/reflect`. Sidebar gains a worker/critic dual-config section. Renderer renders the two-agent interleaved trace with `source` tagging in the event chip (chip color or prefix).
+**Phase C. ReflectionLoop.** [shipped] `/reflect` command. New endpoint `/jobs/agent/reflect`. Sidebar gains a worker/critic dual-config section. Renderer renders the two-agent interleaved trace with `source` tagging in the event chip (chip color or prefix).
 
-**Phase D. Workflow pane.** New left-nav-rail pane "Workflows". `/workflows` endpoint for discovery, `/jobs/workflow/run` for execution, `/workflows/<id>/spec` for the static dry-run plan (for the pane's preview panel). Workspace `workflows/` directory
+**Phase D. Workflow pane.** [shipped, then superseded by F] New left-nav-rail pane "Workflows". `/workflows` endpoint for discovery, `/jobs/workflow/run` for execution, `/workflows/<id>/spec` for the static dry-run plan (for the pane's preview panel). Workspace `workflows/` directory
 + first-launch seeding with the three example workflows. Playwright tests: discovery, dry-run preview, execute, real-time event streaming (the test from cyllama `test_sub_events_arrive_before_node_end` translated to a UI assertion).
 
-**Phase E. Memory + RAG tool.** Extends the existing agent tool catalog with `rag_search` (gated on a workspace having an active RAG collection) and `remember`/`recall` (semantic memory). No new endpoints; the tool catalog is the surface. Available to every agent type from Phases B/C and any Workflow that opts in.
+Two parts of that came out differently. One example workflow ships
+(`word_count.py`), not three. And first-launch seeding was removed:
+the pane lists the shipped examples beside the user's own files, and
+Install copies one in. Nothing writes to the workspace on launch. See
+[`scripting.md`](scripting.md) S17.
+
+**Phase E. Memory + RAG tool.** [shipped] Extends the existing agent tool catalog with `rag_search` (gated on a workspace having an active RAG collection) and `remember`/`recall` (semantic memory). No new endpoints; the tool catalog is the surface. Available to every agent type from Phases B/C and any Workflow that opts in. Shipped as `rag_query` rather than `rag_search`.
+
+**Phase F. One pane.** [shipped, except F.4] Not in the original
+plan. Promotes the right-sidebar `agents` tab and the standalone
+Workflows pane into a single full-area Agents pane: a subnav of the
+six agent types plus a scripts row, per-type defaults in the main
+column, and a per-call modal pre-filled from those defaults. F.4,
+per-agent-type run history, is still open -- see `TODO.md` for the
+shape and why it was deferred.
 
 ## 10. Risks
 
-- **Bundle bump breakage.** cyllama's [Unreleased] section is long -- there may be API changes the sidecar hasn't tracked. Phase A exists to surface these before adding new endpoints.
+- **Bundle bump breakage.** cyllama's [Unreleased] section is long -- there may be API changes the sidecar hasn't tracked. Phase A exists to surface these before adding new endpoints. *Outcome: a recurring cost, not a one-off. The 0.4.6 bump moved openai/anthropic onto `httpx2`, which uninstalled plain `httpx` and broke the script client library; it is stdlib-only now.*
 
-- **Workflow trust boundary.** Executing workspace Python is the same trust level as `agent_exec_python` today. The risk is users not realizing this; the mitigation is a confirmation modal on first run and a visible "workflow file: <path>" header in the pane.
+- **Workflow trust boundary.** Executing workspace Python is the same trust level as `agent_exec_python` today. The risk is users not realizing this; the mitigation is a confirmation modal on first run and a visible "workflow file: <path>" header in the pane. *Both shipped, late and in a better shape than proposed. The header is there, and instead of a modal describing the trust level, Run on a file the user has not read opens the file -- syntax highlighted, read-only -- with the warning across the top and Run in its footer. A View button opens the same view on demand, including for a shipped example before it is installed. Scripts get the same treatment, being equally unrestricted. Which files have been read is remembered per file id in `localStorage`.*
 
-- **Renderer trace bloat.** Workflows can emit hundreds of events (each node, each contract check). The current trace renderer loads everything into the DOM. Phase D should virtualize the event list (or collapse-by-default per-node groups) if a real workflow blows past a few hundred events.
+- **Renderer trace bloat.** Workflows can emit hundreds of events (each node, each contract check). The current trace renderer loads everything into the DOM. Phase D should virtualize the event list (or collapse-by-default per-node groups) if a real workflow blows past a few hundred events. *Shipped as a cap rather than virtualization: `WF_TRACE_MAX = 400`, evicting oldest-first from state and DOM together, mirroring `SCRIPT_LOG_MAX`. Re-rendering the pane now replays the trace from state, which it did not before -- leaving mid-run and returning showed nothing while the events kept accumulating.*
 
-- **Multi-model loading (TieredAgentTeam).** Deferred to a later round; loading two 7B+ models is rarely viable on consumer hardware. PLAN.md S.9 workspaces will help (per-workspace pinned models) but the GPU-budget UX is its own design.
+- **Multi-model loading (TieredAgentTeam).** Deferred to a later round; loading two 7B+ models is rarely viable on consumer hardware. `plan.md` S9 workspaces will help (per-workspace pinned models) but the GPU-budget UX is its own design.
 
 ## 11. Testing
 
 Every phase ships with:
 
-- **Sidecar pytest.** One test per endpoint covering: happy path, missing-required-input 400, cancellation, error event capture. Pattern: `tests/sidecar/test_agent_constrained.py` etc.
+- **Sidecar pytest.** One test per endpoint covering: happy path, missing-required-input 400, cancellation, error event capture. Shipped as `tests/test_agents_constrained.py`, `test_agents_contract.py`, `test_agents_plan.py`, `test_agents_reflect.py`, `test_agents_memory.py` and `test_workflow.py` -- flat under `tests/`, not the `tests/sidecar/` subdirectory proposed here.
 
-- **Playwright smoke.** One test per slash command / pane that runs against a small stub model (`models/test-small.gguf`) and asserts: command opens, trace renders, ANSWER event lands, no console errors. Pattern: `tests/e2e/agent-constrained.spec.js`.
+- **Playwright smoke.** One test per slash command / pane asserting the command registers, the surface renders, and no console errors. Shipped as cases inside the single `tests/e2e/panes.spec.js`, not a file per command. There is no stub model: `tests/e2e/sidecar_launcher.py` installs the conftest cyllama stub, so the suite needs no `.gguf` at all.
 
 - **Workflow live-streaming.** Phase D adds an explicit assertion that a `NODE_END` for an inner node arrives *before* the outer `NODE_END` -- mirrors the cyllama-side regression guard.
 
@@ -241,11 +284,26 @@ Every phase ships with:
 
 ## 13. Open questions
 
-- **Workflow file editor in-app, or external editor only?** Phase D ships read-only discovery; users author in their preferred editor. A in-app code editor (Monaco) is a separate Phase F if demand appears.
+- **Workflow file editor in-app, or external editor only?** External only, still. Discovery is read-only and authoring happens in the user's editor. Installing or uninstalling a shipped example is the only write the app makes. No demand for Monaco has appeared.
 
-- **Workspace-level workflow vs global workflow?** Phase D assumes workspace-scoped. If a user wants to run the same workflow against multiple workspaces, they currently have to symlink or copy. PLAN.md S.9 workspaces is still mid-rollout; this gets resolved when workspace switching lands.
+- **Workspace-level workflow vs global workflow?** Workspace-scoped, unresolved. One implicit `default` workspace still exists, so the question has not bitten. It returns when workspace switching lands ([`plan.md`](plan.md) S9).
 
 - **Workflow visualization in the pane?** `flow.to_mermaid()` and `flow.to_dot()` exist. Rendering Mermaid in the pane is ~100 LoC of renderer work. Phase D should include this -- the visualization is exactly the kind of thing that makes the workflow surface feel substantive vs. "a JSON config that does some things."
+
+  Partly done. `/workflows/{id}/spec` returns `mermaid` and the pane
+  shows it, but as collapsed source in a `<details>`, not a rendered
+  diagram. Entry node, exits and topological levels render as text
+  above it. Rendering the graph is still open.
+
+- **Should the trust boundary have a guardrail?** Settled, as
+  disclosure rather than a gate: Run on an unread file shows the code
+  with a warning, and the run starts from there. Same for scripts. A
+  prose dialog was built first and discarded -- describing the trust
+  level does not help a user answer "is this safe to run", and the
+  code does. What remains open is whether having read a file should
+  expire when its content changes; it does not today, because
+  re-prompting on every save would fire once per iteration while
+  authoring.
 
 ## 14. References
 
@@ -257,6 +315,9 @@ Every phase ships with:
 
 - `cyllama/CHANGELOG.md` `[Unreleased]` -- the agent surface this plan integrates.
 
-- `PLAN.md` S.7 (Sidecar API design) -- conventions this plan mirrors.
+- [`plan.md`](plan.md) S.7 (Sidecar API design) -- conventions this plan mirrors.
 
-- `PLAN.md` S.9 (Workspaces) -- where workflow files live.
+- [`plan.md`](plan.md) S.9 (Workspaces) -- where workflow files live.
+
+- [`scripting.md`](scripting.md) -- workspace scripts, which share the
+  Agents pane but are not part of this plan.

@@ -461,8 +461,10 @@ test("Scripts row lists a workspace script and streams its run", async () => {
     .toHaveText("Smoke script.");
 
   // Run from the script's own row, without scrolling to the Arguments
-  // section at the bottom.
+  // section at the bottom. The first run opens the source viewer, since
+  // the file has not been read; Run in there starts it.
   await window.click("#scr-run-smoke");
+  await window.click("#code-modal #cm-run");
   await expect(window.locator("#scr-log"))
     .toContainText("hello from the script", { timeout: 30_000 });
   await expect(window.locator("#agentsPaneDetail"))
@@ -563,6 +565,198 @@ test("Workflow row Run is inert until required inputs are filled", async () => {
   // Blank again: the row returns to inert without a re-render.
   await window.fill('#wf-form input[data-state-key="text"]', "   ");
   await expect(run).toBeDisabled();
+});
+
+test("Run on an unread script opens the source with the warning", async () => {
+  ctx = await launchApp();
+  const { window, userDataDir } = ctx;
+  const dir = path.join(userDataDir, "workspaces", "default", "scripts");
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, "smoke.py"),
+    '"""Smoke script."""\nprint("hello from the script")\n');
+
+  await window.click("#navAgents");
+  await window.locator("#agt-row-scripts").click();
+  await window.click("#scr-refresh");
+  await expect(window.locator("#scr-run-smoke")).toBeVisible({ timeout: 15_000 });
+
+  // Run without having read it: the viewer opens instead of running.
+  await window.click("#scr-run-smoke");
+  const modal = window.locator("#code-modal");
+  await expect(modal).toBeVisible();
+  await expect(modal.locator("#cm-warning")).toContainText("not sandboxed");
+  await expect(modal).toContainText("smoke.py");
+  await expect(modal).toContainText(path.join(dir, "smoke.py"));
+  // The code is shown, and highlighted.
+  await expect(modal.locator(".cm-code")).toContainText("hello from the script");
+  await expect(modal.locator(".cm-code .hljs-string").first()).toBeVisible();
+
+  // Cancel: nothing ran.
+  await modal.locator("button", { hasText: "Cancel" }).click();
+  await expect(modal).toHaveCount(0);
+  await expect(window.locator("#scr-log")).toHaveCount(0);
+
+  // Run again, then approve from the dialog.
+  await window.click("#scr-run-smoke");
+  await window.click("#code-modal #cm-run");
+  await expect(window.locator("#scr-log"))
+    .toContainText("hello from the script", { timeout: 30_000 });
+
+  // Read once: a later run goes straight through.
+  await window.click("#scr-run-smoke");
+  await expect(window.locator("#code-modal")).toHaveCount(0);
+  await expect(window.locator("#agentsPaneDetail"))
+    .toContainText("succeeded", { timeout: 30_000 });
+});
+
+test("View opens a script read-only, and counts as having read it", async () => {
+  ctx = await launchApp();
+  const { window, userDataDir } = ctx;
+  const dir = path.join(userDataDir, "workspaces", "default", "scripts");
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, "smoke.py"),
+    '"""Smoke script."""\nprint("hello from the script")\n');
+
+  await window.click("#navAgents");
+  await window.locator("#agt-row-scripts").click();
+  await window.click("#scr-refresh");
+  await window.click("#scr-view-smoke");
+
+  const modal = window.locator("#code-modal");
+  await expect(modal).toBeVisible();
+  // Inspect mode: no warning, no Run.
+  await expect(modal.locator("#cm-warning")).toHaveCount(0);
+  await expect(modal.locator("#cm-run")).toHaveCount(0);
+  await modal.locator("button", { hasText: "Close" }).click();
+  await expect(modal).toHaveCount(0);
+
+  // Having read it, Run does not re-open the viewer.
+  await window.click("#scr-run-smoke");
+  await expect(window.locator("#code-modal")).toHaveCount(0);
+  await expect(window.locator("#agentsPaneDetail"))
+    .toContainText("succeeded", { timeout: 30_000 });
+});
+
+test("View reads a shipped script before it is installed", async () => {
+  ctx = await launchApp();
+  const { window } = ctx;
+  await window.click("#navAgents");
+  await window.locator("#agt-row-scripts").click();
+  await expect(window.locator("#scr-install-sweep")).toBeVisible({ timeout: 15_000 });
+  // Not installed, so there is no Run -- but it can still be read.
+  await expect(window.locator("#scr-run-sweep")).toHaveCount(0);
+  await window.click("#scr-view-sweep");
+  const modal = window.locator("#code-modal");
+  await expect(modal).toBeVisible();
+  await expect(modal.locator(".cm-code")).toContainText("cyllama_desktop");
+  await modal.locator("button", { hasText: "Close" }).click();
+});
+
+test("The selected file's path is shown with a Reveal button", async () => {
+  ctx = await launchApp();
+  const { window, userDataDir } = ctx;
+  const dir = path.join(userDataDir, "workspaces", "default", "scripts");
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, "mine.py"), '"""Mine."""\n');
+
+  await window.click("#navAgents");
+  await window.locator("#agt-row-scripts").click();
+  await window.click("#scr-refresh");
+  await window.click("#scr-item-mine");
+  const header = window.locator("#scr-file");
+  await expect(header).toContainText("script file");
+  await expect(header).toContainText(path.join(dir, "mine.py"));
+  await expect(header.locator("button")).toHaveText("Reveal");
+});
+
+test("Workflow trace is capped and survives leaving the pane", async () => {
+  ctx = await launchApp();
+  const { window, userDataDir } = ctx;
+  const dir = path.join(userDataDir, "workspaces", "default", "workflows");
+  fs.mkdirSync(dir, { recursive: true });
+  // The stub replays whatever the file puts in `_script`, so this emits
+  // 500 node events -- more than the 400-row cap.
+  fs.writeFileSync(path.join(dir, "noisy.py"), [
+    "\x27\x27\x27Emits more events than the pane keeps.\x27\x27\x27",
+    "from cyllama.agents.workflow import Workflow",
+    "",
+    "flow = Workflow()",
+    'flow.add_node("n", lambda s: {"n": 1})',
+    'flow.set_entry("n")',
+    'flow.set_exit("n")',
+    'flow._script = [("NODE_END", "line %d" % i, {"node": "n"}) for i in range(500)]',
+    "",
+  ].join("\n"));
+
+  await window.click("#navAgents");
+  await window.locator('[data-agent-type="agent-workflow"]').click();
+  await window.click("#wf-refresh");
+  await window.click("#wf-item-noisy");
+  await window.click("#wf-run-noisy");
+  await window.click("#code-modal #cm-run");
+
+  const rows = window.locator("#wf-events > div");
+  await expect.poll(() => rows.count(), { timeout: 30_000 }).toBe(400);
+
+  // Leave the pane and come back: the trace is rebuilt from state
+  // rather than rendering empty.
+  await window.locator('[data-agent-type="agent"]').click();
+  await window.locator('[data-agent-type="agent-workflow"]').click();
+  await expect(window.locator("#wf-events > div")).toHaveCount(400);
+});
+
+test("A wide markdown table scrolls, and a huge image is clamped", async () => {
+  ctx = await launchApp();
+  const { window } = ctx;
+  // Render through the same marked path the chat stream uses.
+  const m = await window.evaluate(async () => {
+    const at = document.createElement("div");
+    at.className = "asst-text";
+    const svg = '<svg xmlns="http://www.w3.org/2000/svg" width="2400" height="60">'
+      + '<rect width="2400" height="60" fill="#4f46e5"/></svg>';
+    // Twelve columns of real words: wide enough to overflow any
+    // plausible message column, so the assertion is not window-size
+    // dependent.
+    const cols = ["variant", "linux", "windows", "macos", "runtime",
+      "registries", "notes", "status", "owner", "eta", "installer", "verified"];
+    const row = ["cuda12", "supported", "supported", "unsupported",
+      "CUDA 12 plus cuBLAS", "CPU, CUDA", "needs a driver", "shipped",
+      "unassigned", "none", "nsis per backend", "not yet"];
+    at.innerHTML = window.marked ? marked.parse([
+      "| " + cols.join(" | ") + " |",
+      "|" + cols.map(() => "---").join("|") + "|",
+      "| " + row.join(" | ") + " |",
+      "",
+      "![wide](data:image/svg+xml;base64," + btoa(svg) + ")",
+    ].join("\n")) : "";
+    document.getElementById("log").appendChild(at);
+    const img = at.querySelector("img");
+    await new Promise((res) => {
+      if (img.complete && img.naturalWidth) return res();
+      img.addEventListener("load", res, { once: true });
+      img.addEventListener("error", res, { once: true });
+      setTimeout(res, 2000);
+    });
+    const t = at.querySelector("table");
+    return {
+      column: at.clientWidth,
+      tableScrolls: t.scrollWidth > t.clientWidth,
+      tableWidth: t.clientWidth,
+      imgNatural: img.naturalWidth,
+      imgRendered: img.clientWidth,
+      pageScrollsSideways:
+        document.documentElement.scrollWidth > document.documentElement.clientWidth,
+    };
+  });
+  // The table overflows into its own scroll area rather than squeezing
+  // its columns, and does not widen the message column.
+  expect(m.tableScrolls).toBe(true);
+  expect(m.tableWidth).toBeLessThanOrEqual(m.column);
+  // A 2400px image is clamped to the column.
+  expect(m.imgNatural).toBe(2400);
+  expect(m.imgRendered).toBeLessThanOrEqual(m.column);
+  // Neither pushes the window sideways.
+  expect(m.pageScrollsSideways).toBe(false);
 });
 
 test("/agent-reflect slash + Reflection section render when feature is on", async () => {

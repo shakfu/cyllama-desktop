@@ -981,13 +981,33 @@ dialog.agent-modal .agent-modal-actions {
   width: 100%;
   margin: 0 0 14px;
   font-size: 0.95em;
+  /* Scroll a wide table rather than collapsing its columns. display:
+     block is what gives the table its own scroll area; max-width keeps
+     it from widening the message column. */
+  display: block;
+  overflow-x: auto;
+  max-width: 100%;
 }
+/* width:100% on a block table would only fill the scroll box, so let
+   the cells size themselves and stretch the table to the column when
+   it is narrower. */
+.asst-text table > * { min-width: 100%; }
 .asst-text th, .asst-text td {
   border: 1px solid var(--border);
   padding: 6px 10px;
   text-align: left;
+  /* Cells that wrap never overflow, so the scroll box above would never
+     engage and columns would squeeze to a character or two instead.
+     nowrap is what turns "illegible" into "scrollable". */
+  white-space: nowrap;
 }
 .asst-text th { background: var(--bg-sunken); font-weight: 600; }
+/* Markdown images: never wider than the message column. */
+.asst-text img, .user-text img {
+  max-width: 100%;
+  height: auto;
+  border-radius: 6px;
+}
 
 /* KaTeX fine-tuning so display math doesn't overflow narrow columns */
 .asst-text .katex { font-size: 1.05em; }
@@ -1919,11 +1939,19 @@ details.rt-collapsible > summary > .icon-btn { margin-right: 4px; }
 }
 .scr-desc-error { color: var(--danger, #d05); }
 .scr-actions {
-  display: grid; grid-template-columns: 5.5rem 3.5rem;
+  display: grid; grid-template-columns: 3.5rem 5.5rem 3.5rem;
   align-items: center; gap: 6px; justify-items: end;
 }
 /* The status line under Arguments is empty until a run reports. */
 #scr-status:empty { display: none; }
+
+/* "<kind> file: <path>" above the selected file's sections. The path can
+   be long, so it truncates rather than wrapping the row. */
+.ag-file-path > code {
+  min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: 11px; color: var(--fg-faint);
+}
 .scr-run {
   appearance: none;
   flex: 0 0 auto;
@@ -2454,4 +2482,95 @@ details.rt-collapsible > summary > .icon-btn { margin-right: 4px; }
   font-size: 13px; line-height: 1.55;
   white-space: pre-wrap;
   min-height: 24px;
+}
+
+
+/* ---------------------------------------------------------------------------
+   Source viewer for workspace scripts and workflows. Opened by View, and
+   by Run on a file the user has not read yet -- in which case it carries
+   the warning and the run starts from its Run button.
+   --------------------------------------------------------------------------- */
+dialog.code-modal {
+  width: min(900px, 92vw);
+  max-height: 88vh;
+  padding: 0;
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  background: var(--bg-elev);
+  color: var(--fg);
+  display: flex; flex-direction: column;
+}
+dialog.code-modal::backdrop { background: rgba(0, 0, 0, 0.45); }
+dialog.code-modal .cm-head {
+  padding: 12px 16px 10px;
+  border-bottom: 1px solid var(--border);
+  display: flex; flex-direction: column; gap: 3px; min-width: 0;
+}
+dialog.code-modal .cm-head h2 {
+  margin: 0; font-size: 14px; font-weight: 600;
+  font-family: var(--mono, monospace);
+}
+dialog.code-modal .cm-path {
+  font-size: 11px; color: var(--fg-faint);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+/* The warning is the reason this dialog opens on an unread file, so it
+   reads as a banner rather than a hint. */
+dialog.code-modal .cm-warning {
+  margin: 0;
+  padding: 10px 16px;
+  background: var(--warn-soft, #fff7ed);
+  border-bottom: 1px solid var(--border);
+  color: var(--fg);
+  font-size: 12px; line-height: 1.45;
+}
+dialog.code-modal .cm-pre {
+  margin: 0; padding: 12px 16px;
+  overflow: auto; flex: 1 1 auto;
+  background: var(--bg-sunken);
+  font-family: var(--mono, monospace); font-size: 12px; line-height: 1.5;
+  tab-size: 4;
+}
+dialog.code-modal .cm-pre:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+dialog.code-modal .cm-actions {
+  padding: 10px 16px;
+  border-top: 1px solid var(--border);
+  display: flex; justify-content: flex-end; gap: 8px;
+}
+
+/* highlight.js tokens. Only the classes the Python grammar emits, using
+   the app's palette so the viewer matches both themes. */
+.cm-code .hljs-comment    { color: var(--fg-faint); font-style: italic; }
+.cm-code .hljs-string,
+.cm-code .hljs-subst      { color: var(--code-str, #0a7d4d); }
+.cm-code .hljs-number,
+.cm-code .hljs-literal    { color: var(--code-num, #b4530a); }
+.cm-code .hljs-keyword,
+.cm-code .hljs-type       { color: var(--code-kw, #8b2fb8); }
+.cm-code .hljs-built_in   { color: var(--code-builtin, #0b6ec4); }
+.cm-code .hljs-title,
+.cm-code .hljs-title.function_,
+.cm-code .hljs-title.class_ { color: var(--code-fn, #1f5fd0); font-weight: 600; }
+.cm-code .hljs-params     { color: var(--fg); }
+.cm-code .hljs-meta       { color: var(--code-meta, #8a6d1f); }
+
+:root {
+  --warn-soft:    #fff7ed;
+  --code-str:     #0a7d4d;
+  --code-num:     #b4530a;
+  --code-kw:      #8b2fb8;
+  --code-builtin: #0b6ec4;
+  --code-fn:      #1f5fd0;
+  --code-meta:    #8a6d1f;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --warn-soft:    #3a2a10;
+    --code-str:     #7ee2a8;
+    --code-num:     #f0a868;
+    --code-kw:      #d8a0f0;
+    --code-builtin: #7cc4f8;
+    --code-fn:      #8ab4f8;
+    --code-meta:    #e0c477;
+  }
 }

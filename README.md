@@ -1,24 +1,58 @@
 # cyllama-desktop
 
-Electron desktop app that runs [cyllama](https://github.com/shakfu/cyllama) via a bundled Python sidecar.
+Electron desktop app for local AI inference: chat, retrieval, agents, transcription and image generation, driven from GGUF model files you hold on disk. It runs [cyllama](https://github.com/shakfu/cyllama) in a bundled Python sidecar, so there is no account to create, no API key, and nothing to install alongside it.
+
+## What cyllama is
+
+[cyllama](https://github.com/shakfu/cyllama) is a zero-dependency Python library for local inference over the `llama.cpp`, `whisper.cpp` and `stable-diffusion.cpp` ecosystem. It ships compiled extension modules -- `llama_cpp`, `whisper_cpp`, `stable_diffusion`, and an embedded OpenAI-compatible server -- plus higher layers in pure Python: `cyllama.rag`, `cyllama.agents`, `cyllama.memory`, `cyllama.batching`. It publishes one wheel per GPU backend, each carrying its own compiled llama.cpp.
+
+cyllama is the engine. This app is the UI, the job runner, and the persistence around it: it bundles one of those wheels with its own CPython build and drives it over a loopback HTTP API. Whatever the bundled wheel does not provide is hidden rather than broken -- the sidecar reports its capabilities at `/info.features` and panes and slash commands that need a missing one do not appear.
+
+## Key features
+
+- **Chat against a local GGUF.** One model resident at a time (a single-slot cache, to bound VRAM), streamed over SSE, with sampling presets, a system prompt, and per-chat history persisted to disk.
+
+- **Multimodal and document input.** Drop an image when a model and its mmproj are loaded; drop a PDF, Markdown or JSON file and the sidecar extracts the text into the prompt; dictate with a mic button that transcribes locally through Whisper.
+
+- **Model management.** List cached GGUFs, inspect their metadata, import a local file, download from HuggingFace as a cancellable job, and quantize to any supported ftype.
+
+- **Retrieval.** Build RAG collections backed by per-collection sqlite vector stores, ingest documents as a job, then query with sources or retrieve top-k chunks without touching a model.
+
+- **Agents.** Five slash commands -- a ReAct loop, grammar-constrained tool calls, contract-checked runs, plan-and-execute, and a worker/critic loop -- with a tool catalog you choose per run and the trace rendered inline in the chat.
+
+- **Workflows.** Multi-node DAGs with typed state, parallel branches and conditional routing, authored as Python in the workspace and run with a live trace.
+
+- **Scripts.** Plain Python run as a job in a child process, which reaches the app's resident model over the loopback API. A 50-cell parameter sweep costs one model load. Streamed output, a working cancel, and files it writes served as artifacts.
+
+- **Transcription and image generation.** Whisper transcription and stable-diffusion text-to-image, both as jobs, both gated on the bundled wheel providing them.
+
+- **An OpenAI-compatible server.** Start and stop cyllama's server from the app to point other tools at the loaded model.
+
+- **Jobs everywhere.** Every long operation is a job: streamed events, progress, cancel, retained log replay after a dropped stream, and downloadable artifacts.
+
+- **Local by construction.** The sidecar binds `127.0.0.1` behind a per-launch bearer token. Nothing leaves the machine except model downloads you ask for and the two agent tools that are explicitly opt-in (`web_fetch`, `search_wikipedia`).
+
+- **GPU backends.** One build per backend -- Metal, CUDA 12, Vulkan, ROCm, SYCL -- selected at build time. See [GPU variants](#gpu-variants).
 
 ## Concepts
 
-- **Pane.** A UI surface in the app shell. Left nav-rail: Chats, Models, Agents (full-area pane covering agent-type defaults + workflow file management), Console. Right-sidebar tab: Parameters (system-style Settings opens in a separate Preferences window via `Cmd+,`). Panes whose underlying cyllama capability isn't present in the build hide themselves automatically via `/info.features`.
+- **Pane.** A UI surface in the app shell. Left nav-rail: Chats, Models, Agents (full-area pane covering agent-type defaults, workflow files, and scripts), Console. Right-sidebar tab: Parameters (system-style Settings opens in a separate Preferences window via `Cmd+,`). Panes whose underlying cyllama capability isn't present in the build hide themselves automatically via `/info.features`.
 
-- **Workspace.** A *project*: a scoped bundle of inputs, outputs, chosen models, presets, agent tool sandbox, and config. Today only an implicit `default` workspace exists. Multi-workspace support and a workspace switcher land later (see `PLAN.md` S.9).
+- **Workspace.** A *project*: a scoped bundle of inputs, outputs, chosen models, presets, agent tool sandbox, and config. Today only an implicit `default` workspace exists. Multi-workspace support and a workspace switcher land later (see [`docs/dev/plan.md`](docs/dev/plan.md) S.9).
 
 - **Sidecar.** The bundled Python process running cyllama via FastAPI on `127.0.0.1`, gated by a per-launch bearer token. The renderer is a thin client; the sidecar is the single source of truth for inference, models, and jobs.
 
-- **Script.** A Python file in `<workspace>/scripts/`, run as a job from the Agents pane. It executes in a child process with the bundled interpreter and talks back to the app over the loopback API, so `cyllama_desktop.app.chat()` reuses the model the sidecar already has loaded instead of loading a second copy. Output streams into the pane, cancel kills the process group, and files the script writes are downloadable as job artifacts. Scripts run with your full privileges -- the child process is for crash containment and a working cancel, not a sandbox. See [`docs/dev/scripting.md`](docs/dev/scripting.md).
+- **Script.** A Python file in `<workspace>/scripts/`, run as a job from the Agents pane. It executes in a child process with the bundled interpreter and talks back to the app over the loopback API, so `cyllama_desktop.app.chat()` reuses the model the sidecar already has loaded instead of loading a second copy. Output streams into the pane, cancel kills the process group, and files the script writes are downloadable as job artifacts. Scripts run with your full privileges -- the child process is for crash containment and a working cancel, not a sandbox -- so every row has a View button that opens the file read-only and syntax highlighted, and Run on a file you have not read shows you the code first. See [`docs/dev/scripting.md`](docs/dev/scripting.md).
 
-- **Slash commands.** A `/`-prefixed entry in the chat composer routes the prompt to a specific handler instead of `/chat`. The agent family of commands (`/agent`, `/agent-constrained`, `/agent-contract`, `/agent-plan`, `/agent-reflect`) runs an agent loop against the loaded chat model with the sidebar's tool config; the trace + answer render inline in the chat stream. Tab autocompletes a unique prefix (`/a<Tab>` -> `/agent `). See `docs/slash-commands.md` for the taxonomy and roadmap.
+- **Shipped examples.** The scripts and workflow rows list the examples the app ships alongside your own files. Install copies one into the workspace, where it is yours to edit; Uninstall removes it, and asks first if you have changed it. Nothing is written to the workspace until you install something, and Uninstall never offers to delete a file you wrote.
 
-See `PLAN.md` for the phased rollout and `CHANGELOG.md` for what has shipped.
+- **Slash commands.** A `/`-prefixed entry in the chat composer routes the prompt to a specific handler instead of `/chat`. The agent family of commands (`/agent`, `/agent-constrained` -- aliased `/agent-strict`, `/agent-contract`, `/agent-plan`, `/agent-reflect`) runs an agent loop against the loaded chat model with the sidebar's tool config; the trace + answer render inline in the chat stream. Tab autocompletes a unique prefix (`/a<Tab>` -> `/agent `). See `docs/slash-commands.md` for the taxonomy and roadmap.
+
+See [`docs/dev/plan.md`](docs/dev/plan.md) for the phased rollout and `CHANGELOG.md` for what has shipped.
 
 ## User documentation
 
-- [`docs/guide-to-agents.md`](docs/guide-to-agents.md) -- end-user guide to the agent slash-commands (`/agent`, `/agent-constrained`, `/agent-contract`, `/agent-plan`, `/agent-reflect`), the Tools catalog, and the Workflows pane. Read this first if you want to *use* the agent layer; skip to [`docs/dev/agent_plan.md`](docs/dev/agent_plan.md) if you want to *extend* it.
+- [`docs/guide-to-agents.md`](docs/guide-to-agents.md) -- end-user guide to the agent slash-commands (`/agent`, `/agent-constrained`, `/agent-contract`, `/agent-plan`, `/agent-reflect`), the Tools catalog, and the workflow row of the Agents pane. Read this first if you want to *use* the agent layer; skip to [`docs/dev/agent_plan.md`](docs/dev/agent_plan.md) if you want to *extend* it.
 
 - [`docs/slash-commands.md`](docs/slash-commands.md) -- slash-command design + taxonomy. How commands are registered, how autocomplete works, what kinds of commands exist.
 
@@ -26,9 +60,7 @@ See `PLAN.md` for the phased rollout and `CHANGELOG.md` for what has shipped.
 
 The chat messagebox accepts more than text:
 
-- **Images** -- drop a `.png` / `.jpg` / `.webp` / `.gif` / `.bmp` onto the composer (or use the paperclip) when a multimodal model
-
-  - mmproj are loaded. Routed through cyllama's `ImageAnalyzer`.
+- **Images** -- drop a `.png` / `.jpg` / `.webp` / `.gif` / `.bmp` onto the composer (or use the paperclip) when a multimodal model and its mmproj are loaded. Routed through cyllama's `ImageAnalyzer`.
 
 - **Documents** -- drop a `.pdf` / `.md` / `.txt` / `.markdown` / `.json` / `.jsonl`; the sidecar extracts text via `cyllama.rag.loaders.load_document` (PDFs use the `pypdf` backend bundled by default; install `pymupdf` / `docling` for richer extraction). The text is inlined into the message the model sees and the chat log shows a folded chip with a context-window warning when the doc is large.
 
@@ -44,9 +76,14 @@ Quick path: `make` builds an installer for the host platform (macOS arm64 -> `.d
 make           Build a distributable installer (default = dmg on macOS)
 make dev       npm install + build python env + npm start
 make python    Build only the bundled Python env
+make python-local
+               Rebuild the env against a local cyllama checkout
 make variant   Show which cyllama GPU variant the build is pinned to
 make test      Run the sidecar pytest suite
 make e2e       Run the Playwright per-pane smoke suite
+make release-notes
+               Write release-notes.md from the CHANGELOG section
+make help      List every target
 make clean     Remove dist/ and build/
 make reset     Also remove node_modules/
 ```
@@ -89,7 +126,7 @@ cd ~/projects/personal/cyllama-desktop
 npm install
 ```
 
-This installs Electron + electron-builder + `@electron/notarize`. ~200 MB in `node_modules/`.
+This installs Electron + electron-builder + `@electron/notarize`, plus esbuild and Playwright. ~570 MB in `node_modules/`.
 
 ### 2. Build the Python env (per target arch, on a matching host)
 
@@ -103,11 +140,11 @@ What this does:
 
 - Downloads CPython 3.12 from python-build-standalone into `build/python-mac-arm64/`.
 
-- `pip install`s `cyllama` from PyPI plus `fastapi`, `uvicorn[standard]`, and `python-multipart`. On macOS arm64 the PyPI wheel ships Metal as the default backend.
+- `pip install`s `cyllama` from PyPI plus the sidecar's own dependencies from `python-sidecar/pyproject.toml` (`fastapi`, `uvicorn[standard]`, `python-multipart`, `openai`, `anthropic`, `pypdf`). On macOS arm64 the PyPI wheel ships Metal as the default backend.
 
 - Smoke-tests `import cyllama` and prunes caches.
 
-Expect ~2-5 minutes the first time. Output ends with a `du -sh` of the resulting tree (typically 200-400 MB depending on which cyllama backends are linked).
+Expect ~2-5 minutes the first time. Output ends with a `du -sh` of the resulting tree: ~175 MB for the default cpu/metal variant, more when a GPU backend is linked.
 
 To use a local cyllama checkout instead of PyPI (e.g. for development against unreleased changes), set `CYLLAMA_SOURCE`:
 
@@ -121,11 +158,11 @@ CYLLAMA_SOURCE=../cyllama bash scripts/build-python-env.sh
 npm start
 ```
 
-Electron's main process spawns `build/python-mac-arm64/bin/python3 python-sidecar/sidecar.py`, waits for `/health` to respond, then opens the window. Pick a `.gguf` file via the Browse button and type a prompt.
+Electron's main process spawns `build/python-mac-arm64/bin/python3 python-sidecar/sidecar.py`, waits for `/health` to respond, then opens the window. Pick a model from the picker (or `Browse...` for a `.gguf` outside the cache) and type a prompt.
 
 Dev runs store settings, chats and the model cache in `~/Library/Application Support/Cyllama Desktop Dev/`. Installed builds use `Cyllama Desktop/`.
 
-If something is wrong, watch the terminal — sidecar stdout/stderr is forwarded with `[sidecar]` / `[sidecar:err]` prefixes.
+If something is wrong, watch the terminal -- sidecar stdout/stderr is forwarded with `[sidecar]` / `[sidecar:err]` prefixes.
 
 ### 3b. Build a distributable `.dmg`
 
@@ -143,7 +180,7 @@ This calls `electron-builder --mac --arm64`, which:
 
 - Bundles your JS into `Resources/app.asar`.
 
-- Produces `dist/cyllama-desktop-0.2.1-cyllama-0.4.5-metal-arm64.dmg` (app version, bundled cyllama version, variant, arch). The `cpu` variant is labelled `metal` on Apple silicon.
+- Produces `dist/cyllama-desktop-0.3.1-cyllama-0.4.6-metal-arm64.dmg` (app version, bundled cyllama version, variant, arch). `scripts/set-cyllama-variant.py` rewrites that name whenever the variant changes; the `cpu` variant is labelled `metal` on Apple silicon.
 
 **Unsigned build** (for local testing only): nothing else needed. Gatekeeper will warn the first time you open it; right-click -> Open to bypass.
 
@@ -162,12 +199,12 @@ electron-builder signs every `.dylib`/`.so` under `Resources/python/`, then `scr
 
 ## Releasing
 
-Releases are tag-driven. Tags are bare semver equal to `package.json`'s version (`0.2.0`, not `v0.2.0`).
+Releases are tag-driven. Tags are bare semver equal to `package.json`'s version (`0.3.1`, not `v0.3.1`).
 
 ```bash
 # after bumping package.json and renaming "## [Unreleased]" in CHANGELOG.md
 make release-notes          # preview the release body
-git tag 0.2.0 && git push origin 0.2.0
+git tag 0.3.1 && git push origin 0.3.1
 ```
 
 `.github/workflows/build.yml` builds all 9 installers, creates the release, attaches them, and sets the body from the version's CHANGELOG section (falling back to `## [Unreleased]`, then to GitHub's generated notes). One failed build publishes nothing. To redo a release, run the workflow manually with the existing tag.
@@ -190,9 +227,9 @@ Should return `{"ok":true}`. Useful when isolating sidecar issues from Electron 
 
 - **Sidecar fails to start within timeout**: open `python-sidecar/sidecar.py` in the bundled env directly (the smoke test above) and read the real traceback. Almost always either a missing native lib or a cyllama import error.
 
-- **Empty model error in chat**: the renderer requires both a model path and a prompt before sending — no implicit default.
+- **Empty model error in chat**: the renderer requires both a model path and a prompt before sending -- no implicit default.
 
-- **`electron-builder install-app-deps` runs forever on `npm install`**: that postinstall is harmless on a fresh tree (no native Node deps), but if it hangs, remove the `postinstall` line — you don't have native modules.
+- **`electron-builder install-app-deps` runs forever on `npm install`**: that postinstall is harmless on a fresh tree (no native Node deps), but if it hangs, remove the `postinstall` line -- you don't have native modules.
 
 ## Layout
 
@@ -200,24 +237,29 @@ Source tree:
 
 ```text
 cyllama-desktop/
+  Makefile                          build orchestration; see the target list above
   package.json                      Electron + electron-builder + @electron/notarize
   electron-builder.yml              bundle config (mac dmg arm64 by default)
   src/
     main/index.js                   spawns sidecar, allocates port, generates auth token, runs layout migration
     preload/index.js                exposes safe IPC to renderer
+    preferences/                    the separate Preferences window (Cmd+,)
     renderer/
       index.html                    chat UI with strict CSP
       src/                          renderer source (esbuild input)
-        main.js                       chat hot path, KaTeX/marked rendering
-        lib/{sidecar,jobs,models}.js  bearer-auth HTTP, /jobs SSE client, model list
-        features/                     model-picker, models tab, presets, right-sidebar tabs, ...
-      dist/renderer.js              esbuild output bundle (loaded by index.html)
+        main.js                          chat hot path, KaTeX/marked rendering
+        lib/{sidecar,jobs,models,rag}.js bearer-auth HTTP, /jobs SSE client, model list, RAG
+        features/                        agents pane, model-picker, models pane,
+                                         documents, transcribe, image, server, presets, ...
+      dist/renderer.js              esbuild bundle, minified with a linked
+                                    sourcemap (gitignored; the .map is not packaged)
       vendor/                       marked + katex vendored under CSP 'self'
   python-sidecar/
     sidecar.py                      FastAPI app -- see endpoint list below
-    pyproject.toml                  cyllama + fastapi + uvicorn + python-multipart
+    cyllama_desktop.py              client library scripts import (stdlib only)
+    pyproject.toml                  cyllama + fastapi + uvicorn + python-multipart + openai + anthropic + pypdf
   tests/
-    test_*.py                       pytest suite for the sidecar (~170 cases)
+    test_*.py                       pytest suite for the sidecar (366 cases)
     e2e/                            Playwright per-pane smoke (boots Electron
                                     against tests/e2e/sidecar_launcher.py, which
                                     reuses the conftest cyllama stub so no real
@@ -226,10 +268,18 @@ cyllama-desktop/
   .github/workflows/ci.yml          pytest + Playwright on push + PR
   .github/workflows/build.yml       unsigned installer per platform x variant;
                                     a tag push publishes them as a release
+  docs/
+    guide-to-agents.md              end-user guide to the agent layer
+    slash-commands.md               slash-command design + taxonomy
+    dev/{plan,agent_plan,scripting}.md  design records
   scripts/
     build-python-env.sh             python-build-standalone bundler -> build/python-<os>-<arch>/
+    set-cyllama-variant.py          rewrites the cyllama pin + installer name
+    release_notes.py                CHANGELOG section -> release-notes.md
     notarize.js                     afterSign hook (no-op unless APPLE_ID set)
   resources/
+    example-scripts/*.py            scripts offered by Install in the Agents pane
+    example-workflows/*.py          workflows offered by Install
     entitlements.mac.plist          hardened-runtime entitlements for dlopen + JIT
 ```
 
@@ -237,12 +287,17 @@ Sidecar endpoints (all bearer-auth gated except `/health`):
 
 ```text
 GET  /health                          -- liveness probe
-GET  /info                            -- version, backends, devices, features, paths
+GET  /info                            -- cyllama version, backends, features, paths
+GET  /info/contract-presets           -- named pre/post-condition presets
 POST /chat                            -- SSE chat (text-only or multimodal route)
 POST /tokenize                        -- count tokens for a prompt
 POST /unload                          -- release the cached LLM slot
 POST /grammar/from-schema             -- JSON schema -> GBNF
 POST /hardware/estimate-layers        -- VRAM-aware n_gpu_layers estimate
+POST /documents/extract               -- composer document drop -> text
+POST /chat/upload                     -- multipart image upload (multimodal)
+GET  /chat/upload/{name}              -- serve an uploaded image
+POST /audio/upload                    -- multipart audio upload (voice prompt)
 GET  /models/cached                   -- list cached + HF-cached GGUFs
 POST /models/inspect                  -- GGUF metadata
 POST /models/import                   -- copy a local .gguf into MODELS_DIR
@@ -260,14 +315,31 @@ POST /rag/retrieve                    -- retrieve-only top-k (no LLM)
 POST /jobs/transcribe                 -- whisper transcription (job)
 POST /jobs/image/txt2img              -- stable-diffusion text-to-image (job)
 GET  /artifacts/image                 -- list past txt2img outputs
-GET  /artifacts/{id}/{name}           -- serve a job's artifact (registry-free)
 POST /jobs/agent/run                  -- ReActAgent runner with tool catalog (job)
+POST /jobs/agent/constrained          -- grammar-constrained tool calls (job)
+POST /jobs/agent/contract             -- runs under a contract preset (job)
+POST /jobs/agent/plan                 -- planner + executor (job)
+POST /jobs/agent/reflect              -- worker + critic loop (job)
+GET  /workflows                       -- workspace workflow files + shipped examples
+GET  /workflows/{id}/spec             -- static plan (levels, entry, exits, inputs)
+POST /jobs/workflow/run               -- run a workflow in-process (job)
+POST /workflows/examples/{id}/copy    -- install a shipped workflow
+DEL  /workflows/examples/{id}         -- uninstall one (409 if locally edited)
+GET  /scripts                         -- workspace script files + shipped examples
+POST /jobs/script/run                 -- run a script in a child process (job)
+POST /scripts/examples/{id}/copy      -- install a shipped script
+DEL  /scripts/examples/{id}           -- uninstall one (409 if locally edited)
 POST /server/start /server/stop       -- start/stop OpenAI-compat server
 GET  /server/status                   -- current server state
-POST /chat/upload                     -- multipart image upload (multimodal)
-GET  /chat/upload/{name}              -- serve an uploaded image
-GET  /jobs                            -- list / GET /jobs/{id}, /events, /result
+POST /jobs/demo                       -- fake job emitting progress then a result
+GET  /jobs                            -- list jobs
+GET  /jobs/{id}                       -- one job's state
+GET  /jobs/{id}/events                -- SSE event stream (single subscriber)
+GET  /jobs/{id}/log?after=<seq>       -- replay retained events after a gap
+GET  /jobs/{id}/result                -- terminal result
 POST /jobs/{id}/cancel                -- cancel a running job
+GET  /artifacts/{id}/{name}           -- serve a job's artifact off the filesystem
+GET  /jobs/{id}/artifact/{name}       -- same, but 404s once the job is GC'd
 ```
 
 Runtime data (under `app.getPath('userData')`):
@@ -275,6 +347,7 @@ Runtime data (under `app.getPath('userData')`):
 ```text
 <userData>/
   models/                           global GGUF cache (workspaces pin a default by path; never duplicated)
+  settings.json                     global Preferences (currently: extra model search roots)
   .layout_version                   migration stamp (currently "1")
   workspaces/
     default/                        the implicit default workspace
@@ -282,6 +355,8 @@ Runtime data (under `app.getPath('userData')`):
       artifacts/<jobId>/...           job outputs (HF downloads, image txt2img, batch JSONL, ...)
       rag/<collId>.sqlite             per-RAG-collection vector store + collections.json manifest
       uploads/<uuid>.<ext>            multimodal chat attachments (served via /chat/upload/<name>)
+      scripts/*.py                    your scripts, plus any shipped ones you installed
+      workflows/*.py                  your workflows, plus any shipped ones you installed
       presets/                        reserved (presets currently live in localStorage)
       sandbox/                        reserved (per-workspace agent file-tool sandbox root)
       settings.json                   reserved (per-workspace model pin, preset, system prompt)

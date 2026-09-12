@@ -80,8 +80,13 @@ npm: node_modules
 # live in these two files, so editing either must rebuild. Without them
 # ``make python`` sees the interpreter already exists and does nothing,
 # leaving a bumped CYLLAMA_VERSION silently unbuilt.
+#
+# ``CYLLAMA_SOURCE=`` clears whatever the environment exported: this is
+# the PyPI path, and for the cpu variant a source build is installed
+# under the same name, so nothing downstream could tell them apart.
+# ``python-local`` is the only target that may set it.
 $(PY_BIN): scripts/build-python-env.sh python-sidecar/pyproject.toml
-	bash scripts/build-python-env.sh
+	CYLLAMA_SOURCE= bash scripts/build-python-env.sh
 
 python: $(PY_BIN)
 
@@ -118,7 +123,7 @@ VARIANT_SCRIPT := scripts/set-cyllama-variant.py
 define switch_variant
 	@python3 $(VARIANT_SCRIPT) $(1)
 	rm -rf "$(PYENV_DIR)"
-	bash scripts/build-python-env.sh
+	CYLLAMA_SOURCE= bash scripts/build-python-env.sh
 endef
 
 ifeq ($(HOST_OS),mac)

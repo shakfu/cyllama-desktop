@@ -4,6 +4,28 @@ All notable changes to cyllama-desktop are documented here. The format is based 
 
 ## [Unreleased]
 
+## [0.3.2]
+
+### Added
+
+- **Every row has a View button, and Run on a file you have not read shows you the code first.** Scripts and workflows are unrestricted Python, and both previously ran on one click while the narrower `web_fetch` and `quarto_render` tools each asked before being enabled. View opens the file read-only, syntax highlighted, with its path; a shipped example can be read before installing it. Run on a file you have not opened shows the same view with a warning across the top, and its Run button starts the job. Reading a file is remembered, so it asks once.
+
+  The disclosure is the code rather than a prose dialog describing it, because the question -- is this safe to run -- is not answerable from a description. Highlighting is `highlight.js` core with the Python grammar only, bundled by esbuild (about 200 KB of the renderer bundle). A hand-written lexer would have avoided the dependency and is the wrong trade here: a lexer that mis-reads a string as a comment works against the one thing the view is for. Which files have been read is keyed by file id, not content, so an authoring loop is not interrupted on every save; a file replaced under a name already read is the gap that leaves.
+
+  The selected file's path also appears above its sections with a Reveal button, where before it showed only in the pane's empty state.
+
+### Changed
+
+- **`make` no longer honours an exported `CYLLAMA_SOURCE`.** make passes its environment into every recipe and `build-python-env.sh` honours the variable, so an exported `CYLLAMA_SOURCE` -- normal if you develop against a local cyllama checkout -- silently turned `make`, `make dmg` and `make variant-cpu` into source builds. The script's own guard only catches that when the distribution name differs from `cyllama`, which is every variant except `cpu`: the default, and the macOS release path. A shipped installer could therefore carry an unreleased local cyllama with nothing to distinguish it from a correct build. `$(PY_BIN)` and the variant recipes now clear the variable; `python-local` is the only target that may set it, and `tests/test_variants.py` asserts that by asking make what each target would run.
+
+- **The renderer bundle is minified, and its sourcemap is no longer inline.** 1065 KB to 153 KB. Minifying alone accounted for almost none of that: an inline sourcemap embeds the original sources, so the map was most of the file (minify with the map still inline was 920 KB). `--sourcemap=linked` writes `renderer.js.map` beside the bundle instead, which devtools still loads and `electron-builder`'s existing `!**/*.map` rule already keeps out of the installer. `watch:renderer` switched too, so the dev loop and the build agree.
+
+### Fixed
+
+- **A wide markdown table scrolls instead of collapsing its columns, and a large image is clamped to the message width.** The table gets its own horizontal scroll area, which needs `white-space: nowrap` on the cells to work at all: wrapping cells never overflow, so the scroll box never engaged and the columns squeezed to a character or two instead. Neither a wide table nor an oversized image widens the message column or scrolls the window sideways.
+
+- **The workflow trace no longer grows without bound.** `WF_TRACE_MAX = 400`, evicting oldest-first from state and the DOM together, mirroring the script log's existing cap. A workflow that forwards sub-workflow events can emit far more than the pane can usefully show, and every event used to stay in both. Re-rendering the pane also replays the trace from state now: leaving mid-run and coming back showed an empty trace while the events kept accumulating.
+
 ## [0.3.1]
 
 ### Changed

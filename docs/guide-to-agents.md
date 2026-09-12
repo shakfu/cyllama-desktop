@@ -1,9 +1,10 @@
 # Guide to Agents
 
-A user-facing tour of the five agent slash-commands and the Workflows
-pane. Everything described here runs locally against the model you've
-loaded in the topbar; no network is involved unless you explicitly
-enable the `web_fetch` tool.
+A user-facing tour of the five agent slash-commands and the workflow
+and script rows of the Agents pane. Everything described here runs
+locally against the model you've loaded in the topbar; no network is
+involved unless you explicitly enable the `web_fetch` or
+`search_wikipedia` tool.
 
 If you're looking for **how the agent layer is implemented** (sidecar
 endpoints, feature flags, integration tests), see
@@ -22,9 +23,10 @@ endpoints, feature flags, integration tests), see
 7. [`/agent-reflect` -- worker + critic loop](#agent-reflect----worker--critic-loop)
 8. [The Agents pane](#the-agents-pane)
 9. [Tools the agent can call](#tools-the-agent-can-call)
-10. [Workflows pane](#workflows-pane)
-11. [Common patterns](#common-patterns)
-12. [Troubleshooting](#troubleshooting)
+10. [Workflows](#workflows)
+11. [Scripts](#scripts)
+12. [Common patterns](#common-patterns)
+13. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -84,7 +86,8 @@ folder, etc. (See [The Agents pane](#the-agents-pane).)
 
 ## Choosing the right command
 
-Five commands sit side by side. Pick by what you need from the run:
+Five commands, plus two surfaces that are not commands. Pick by what
+you need from the run:
 
 | Want this | Use this |
 |---|---|
@@ -93,7 +96,8 @@ Five commands sit side by side. Pick by what you need from the run:
 | The agent must satisfy named pre/post-conditions on the task or answer. Pre-conditions reject bad inputs; post-conditions catch bad outputs. | `/agent-contract` |
 | A task that breaks into discrete steps (research, then summarise; refactor, then test...). One agent plans, another runs each step. | `/agent-plan` |
 | A draft-then-review loop. Worker produces a draft; critic accepts it or asks for revisions; loop until accepted or budget hits. | `/agent-reflect` |
-| A multi-node DAG with typed state, parallel branches, conditional routing, or sub-workflows. | Workflows pane |
+| A multi-node DAG with typed state, parallel branches, conditional routing, or sub-workflows. | [`/agent-workflow`](#workflows) |
+| Plain Python over a list of inputs -- a sweep, an eval, a benchmark -- with streamed output and a working cancel. | [scripts](#scripts) |
 
 If you're not sure which to start with, **use `/agent`**. The other
 commands solve specific problems on top of it.
@@ -185,7 +189,7 @@ When to use which policy:
   while temporarily disabling it.
 
 The preset registry is server-side -- you can't write a contract from
-the UI yet. If you need custom rules, see the [Workflows pane](#workflows-pane).
+the UI yet. If you need custom rules, see [Workflows](#workflows).
 
 ---
 
@@ -300,7 +304,8 @@ icon, below Models). The pane is a full-area three-column surface:
 
 - **Left subnav** lists the six agent types -- `/agent`,
   `/agent-strict`, `/agent-contract`, `/agent-plan`, `/agent-reflect`,
-  `/agent-workflow`. Click a row to switch.
+  `/agent-workflow` -- and below them a **scripts** row, which is not
+  an agent type and has no slash command. Click a row to switch.
 - **Main column** shows the selected type's defaults. The first
   section is **Common** (max iterations + tool catalog -- shared by
   every type). Below it sits a type-specific section: format /
@@ -325,10 +330,10 @@ the defaults unchanged; tweak any field for this one invocation.
 inline with current defaults; `/agent-workflow` switches to this
 pane on the workflow row.
 
-The `agent-workflow` row of the subnav is the **Workflows pane** --
-it's the same interface that used to live as a separate full-area
-pane (file list + spec preview + initial-state form + Run + live
-trace). See [Workflows](#workflows-pane) below.
+The `agent-workflow` row carries the workflow interface that used to
+live as a separate full-area pane: file list, spec preview,
+initial-state form, Run, and live trace. See [Workflows](#workflows)
+below, and [Scripts](#scripts) for the row under it.
 
 ---
 
@@ -339,16 +344,22 @@ which ones to expose in the Agents pane's **Tools** row.
 
 | Tool | What it does | When to enable |
 |---|---|---|
-| `calculator` | Evaluates a small expression language (arithmetic + a few functions). | Math-heavy tasks. Almost always on. |
+| Stock cyllama tools | A group: `calculator`, `current_time`, `word_count`. On by default. | Leave on. They are local, cheap, and cover the arithmetic the model is worst at. |
 | `read_file` | Reads a file from a sandbox directory you pick. Hard byte cap. | When the model needs to look at local content. Pick the sandbox folder carefully -- the model can read anything under it. |
 | `web_fetch` | HTTP GET against a URL the model produces. Hard byte cap. | Tasks that need fresh web data. Network access is opt-in per run -- a confirmation dialog appears the first time you enable it. |
+| `search_wikipedia` | Queries the Wikipedia API. | Factual lookups. Also network, but scoped to one API rather than any URL the model invents. |
+| `quarto_render` | Writes `.pptx` / `.pdf` / `.docx` / `.html` via the `quarto` CLI. | Document generation. Hidden unless `quarto` is on PATH, and it both writes files and shells out, so it asks before enabling. |
 | `rag_query` | Searches one of your RAG collections and returns top-k chunks. | Tasks grounded in a body of documents you've already ingested via the Documents pane. |
 | `semantic_memory` | Two tools (`remember`, `recall`) backed by a RAG collection + a namespace string. | Long-running interactions where the model should accumulate facts ("remember that the user prefers tabs") and surface them later ("recall what the user's preferences are"). |
 
 **Sandbox boundary:** `read_file` strictly refuses paths outside the
-configured sandbox folder. `web_fetch` is the only tool that touches
-the network. The agent cannot run shell commands or write files unless
-you author a workflow that does so (see below).
+configured sandbox folder. Two tools reach the network, both off by
+default: `web_fetch`, which fetches any URL the model produces, and
+`search_wikipedia`, which is limited to the Wikipedia API. One tool
+writes files and runs an external binary: `quarto_render`. Beyond
+those, an agent cannot run shell commands or write files -- but a
+workflow or script you author can do anything Python can, so the
+limits here describe the tool catalog, not the pane.
 
 **Semantic memory tip:** the namespace string isolates entries within
 the same collection. Use different namespaces for per-user / per-topic
@@ -357,16 +368,17 @@ on the same collection can't read each other's entries by design.
 
 ---
 
-## Workflows pane
+## Workflows
 
 The chat composer's slash commands are a fixed shape: task in, agent
 runs, answer out. When you need **multiple steps with typed state**,
 **parallel branches**, **conditional routing**, or **sub-workflows**
-nested inside other workflows, use the Workflows pane.
+nested inside other workflows, use a workflow.
 
-Click the network-graph icon in the left nav-rail to open it. (The
-icon appears only when the bundled cyllama exposes the workflow
-runtime.)
+Open the Agents pane (network-graph icon in the left nav-rail) and
+pick the `agent-workflow` row; typing `/agent-workflow` in the
+composer goes to the same place. The nav-rail icon appears only when
+the bundled cyllama exposes the workflow runtime.
 
 ### Authoring a workflow
 
@@ -404,23 +416,35 @@ flow.set_entry("tokens")
 flow.set_exit("count")
 ```
 
-Drop that in your workflows directory; the pane refreshes when you
-click Refresh in the subnav. Parameter names (`text`, `tokens`) drive
-the DAG: `count` depends on `tokens` because they share a name; `text`
-is a required workflow input because no node produces it.
+Drop that in your workflows directory and click Refresh. Parameter
+names (`text`, `tokens`) drive the DAG: `count` depends on `tokens`
+because they share a name; `text` is a required workflow input because
+no node produces it.
 
 ### Running a workflow
 
-The pane is three columns:
+Each row in the list carries the workflow's name, the first paragraph
+of its docstring, Install or Uninstall where the app ships that name,
+and **Run**. Run is on the row, so there is one per workflow. A
+workflow with required inputs has an inert Run until you select the
+row and fill the form; hovering it names what is still missing. A file
+that fails to load shows the exception in place of its description and
+cannot be selected or run.
 
-- **Left** -- list of discovered workflow files. Broken files render
-  with an "error" tag; click any non-broken file to select it.
-- **Middle** -- the selected workflow's plan (entry node, exits,
-  topological levels, optional Mermaid rendering), then a form with
-  one row per required input, then a **Run** button, then the live
-  trace.
-- **Right** -- last-run summary: success/error, final answer, full
-  final state pretty-printed.
+Selecting a row adds three sections below the list:
+
+- **Plan** -- entry node, exits, topological levels, and an optional
+  Mermaid rendering.
+- **Initial state** -- one field per required input.
+- **Trace** -- live events for the run.
+
+The right rail holds the last-run summary: success or error, the final
+answer, and the full final state pretty-printed.
+
+There is no Cancel for a workflow. It runs inside the sidecar process,
+where a cancel could not interrupt a node mid-call, so the Run button
+simply stays inert until the run finishes. Scripts, which run in their
+own process, do have a working cancel.
 
 Live trace events flow in real time as the workflow executes.
 `WORKFLOW_START` opens the run; `NODE_START` / `NODE_END` bracket each
@@ -432,18 +456,119 @@ Sub-workflow events (workflows that nest other workflows via
 `AgentProtocol` via `agent_node`) forward into the outer trace with a
 `source` chip so you can see which inner unit emitted each event.
 
-### Trust boundary
+### Trust boundary: workflows
 
-**Workflow files execute as Python in the sidecar process.** They have
-the same access the sidecar has -- file system within the workspace
-sandbox, network if your tools enable it, and any other capability
-Python exposes. Treat the workflows directory like any other code you
-run on your machine: only put files there you'd be comfortable
-running.
+**Workflow files execute as Python in the sidecar process.** They run
+with the sidecar's full privileges: any file your user account can
+read or write, the network, and any other capability Python exposes.
+The workspace directory is where the app looks for them, not a
+boundary on what they can reach. Treat that directory like any other
+code you run on your machine: only put files there you'd be
+comfortable running.
 
 This is the same trust level as the `agent_exec_python` family of
 tools. There is no sandboxed-Python option today; if you need one,
 file an issue.
+
+Every row has a **View** button that opens the file read-only, syntax
+highlighted, with its full path. A shipped example can be read before
+you install it. If you press Run on a file you have not opened, that
+same view appears with a warning across the top, and you start the run
+from there. Once you have read a file it runs without the detour. The
+selected file's path is also shown above its sections with a Reveal
+button.
+
+Installing a shipped example is the one write the app makes to your
+workspace, and it never overwrites: a name you already have is
+refused. Uninstall is offered only for names the app ships, so it
+cannot delete a file you wrote, and it asks first if you have edited
+the copy.
+
+---
+
+## Scripts
+
+A **script** is a plain Python file you run as a job. No agent loop, no
+DAG: your code, top to bottom, with the app's loaded model available to
+it. Reach for one when the task is "run N things and collect the
+results" -- a sampling sweep, an eval over a question set, a
+tokens-per-second comparison across models.
+
+Scripts live in `<workspace>/scripts/` and appear in the **scripts**
+row of the Agents pane, one row each: name, the first paragraph of the
+docstring, Install or Uninstall where the app ships that name, and
+**Run**. Select a row to get an **Arguments** field and, once a run
+starts, an **Output** section streaming stdout and stderr line by
+line. Cancel replaces Run while the script is running.
+
+### Why a script rather than a workflow
+
+|  | Script | Workflow |
+|---|---|---|
+| Shape | Straight-line Python | DAG with typed state |
+| Runs in | Its own child process | The sidecar process |
+| Cancel | Kills the process tree | Not available |
+| A crash | Fails the job | Would take the sidecar down |
+| Model access | `app.chat()` over the loopback API | Direct, in-process |
+
+The child process is why a script can be cancelled and why a segfault
+in the native layer costs you one job instead of every loaded model.
+
+### Writing one
+
+Import `cyllama_desktop` and use `app`:
+
+```python
+"""Name three primes at three temperatures."""
+from cyllama_desktop import app
+
+for temperature in (0.2, 0.7, 1.0):
+    app.progress(message=f"temperature={temperature}")
+    print(app.chat("name three primes", temperature=temperature))
+
+app.set_result({"done": True})
+```
+
+`app.chat()` goes back to the app over the loopback API, so it uses the
+model the sidecar already has resident. A 50-cell sweep costs one model
+load, not fifty.
+
+The parts you'll use most:
+
+| Call | What it does |
+|---|---|
+| `app.args` | The JSON object from the Arguments field |
+| `app.chat(prompt, ...)` | One completion from the resident model |
+| `app.chat_stream(prompt, ...)` | The same, token by token |
+| `app.models()` / `app.default_model()` | The model list, and the pinned default |
+| `app.progress(value, message)` | Updates the status line in the pane |
+| `app.artifact(name)` | A path to write; the file becomes a downloadable artifact |
+| `app.set_result(value)` | The structured result shown in the right rail |
+| `app.rag_collections()` / `app.rag_retrieve(...)` | RAG listing and retrieval |
+| `app.tokenize(text)` | Token count |
+
+The library wraps **app state only**. For low-level control, `import
+cyllama` directly and use the real API -- the bundled interpreter has
+it installed, so nothing needs installing first.
+
+### Trust boundary: scripts
+
+**Scripts run with your full privileges.** They can read any file you
+can read, reach the network, and import anything in the bundled
+environment. The child process buys crash containment and a working
+cancel; it is not a sandbox. Only run scripts you would run from a
+terminal.
+
+Run on a script you have not read opens it in the viewer first, with a
+warning. That is disclosure, not a restriction: once you run it, the
+script has the access described above. Read the code, not the
+warning -- the warning is only there to send you to the code.
+
+Five examples ship with the app -- a sampling sweep, an
+expected-substring eval, a two-prompt A/B, a tokens/sec triage, and a
+RAG coverage audit. Install one to read it as a starting point. Design
+notes, rejected alternatives and known risks are in
+[`dev/scripting.md`](dev/scripting.md).
 
 ---
 
@@ -503,17 +628,23 @@ the loop guard).
 
 **`/agent-constrained` fails with a grammar error.**
 
-The bundled cyllama wasn't built with grammar support. Check the
-Agents pane -- if `/agent-constrained` works, you'll see the
-slash autocomplete on Tab. If not, the bundle is missing
-`ConstrainedAgent`.
+The bundled cyllama wasn't built with grammar support, or lacks
+`ConstrainedAgent`. The sidecar answers with 501 naming the missing
+capability, and that message appears as an error line in the chat.
 
-**Workflow file shows up with "error" tag in the pane.**
+Tab completion is no guide here: every slash command is registered
+unconditionally, so all of them autocomplete whatever the bundle
+provides. Use `/agent` instead, which needs only the base ReAct
+loop.
 
-Open the file in your editor and check for import errors. The pane
-displays the exception message under "Spec load failed:" once you
-click the broken file (though clicking is disabled when an error is
-present; check the sidecar console output instead).
+**A workflow or script row shows an error instead of a description.**
+
+The file failed to load. The row shows the exception message in place
+of its description, and cannot be selected or run. For a workflow that
+means an import or compile error, since discovery imports the module;
+for a script it means a syntax error, since discovery only parses it.
+Open the file in your editor, or read the full traceback in the
+Console (the terminal icon in the nav-rail).
 
 **Workflow runs but the state at the end is missing a key I expected.**
 
@@ -530,6 +661,25 @@ A Layer-C node has a parameter named `x` that doesn't match any other
 node's output name. Either supply `x` as an initial-state value in the
 pane's form, or rename the parameter to match an upstream node.
 
+**A workflow's Run button does nothing when I hover or click it.**
+
+It is inert because the workflow declares required inputs you haven't
+filled. Select the row, fill the Initial state fields, and Run
+enables. The tooltip names the fields that are still empty.
+
+**A script dies immediately with an import error.**
+
+Only `cyllama` and `cyllama_desktop` are guaranteed importable. The
+rest of the bundled environment belongs to the sidecar and changes
+when the app is rebuilt, so a script that imports one of those
+packages can break on an update. Use the standard library plus those
+two.
+
+**I edited an installed example and Uninstall asked me to confirm.**
+
+That is the point: the copy no longer matches what the app ships, so
+your edits exist nowhere else. Confirming deletes them.
+
 ---
 
 ## Where to next
@@ -537,6 +687,8 @@ pane's form, or rename the parameter to match an upstream node.
 - [`dev/agent_plan.md`](dev/agent_plan.md) -- implementation plan with
   the full surface inventory, sidecar endpoint shapes, and the
   granular feature-flag map.
+- [`dev/scripting.md`](dev/scripting.md) -- why scripts run in a child
+  process, what was rejected, and the known risks.
 - **cyllama's `docs/agents/workflow.md`** -- the design specification
   for the workflow runtime, useful when authoring complex workflow
   files.

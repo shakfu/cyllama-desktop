@@ -332,3 +332,45 @@ def test_extra_resource_named_files_exist():
                 f"electron-builder.yml packages {source}/{entry}, which does not "
                 "exist. The filter would silently match nothing."
             )
+
+
+# ---------------------------------------------------------------------------
+# CYLLAMA_SOURCE must not leak into the release path. make exports its
+# environment into every recipe, and build-python-env.sh honours the
+# variable, so an exported CYLLAMA_SOURCE turns a PyPI build into a
+# source build. The script's own guard only catches that when the
+# distribution name differs from "cyllama", which is every variant
+# except cpu -- the default, and the macOS release path.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("target", ["python", "variant-cpu", "variant-cuda"])
+def test_release_path_ignores_an_exported_cyllama_source(target):
+    env = dict(os.environ, CYLLAMA_SOURCE="/nonexistent/local/cyllama")
+    out = subprocess.run(
+        ["make", "--dry-run", "--always-make", target],
+        capture_output=True, text=True, cwd=ROOT, env=env,
+    )
+    assert out.returncode == 0, out.stderr
+    builds = [l for l in out.stdout.splitlines() if "build-python-env.sh" in l]
+    assert builds, f"{target} never builds the env:\n{out.stdout}"
+    for line in builds:
+        assert "CYLLAMA_SOURCE=" in line, (
+            f"{target} does not clear CYLLAMA_SOURCE: {line}"
+        )
+        assert "/nonexistent/local/cyllama" not in line, (
+            f"{target} forwards an exported CYLLAMA_SOURCE: {line}"
+        )
+
+
+def test_python_local_still_builds_from_the_checkout(tmp_path):
+    """The one target that may honour it."""
+    env = dict(os.environ, CYLLAMA_SOURCE=str(tmp_path))
+    out = subprocess.run(
+        ["make", "--dry-run", "python-local"],
+        capture_output=True, text=True, cwd=ROOT, env=env,
+    )
+    assert out.returncode == 0, out.stderr
+    builds = [l for l in out.stdout.splitlines() if "build-python-env.sh" in l]
+    assert builds, out.stdout
+    assert any(str(tmp_path) in l for l in builds), builds

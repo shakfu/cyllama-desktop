@@ -782,6 +782,41 @@ EXAMPLE_SCRIPTS_DIR = _resolve_examples_dir("CYLLAMA_SIDECAR_EXAMPLE_SCRIPTS")
 EXAMPLE_WORKFLOWS_DIR = _resolve_examples_dir("CYLLAMA_SIDECAR_EXAMPLE_WORKFLOWS")
 
 
+def _read_source(
+    workspace_dir: Path,
+    shipped_dir: Optional[Path],
+    file_id: str,
+    id_re: re.Pattern,
+    shipped: bool = False,
+) -> dict:
+    """Return one file's text so the pane can show it before running it.
+
+    Read-only and verbatim: the pane asks the user to judge this code,
+    so it must be the bytes that would execute, with no normalisation.
+    Capped at the same size the summary refuses to parse.
+    """
+    if not id_re.match(file_id):
+        raise HTTPException(400, f"invalid id: {file_id!r}")
+    directory = shipped_dir if shipped else workspace_dir
+    if directory is None:
+        raise HTTPException(404, "no examples shipped with this build")
+    path = directory / f"{file_id}.py"
+    if not path.is_file():
+        raise HTTPException(404, f"no such file: {file_id}.py")
+    try:
+        size = path.stat().st_size
+        if size > _SCRIPT_MAX_SOURCE_BYTES:
+            raise HTTPException(413, f"source larger than {_SCRIPT_MAX_SOURCE_BYTES} bytes")
+        text = path.read_text("utf-8")
+    except HTTPException:
+        raise
+    except UnicodeDecodeError as exc:
+        raise HTTPException(400, f"not utf-8: {exc}")
+    except OSError as exc:
+        raise HTTPException(500, f"{type(exc).__name__}: {exc}")
+    return {"id": file_id, "path": str(path), "bytes": size, "source": text}
+
+
 def _copy_example(src_dir: Optional[Path], dst_dir: Path, file_id: str, id_re: re.Pattern) -> dict:
     """Copy one shipped example into the workspace.
 
@@ -4470,6 +4505,7 @@ def _workflow_summary(path: Path) -> dict:
     summary: dict[str, Any] = {
         "id": path.stem,
         "filename": path.name,
+        "path": str(path),
         "doc": "",
         "entry": None,
         "exits": [],
@@ -4516,6 +4552,17 @@ async def workflows_list():
 async def workflow_example_copy(example_id: str):
     """Install a shipped example workflow into the workspace."""
     return _copy_example(EXAMPLE_WORKFLOWS_DIR, WORKFLOWS_DIR, example_id, _WORKFLOW_ID_RE)
+
+
+@app.get("/workflows/{workflow_id}/source")
+async def workflow_source(workflow_id: str, shipped: bool = False):
+    """Source of a workspace workflow, or of a shipped example.
+
+    Reads the file; unlike ``/workflows/{id}/spec`` it never imports it.
+    """
+    return _read_source(
+        WORKFLOWS_DIR, EXAMPLE_WORKFLOWS_DIR, workflow_id, _WORKFLOW_ID_RE, shipped
+    )
 
 
 @app.delete("/workflows/examples/{example_id}")
@@ -4738,6 +4785,7 @@ def _script_summary(path: Path) -> dict:
     summary: dict[str, Any] = {
         "id": path.stem,
         "filename": path.name,
+        "path": str(path),
         "doc": "",
         "bytes": 0,
         "modified": 0.0,
@@ -4814,6 +4862,14 @@ def scripts_list():
 def script_example_copy(example_id: str):
     """Install a shipped example script into the workspace."""
     return _copy_example(EXAMPLE_SCRIPTS_DIR, SCRIPTS_DIR, example_id, _SCRIPT_ID_RE)
+
+
+@app.get("/scripts/{script_id}/source")
+def script_source(script_id: str, shipped: bool = False):
+    """Source of a workspace script, or of a shipped example."""
+    return _read_source(
+        SCRIPTS_DIR, EXAMPLE_SCRIPTS_DIR, script_id, _SCRIPT_ID_RE, shipped
+    )
 
 
 @app.delete("/scripts/examples/{example_id}")

@@ -22,6 +22,7 @@
 import { listCollections } from "../lib/rag.js";
 import { getInfo, sidecarFetch } from "../lib/sidecar.js";
 import { startJob } from "../lib/jobs.js";
+import { openCodeModal } from "./code-modal.js";
 
 
 // ---------------------------------------------------------------------------
@@ -110,6 +111,94 @@ const state = {
 // Cap on retained log lines. The sidecar's own ring is 1000; this only
 // has to bound the DOM.
 const SCRIPT_LOG_MAX = 400;
+// Workflow traces are unbounded in principle: a node event and a
+// contract check per node, plus sub-workflow events forwarded from
+// inner units. Same cap and same eviction as the script log.
+const WF_TRACE_MAX = 400;
+
+// Files under <workspace>/{scripts,workflows}/ are unrestricted Python.
+// Run on a file the user has not read opens the source viewer with the
+// warning attached, and the run starts from there. Which files have
+// been seen is remembered per file id, so an authoring loop is not
+// interrupted on every edit; a file replaced by different content under
+// a name already seen is the gap that leaves.
+const CODE_SEEN_KEY = "cyllama.codeSeen.v1";
+
+function loadSeen() {
+  try {
+    return JSON.parse(localStorage.getItem(CODE_SEEN_KEY) || "{}") || {};
+  } catch {
+    return {};
+  }
+}
+
+function hasSeen(kind, id) {
+  return loadSeen()[`${kind}:${id}`] === true;
+}
+
+function markSeen(kind, id) {
+  const all = loadSeen();
+  all[`${kind}:${id}`] = true;
+  try { localStorage.setItem(CODE_SEEN_KEY, JSON.stringify(all)); } catch {}
+}
+
+// Fetch a file's source. `shipped` reads the app's copy, so an example
+// can be read before it is installed.
+async function fetchSource(kind, id, shipped) {
+  const base = kind === "workflow" ? "/workflows" : "/scripts";
+  const q = shipped ? "?shipped=true" : "";
+  try {
+    const r = await sidecarFetch(`${base}/${encodeURIComponent(id)}/source${q}`);
+    if (!r.ok) {
+      const body = await r.json().catch(() => ({}));
+      return { error: body.detail || `source unavailable (${r.status})` };
+    }
+    return await r.json();
+  } catch (e) {
+    return { error: e.message || String(e) };
+  }
+}
+
+// View: open the source read-only. Reading it counts as having seen it,
+// so a later Run does not ask again.
+async function viewCode(kind, id, shipped) {
+  const got = await fetchSource(kind, id, shipped);
+  await openCodeModal({
+    id, path: got.path, source: got.source, error: got.error, mode: "inspect",
+  });
+  if (!got.error && !shipped) markSeen(kind, id);
+}
+
+// Gate a run on the user having read the file. Resolves true to
+// proceed. On an unseen file this shows the code with the warning; Run
+// in that dialog is the approval.
+async function approveRun(kind, id) {
+  if (hasSeen(kind, id)) return true;
+  const got = await fetchSource(kind, id, false);
+  const ran = await openCodeModal({
+    id, path: got.path, source: got.source, error: got.error, mode: "confirm",
+  });
+  if (ran) markSeen(kind, id);
+  return ran;
+}
+
+// "<kind> file: <path>" with a Reveal button, shown above the selected
+// file's sections. The path was previously visible only in the pane's
+// empty state, which is the one place it is not needed.
+function filePathHeader(label, path) {
+  const row = el("div", { class: "ag-row ag-file-path" },
+    el("span", { class: "ag-label" }, label),
+    el("code", { class: "mono", title: path || "" }, path || "(unknown)"),
+  );
+  if (path && window.cyllama && typeof window.cyllama.revealItem === "function") {
+    row.appendChild(el("button", {
+      type: "button", class: "btn btn-mini",
+      title: `Reveal ${path}`,
+      onclick: () => window.cyllama.revealItem(path),
+    }, "Reveal"));
+  }
+  return row;
+}
 
 
 // ---------------------------------------------------------------------------
@@ -617,6 +706,11 @@ function workflowRow(r) {
   }, r.error ? r.error : summaryLine(r.doc)));
 
   const actions = el("div", { class: "scr-actions" });
+  actions.appendChild(el("button", {
+    type: "button", class: "btn btn-mini", id: `wf-view-${r.id}`,
+    title: r.installed ? "Read this workflow" : "Read the shipped workflow",
+    onclick: () => viewCode("workflow", r.id, !r.installed),
+  }, "View"));
   if (!r.shipped) actions.appendChild(el("span", {}));
   if (r.shipped) {
     actions.appendChild(el("button", {
@@ -663,6 +757,7 @@ async function runWorkflow(id) {
     selectWorkflow(id);
     return;        // selection cleared the initial state; nothing to run yet
   }
+  if (!await approveRun("workflow", id)) return;
   await runSelectedWorkflow();
 }
 
@@ -728,6 +823,9 @@ function renderWorkflowMain(host) {
   const wf = state.workflows.find((w) => w.id === state.selectedWorkflowId);
   if (!wf) return;
 
+  host.appendChild(el("section", { class: "mp-section", id: "wf-file" },
+    filePathHeader("workflow file", wf.path)));
+
   const specHost = el("section", { class: "mp-section", id: "wf-spec" },
     el("h3", {}, "Plan"),
     el("div", { class: "rt-placeholder" }, "loading..."),
@@ -758,9 +856,13 @@ function renderWorkflowMain(host) {
   }
   host.appendChild(formHost);
 
+  const traceHost = el("div", { class: "agent-events", id: "wf-events" });
   host.appendChild(el("section", { class: "mp-section", id: "wf-trace" },
-    el("h3", {}, "Trace"),
-    el("div", { class: "agent-events", id: "wf-events" })));
+    el("h3", {}, "Trace"), traceHost));
+  // Replay what state holds: leaving the pane mid-run and coming back
+  // used to show an empty trace while the events kept accumulating.
+  for (const item of state.liveEvents) traceHost.appendChild(traceEventRow(item));
+  traceHost.scrollTop = traceHost.scrollHeight;
 
   loadWorkflowSpec(wf.id, specHost);
 }
@@ -823,9 +925,7 @@ function renderWorkflowDetail(host) {
   }
 }
 
-function renderTraceEvent(ev) {
-  const host = document.getElementById("wf-events");
-  if (!host) return;
+function traceEventRow(ev) {
   const row = el("div", {
     class: `ag-event ag-ev-${(ev.event_type || "").toLowerCase().replace(/_/g, "-")}`,
   });
@@ -834,7 +934,22 @@ function renderTraceEvent(ev) {
   if (source) row.appendChild(el("span", { class: "ag-ev-source" }, source));
   row.appendChild(el("span", { class: "ag-ev-type" }, ev.event_type || "?"));
   row.appendChild(el("span", { class: "ag-ev-content" }, ev.content || ""));
-  host.appendChild(row);
+  return row;
+}
+
+// Append one event, capping state and DOM at WF_TRACE_MAX and evicting
+// oldest-first, the way pushScriptLog does. A workflow that forwards
+// sub-workflow events can emit far more than the pane can usefully
+// show, and every one of them used to stay in memory and in the DOM.
+function pushTraceEvent(item) {
+  state.liveEvents.push(item);
+  if (state.liveEvents.length > WF_TRACE_MAX) {
+    state.liveEvents.splice(0, state.liveEvents.length - WF_TRACE_MAX);
+  }
+  const host = document.getElementById("wf-events");
+  if (!host) return;
+  host.appendChild(traceEventRow(item));
+  while (host.childElementCount > WF_TRACE_MAX) host.removeChild(host.firstChild);
   host.scrollTop = host.scrollHeight;
 }
 
@@ -912,9 +1027,9 @@ async function runSelectedWorkflow() {
   syncWorkflowRunButton();
   const off = job.onEvent((ev) => {
     if (ev.type === "trace") {
-      const item = { event_type: ev.event_type, content: ev.content, metadata: ev.metadata || {} };
-      state.liveEvents.push(item);
-      renderTraceEvent(item);
+      pushTraceEvent({
+        event_type: ev.event_type, content: ev.content, metadata: ev.metadata || {},
+      });
     } else if (ev.type === "result") {
       state.lastResult = ev.result || null;
       renderDetail();
@@ -999,6 +1114,11 @@ function scriptRow(r) {
   // Two fixed slots, so Run is in the same column whether or not the
   // row also has an Install, and an Install is never mistaken for it.
   const actions = el("div", { class: "scr-actions" });
+  actions.appendChild(el("button", {
+    type: "button", class: "btn btn-mini", id: `scr-view-${r.id}`,
+    title: r.installed ? "Read this script" : "Read the shipped script",
+    onclick: () => viewCode("script", r.id, !r.installed),
+  }, "View"));
   if (!r.shipped) actions.appendChild(el("span", {}));
   if (r.shipped) {
     actions.appendChild(el("button", {
@@ -1105,6 +1225,9 @@ function renderScriptsMain(host) {
   // Run lives on the row, not here: the row is the only place a script
   // can be started, so there is one button per script and no question
   // about which one these arguments belong to.
+  host.appendChild(el("section", { class: "mp-section", id: "scr-file" },
+    filePathHeader("script file", sc.path)));
+
   const formHost = el("section", { class: "mp-section", id: "scr-form" },
     el("h3", {}, `Arguments for ${sc.id}`),
     argsArea,
@@ -1277,6 +1400,7 @@ function applyScriptEvent(ev) {
 // with arguments the user cannot see.
 async function runScript(id) {
   if (state.scriptJob) return;
+  if (!await approveRun("script", id)) return;
   if (id !== state.selectedScriptId) selectScript(id);
   await runSelectedScript();
 }

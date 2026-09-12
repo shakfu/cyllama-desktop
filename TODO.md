@@ -1,6 +1,6 @@
 # TODO
 
-Roughly ordered by user impact and effort. Strike through items as they ship, or move them to `CHANGELOG.md` under `[Unreleased]`.
+Roughly ordered by user impact and effort. When an item ships, write it up in `CHANGELOG.md` under `[Unreleased]` and delete it from here; this file tracks only what is outstanding.
 
 ## Conversation
 
@@ -8,19 +8,17 @@ Roughly ordered by user impact and effort. Strike through items as they ship, or
 
 ## Sampling and model parameters
 
-- [ ] **Forward-looking sampler fields** still waiting on cyllama for `grammar`, `speculative`, `ngram` (as `GenerationConfig` kwargs). 0.4.4 rejects all three as unexpected keyword arguments. UI + sidecar whitelist are already in place; rows surface automatically once `/info.supported_params` and `/info.features` advertise them. (Penalty + mirostat fields landed in 0.2.17 and are live.) Verification on bump: `build/python-mac-arm64/bin/python3 -c "from cyllama import GenerationConfig; GenerationConfig(grammar='', speculative=1, ngram=1)"` should not raise. Grammar already has a separate path (`/grammar/from-schema` + GBNF builder); the missing piece is per-chat enforcement on `GenerationConfig`.
+- [ ] **Forward-looking sampler fields** still waiting on cyllama for `grammar`, `speculative`, `ngram` (as `GenerationConfig` kwargs). Still rejected as unexpected keyword arguments on the bundled 0.4.6 (re-probed 2026-09-12). UI + sidecar whitelist are already in place; rows surface automatically once `/info.supported_params` and `/info.features` advertise them. (Penalty + mirostat fields landed in 0.2.17 and are live.) Verification on bump: `build/python-mac-arm64/bin/python3 -c "from cyllama import GenerationConfig; GenerationConfig(grammar='', speculative=1, ngram=1)"` should not raise. Grammar already has a separate path (`/grammar/from-schema` + GBNF builder); the missing piece is per-chat enforcement on `GenerationConfig`.
 
 ## Markdown / rendering
 
 - [ ] Track `\[...\]` display math and 4-space indented code blocks in `findStableSplit`; today only fenced code and `$$...$$` are tracked, so `\[...\]` math could be prematurely committed.
 
-- [ ] Syntax highlighting in fenced code blocks (Highlight.js or Shiki — Shiki is heavier but renders better; needs vendoring).
+- [ ] Syntax highlighting in fenced code blocks. The library question is settled: `highlight.js` core is already a dependency and bundled for the script viewer, with the Python grammar registered. Chat code blocks need the grammars for whatever languages are worth supporting plus a hook in the marked renderer, and each grammar adds to the bundle.
 
 - [ ] Copy-code button on each `<pre>` block.
 
-- [ ] Image rendering (markdown `![]()` already works; verify with a real response, add max-width).
-
-- [ ] Tables: horizontal scroll on overflow rather than column collapse.
+- [ ] Decide what to do about remote markdown images. The CSP is `img-src 'self' data:` (`src/renderer/index.html:9`), so an `![](https://...)` in a model's reply renders as a broken image with a console error -- it is not a styling gap, it is the policy. Either widen the CSP for images (and accept that a reply can make the renderer fetch an arbitrary URL), proxy them through the sidecar, or strip them in the marked renderer and show the URL as a link. Doing nothing is defensible; looking broken is not.
 
 ## Models
 
@@ -32,21 +30,19 @@ Roughly ordered by user impact and effort. Strike through items as they ship, or
 
 ### Composer attachments + speech I/O (priority-sorted)
 
-Composer-level UX. The underlying primitives -- Whisper transcription, MTMD vision, RAG ingest -- already ship in dedicated panes; the gap is in-composer plumbing. Image + document attachment already work via the paperclip button (gated on the relevant capability flags); everything else below is still missing.
+Composer-level UX. The underlying primitives -- Whisper transcription, MTMD vision, RAG ingest -- already ship in dedicated panes; the gap is in-composer plumbing. Image and document attachment work via the paperclip, and voice prompts via the mic button; everything below is still missing.
 
-- [ ] **1. Voice prompts** (microphone button in composer). Record via the renderer's MediaRecorder API, ship to the sidecar via the existing transcribe path, drop the text into the prompt textarea on completion. Red-dot + duration indicator while capturing; Esc cancels. Whisper machinery is already shipped; this is purely composer plumbing.
+- [ ] **1. Audio file attachment in composer**. Drop a .wav (and, after the ffmpeg fallback lands, .mp3/.m4a/.flac/.ogg) into the messagebox, sidecar transcribes via Whisper, transcript becomes the message text. The upload and transcribe path already exists, built for voice prompts; what is missing is the drop target and the non-WAV decode (item 4).
 
-- [ ] **2. Audio file attachment in composer**. Drop a .wav (and, after the ffmpeg fallback lands, .mp3/.m4a/.flac/.ogg) into the messagebox, sidecar transcribes via Whisper, transcript becomes the message text. Largely shares code with the voice-prompts item minus the MediaRecorder front-end.
+- [ ] **2. Text-to-speech of assistant replies**. Speaker icon on each assistant message; click to read aloud. Use the browser `speechSynthesis` Web Speech API for v1 -- offline on macOS/Windows, no model load, picks up system voices. Per-voice + rate picker in Preferences. v2 could route to a local TTS GGUF once cyllama exposes one.
 
-- [ ] **3. Text-to-speech of assistant replies**. Speaker icon on each assistant message; click to read aloud. Use the browser `speechSynthesis` Web Speech API for v1 -- offline on macOS/Windows, no model load, picks up system voices. Per-voice + rate picker in Preferences. v2 could route to a local TTS GGUF once cyllama exposes one.
+- [ ] **3. Streaming-token multimodal answers** (`VisionLanguageChat` generator) so long vision answers don't block. Lower urgency than the composer-attachment items; users rarely hit the blocking window with single-image Q&A but it bites with long-form description.
 
-- [ ] **4. Streaming-token multimodal answers** (`VisionLanguageChat` generator) so long vision answers don't block. Lower urgency than the composer-attachment items; users rarely hit the blocking window with single-image Q&A but it bites with long-form description.
-
-- [ ] **5. Audio decode fallback for Transcribe**: shell out to `ffmpeg` when input is non-WAV. Detect at probe time, surface via `/info.features.audio_decode`. Strictly a prerequisite for item 2 covering non-WAV audio drops; can ship before or after the in-composer attachment.
+- [ ] **4. Audio decode fallback for Transcribe**: shell out to `ffmpeg` when input is non-WAV. Detect at probe time, surface via `/info.features.audio_decode`. Strictly a prerequisite for item 1 covering non-WAV audio drops; can ship before or after the in-composer attachment.
 
 ## Agents
 
-- [ ] **Phase F.4: per-agent-type run history pane.** Right detail-rail column of the Agents pane currently shows a "Run a workflow to see its result here" placeholder for every type except workflow. F.4 fills this with a list of recent runs (per agent type), each clickable to drill into the full trace + final state + error. Needs:
+- [ ] **Phase F.4: per-agent-type run history pane.** The Agents pane's right detail rail shows a real result for the workflow and scripts rows and a placeholder for the six agent types. F.4 fills this with a list of recent runs (per agent type), each clickable to drill into the full trace + final state + error. Needs:
 
       - Sidecar: persist per-job `kind` / `state` / `result_summary` beyond the in-memory `Job` registry so a renderer reload doesn't drop history. SQLite at `<workspace>/run_history.db` with a small migration is the natural shape.
 
@@ -61,7 +57,7 @@ Composer-level UX. The underlying primitives -- Whisper transcription, MTMD visi
 
 ## App shell
 
-- [ ] Settings panel: theme override, default sampling, model directory. The General tab is the home; About + Devices are there now, Preferences is still a placeholder.
+- [ ] Settings panel: theme override and default sampling. The Preferences window (`Cmd+,`) now has four tabs -- General (About + devices), Models (extra model search roots, which covers the model-directory item), Sidecar (workspace paths + Python runtime + the OpenAI-compatible server), and Logs. Only the General tab's theme and default-sampling controls are still a placeholder; both settings live in localStorage today rather than `<userData>/settings.json` (see `docs/dev/plan.md` S9).
 
 - [ ] Update window title to active chat name.
 
@@ -83,20 +79,26 @@ Composer-level UX. The underlying primitives -- Whisper transcription, MTMD visi
 
 - [ ] Crash reporting (Sentry or similar) with sidecar/renderer separation.
 
+## Scripts and workflows
+
+- [ ] **Expire "has been read" when a file changes.** Run on a file the user has not opened shows the code first; that is remembered per file id, so a file replaced by different content under a name already read runs without the detour. Keying on content would re-show the code on every save, which breaks the authoring loop; a workable middle is to re-show when mtime moves and the pane was not what wrote it. Not obviously worth the complexity -- decide before adding it.
+
+- [ ] **Verify the Windows process-tree kill for script cancel.** `_signal_child` terminates a kill-on-close job object on Windows, falling back to the direct child when the job could not be created. Written, never run: CI is Linux-only and the cancel test's liveness probe is POSIX-only. Needs a Windows runner, or a manual pass with a script that spawns its own children. See `docs/dev/scripting.md` S15.3 and Q6.
+
+- [ ] **Decide whether the scripts Arguments field should be conditional.** It is one line until focused, but it still renders for every script, and most take no arguments. Hiding it would need the sidecar to report whether a script reads stdin, which means guessing intent from the ast. Left visible on purpose; revisit if the field proves to be noise.
+
 ## Testing
 
 - [ ] Real-cyllama smoke suite (opt-in): a small `tests/smoke/` set that runs against the bundled `build/python-mac-arm64/` python env, exercising the actual cyllama API surface so capability probes catch shape drifts on cyllama bumps. Slow + expensive, so kept out of `make test`.
 
 - [ ] Cross-platform smoke: `make python && make dev && curl /health` in CI for each target platform once Windows / Linux distribution lands.
 
-- [ ] Deeper Playwright flows: model-picker round-trip, send + abort, sidebar collapse persistence, KaTeX render verification. Current suite is rendering-only.
+- [ ] Deeper Playwright flows: model-picker round-trip, send + abort, sidebar collapse persistence, KaTeX render verification. The suite now drives real interactions (modal edit and submit, script run with streamed output, install and uninstall, workflow input gating), so it is no longer rendering-only -- but those four flows are still untested, and all of them need either a real model or a stub that returns tokens.
 
 ## Tech debt
 
 - [ ] CSP currently includes `'unsafe-eval'` for KaTeX. Investigate `katex.min.js` builds without `Function()` use to drop it.
 
 - [ ] Move sidecar's per-model `LLM` slot to a real LRU; current single-slot eviction churns when alternating between two models.
-
-- [ ] **`CYLLAMA_SOURCE` leaks in from the environment.** make exports environment variables into every recipe, so an exported `CYLLAMA_SOURCE` (easy to have if you develop against a local cyllama checkout) silently turns `make python` -- and `make variant-cpu` -- into a source build, while the release path is supposed to be PyPI-only. The variant guard in `build-python-env.sh` catches this for GPU variants (dist name mismatch) but not for `cpu`, where the two paths install under the same name. Fix: have the `python` and `variant-*` targets invoke the script with `CYLLAMA_SOURCE=` cleared, so only `python-local` can trigger a source build. Confirmed reproducible with a probe makefile.
 
 - [ ] Conftest's `_install_cyllama_stub()` runs `import pytest` at module level, which forces the Playwright e2e launcher to install pytest just to load the stub. Extract the stub into a pytest-free helper so the e2e env stays leaner.

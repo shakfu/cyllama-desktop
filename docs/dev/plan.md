@@ -24,11 +24,21 @@ Both personas share one binary; the difference is UI mode, not feature gating.
 
 - Replacing `cyllama` the CLI. The desktop is additive, not a substitute.
 
-## 3. Current state (2026-05-06)
+## 3. Current state (2026-09-12)
+
+For the full endpoint list and source tree, see `README.md`; this
+section records only what bears on the phases below.
 
 Sidecar (`python-sidecar/sidecar.py`):
 
-- Endpoints: `/health`, `/info` (with `features` + `devices` + `server_kinds`), `/chat`, `/tokenize`, `/unload`, `/grammar/from-schema`, `/hardware/estimate-layers`, `/models/{cached,inspect,import}`, `/models/hf/{peek,download}`, `/rag/{collections,query,retrieve}` + `/jobs/rag.ingest`, `/jobs/transcribe`, `/jobs/image/txt2img`, `/jobs/agent/run`, `/server/{start,stop,status}`, `/jobs/batch`, `/jobs/models/quantize`, `/quantize/ftypes`, plus the `/jobs/*` registry (list/get/cancel/result/events/artifact).
+- 57 routes. Beyond the Phase 0-9 set: the four agent variants
+  (`/jobs/agent/{constrained,contract,plan,reflect}`),
+  `/info/contract-presets`, workflows (`/workflows`,
+  `/workflows/{id}/spec`, `/jobs/workflow/run`), scripts (`/scripts`,
+  `/jobs/script/run`), the shipped-example install and uninstall
+  routes for both, `/documents/extract`, `/audio/upload`, and
+  `/jobs/{id}/log` for replaying retained events after a dropped
+  stream.
 
 - Sampler whitelist now includes the forward-looking fields (`presence_penalty`, `frequency_penalty`, `mirostat*`, `grammar`) filtered through `_GC_ACCEPTED` so they no-op cleanly on cyllama builds that don't accept them. Capability flags surface what's live.
 
@@ -40,7 +50,14 @@ Sidecar (`python-sidecar/sidecar.py`):
 
 Renderer:
 
-- Left nav-rail switches sidebar views: Chats, Documents, Transcribe, Image, Server, Batch, Console. Right sidebar tabs: Models, Agents, General. Panes that depend on optional cyllama capabilities hide themselves via `/info.features`.
+- The nav-rail now mixes two things: full-area pane jumps (Chats,
+  Models, Agents) plus Console and Preferences, while the left-sidebar
+  tabs carry Chats, Docs, Transcribe, Image and Batch. Models and
+  Agents were promoted out of the right sidebar into full-area panes;
+  Settings moved into a separate Preferences window (`Cmd+,`) with
+  General, Models, Sidecar and Logs tabs. Panes that depend on
+  optional cyllama capabilities still hide themselves via
+  `/info.features`.
 
 - Chat: streaming, multi-turn, persistent chats, copy/regenerate, presets, full sampling surface (basic + Advanced disclosure for grammar / speculative / n-gram cache), retrieval injection from a RAG collection, ModelPicker, sampling and load-time hardware controls (multi-GPU rows hidden on single-GPU rigs), GBNF generation from JSON schema.
 
@@ -56,9 +73,17 @@ Renderer:
 
 - Models tab: cached models list, drag-drop import, HF download, metadata inspector, Tools section with quantize.
 
-- Agents tab: ReActAgent runner with tool catalog (calculator, sandboxed read_file, web_fetch off-by-default, RAG query) and a type-tagged live trace.
+- Agents pane (full-area): six agent types with per-type defaults and
+  a per-call modal, a tool catalog (stock tools, sandboxed read_file,
+  web_fetch, search_wikipedia, quarto_render, rag_query,
+  semantic_memory), the workflow row (file list, plan preview,
+  initial state, live trace), and the scripts row (child-process jobs
+  with streamed output, cancel, and artifacts). Shipped examples for
+  both install and uninstall from the row.
 
-- General tab: cyllama version, backends, paths, devices.
+- Preferences window: About and devices under General, extra model
+  search roots under Models, workspace paths and the Python runtime
+  under Sidecar, plus the sidecar log under Logs.
 
 ## 4. Feature surface to expose
 
@@ -102,7 +127,7 @@ Out of scope until later (not on cyllama's stable surface or low ROI for a deskt
 
 ## 5. UI architecture: panes over a single chat
 
-Vocabulary: a **pane** is a UI surface (Chat, Documents, Transcribe, ...). A **workspace** is a project-level container of inputs, outputs, models, and config that *spans* panes — see Section 9. One workspace contains many panes' worth of state.
+Vocabulary: a **pane** is a UI surface (Chat, Documents, Transcribe, ...). A **workspace** is a project-level container of inputs, outputs, models, and config that *spans* panes -- see Section 9. One workspace contains many panes' worth of state.
 
 The current single-page chat will not scale to ~10 disjoint feature areas. Proposal: keep the existing left nav-rail (already half-implemented per `TODO.md`) and turn each rail icon into a *pane* with its own renderer module. Panes share the global sidecar connection, the loaded model slot, and a global Console drawer.
 
@@ -212,9 +237,9 @@ Design rules:
 
 Each phase is independently shippable. Don't start phase N+1 until N is green on `make test` and a manual smoke pass.
 
-Status legend: ✅ shipped · 🟡 partial (slice noted) · ⬜ not started. See `CHANGELOG.md` for the per-slice notes.
+Status legend: [x] shipped, [~] partial (slice noted), [ ] not started. See `CHANGELOG.md` for the per-slice notes.
 
-**Phase 0 -- foundations** ✅ (no user-visible feature, enables the rest)
+**Phase 0 -- foundations** [x] (no user-visible feature, enables the rest)
 - `/jobs` infrastructure in sidecar (Python `asyncio.Task` registry, SSE events, cancel, result download, artifact dir).
 
 - Introduce **esbuild** and split `renderer.js` into per-pane modules with a shared `lib/` (sidecar client, ParamPanel, ModelPicker, JobRunner). Done now rather than piecemeal later (Section 12 Q4).
@@ -225,14 +250,14 @@ Status legend: ✅ shipped · 🟡 partial (slice noted) · ⬜ not started. See
 
 - Pytest suite for sidecar (currently absent per `TODO.md`).
 
-**Phase 1 -- Models tab + ModelPicker** ✅
+**Phase 1 -- Models tab + ModelPicker** [x]
 - `/models/cached`, `/models/inspect`, `/models/hf/peek`, `/models/hf/download`.
 
 - Models view: list cached, drag-drop import, HF URL input -> download job, GGUF metadata side panel.
 
 - Replace file-dialog flow in Chat with ModelPicker.
 
-**Phase 2 -- Chat parity with cyllama sampler surface** ✅
+**Phase 2 -- Chat parity with cyllama sampler surface** [x]
 - Add presence/freq penalty, mirostat, full stop-sequence UI.
 
 - Presets store + dropdown (already on TODO).
@@ -243,14 +268,14 @@ Status legend: ✅ shipped · 🟡 partial (slice noted) · ⬜ not started. See
 
 - N-gram cache toggle.
 
-**Phase 3 -- Hardware controls** ✅
+**Phase 3 -- Hardware controls** [x]
 - `/hardware/estimate-layers` + Settings -> Hardware panel.
 
 - Multi-GPU `split_mode`, `tensor_split`, `main_gpu` controls (only shown if `_backend` reports >1 device).
 
 - Model load uses these; eviction on change.
 
-**Phase 4 -- Documents / RAG** ✅
+**Phase 4 -- Documents / RAG** [x]
 - `/rag/*` endpoints; per-collection SQLite under `<userData>/rag/`.
 
 - Ingest jobs via JobRunner.
@@ -259,38 +284,54 @@ Status legend: ✅ shipped · 🟡 partial (slice noted) · ⬜ not started. See
 
 - "Use this collection in Chat" toggle that injects retrieval as a pre-message system context (transparent to chat code).
 
-**Phase 5 -- Transcribe** 🟡 (WAV input only; ffmpeg fallback for mp3/m4a/flac/ogg deferred. Timestamp scrubbing -- click-to-play -- not yet wired; segment table + TXT/SRT/VTT copy shipped.)
+**Phase 5 -- Transcribe** [~] (WAV input only; ffmpeg fallback for mp3/m4a/flac/ogg deferred. Timestamp scrubbing -- click-to-play -- not yet wired; segment table + TXT/SRT/VTT copy shipped.)
 - `/transcribe` with Whisper; segment table, timestamp scrubbing, copy-as-SRT/VTT.
 
-**Phase 6 -- Image / Video** 🟡 (txt2img slice shipped. Gallery view of past artifacts, img2img / inpaint canvas, ControlNet upload, LoRA selector, ESRGAN upscale, and video generation deferred.)
+**Phase 6 -- Image / Video** [~] (txt2img slice shipped. Gallery view of past artifacts, img2img / inpaint canvas, ControlNet upload, LoRA selector, ESRGAN upscale, and video generation deferred.)
 - `/image/*`, `/video/generate`. Gallery view backed by artifacts dir.
 
 - Advanced reveals: ControlNet image upload, inpaint mask canvas, LoRA selector, ESRGAN upscale post-step.
 
-**Phase 7 -- Agents** 🟡 (ReActAgent + tool catalog shipped. ContractAgent pre/post UI tracked in `TODO.md`.)
+**Phase 7 -- Agents** [x] (ReActAgent, the tool catalog, and the
+ContractAgent pre/post UI all shipped, along with three agent variants
+the original phase did not anticipate. Phases A-F in
+`agent_plan.md` supersede this entry.)
 - `/agent/run` with live tool-call trace SSE.
 
 - Pre-shipped tool catalog: web fetch (off by default), file read inside a chosen sandbox dir, RAG-collection query, calculator.
 
 - ContractAgent UI: pre/post conditions as text fields.
 
-**Phase 8 -- Server pane** ✅
+**Phase 8 -- Server pane** [x]
 - Start/stop EmbeddedServer or PythonServer with the loaded model.
 
 - Show OpenAI-compatible URL + curl example.
 
 - Local-only by default; explicit "expose on LAN" checkbox with warning.
 
-**Phase 9 -- Batch + Tools** ✅
+**Phase 9 -- Batch + Tools** [x]
 - Batch pane: paste/import prompts, run via `batch_generate`, download CSV/JSONL.
 
 - Models -> Tools: quantize job, GGUF re-save.
 
 Phases 4-7 are independently parallelizable once 0-3 are in.
 
+**Phase 10 -- agent layer** [x] Six agent types, the tool catalog,
+semantic memory, workflows, and the full-area Agents pane. Planned and
+tracked separately in [`agent_plan.md`](agent_plan.md) as Phases A-F;
+F.4 (per-agent-type run history) is the one slice still open.
+
+**Phase 11 -- workspace scripts** [x] Python files run as child-process
+jobs against the resident model. Design record in
+[`scripting.md`](scripting.md). The Windows process-tree kill is
+written but unverified (Section 15.3 there).
+
 ---
 
-What's next: the partial phases (5/6/7) have specific sub-features tracked in `TODO.md`. Once cyllama exposes a richer image API (progress callbacks, img2img, video) the slice notes in Phase 6 become discrete follow-up phases rather than open questions.
+What's next: the partial phases (5 and 6) have specific sub-features
+tracked in `TODO.md`. Once cyllama exposes a richer image API
+(progress callbacks, img2img, video) the slice notes in Phase 6 become
+discrete follow-up phases rather than open questions.
 
 ## 9. Workspaces (projects), persistence, and config
 
@@ -314,22 +355,28 @@ All app data under `app.getPath('userData')`:
 ```
 <userData>/
   models/                       # global GGUF cache (HF mirror or symlink to ~/.cache/llama.cpp/)
-  settings.json                 # global: hardware, theme, server, sidecar
+  settings.json                 # global; see the shape below
+  .layout_version               # migration stamp, currently "1"
   workspaces/
     default/
       chats/<uuid>.json
       rag/<collection>.sqlite
       artifacts/<job_id>/...
-      presets/
+      uploads/<uuid>.<ext>      # multimodal chat attachments
+      scripts/*.py              # user scripts, plus installed examples
+      workflows/*.py            # user workflows, plus installed examples
+      presets/                  # reserved; presets live in localStorage today
       sandbox/                  # agent file-tool sandbox root (refuses paths outside)
-      settings.json             # workspace-scoped: default model pin, sampling preset, system prompt, RAG default
+      settings.json             # reserved; see the shape below
 ```
 
-Existing per-project paths (`chats/`, `artifacts/`, `presets/`, `rag/`) move under `workspaces/default/` in a one-time migration on first launch after this lands. Subsequent launches treat the new layout as authoritative.
+Existing per-project paths (`chats/`, `artifacts/`, `presets/`, `rag/`) move under `workspaces/default/` in a one-time migration on first launch after this lands. Subsequent launches treat the new layout as authoritative. Shipped: the migration runs, gated by `.layout_version`.
+
+Nothing is written to `scripts/` or `workflows/` on launch. Both hold only what the user authored or installed from the shipped examples (see [`scripting.md`](scripting.md) S17).
 
 ### settings.json shapes (versioned, atomic writes)
 
-Global `<userData>/settings.json`:
+Global `<userData>/settings.json`. Proposed shape:
 ```
 { "version": 1,
   "hardware": { "n_gpu_layers": "auto", "split_mode": 1, ... },
@@ -337,7 +384,14 @@ Global `<userData>/settings.json`:
   "server": { "kind": "embedded", "port": 0, "exposeLan": false } }
 ```
 
-Per-workspace `<userData>/workspaces/<id>/settings.json`:
+As shipped it carries one field, `models_extra` -- the additional
+read-only model search roots set in Preferences -> Models. Hardware,
+theme and server settings still live in the renderer's localStorage.
+Growing the file is a migration away, not a redesign, but it has not
+happened.
+
+Per-workspace `<userData>/workspaces/<id>/settings.json`. Nothing
+reads or writes this file yet; the shape is still the proposal:
 ```
 { "version": 1,
   "model": { "default": "<path-into-global-cache>", "loadOptions": {...} },

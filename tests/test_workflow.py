@@ -393,3 +393,31 @@ def test_uninstall_workflow_cannot_delete_user_file(
     _write_workflow(workflows_dir, "mine", '"""Mine."""\n')
     assert client.delete("/workflows/examples/mine", headers=auth).status_code == 404
     assert (workflows_dir / "mine.py").exists()
+
+
+def test_workflow_summary_carries_the_absolute_path(client, auth, workflows_dir):
+    path = _write_workflow(workflows_dir, "wf", _MIN_FLOW)
+    body = client.get("/workflows", headers=auth).json()
+    assert body["workflows"][0]["path"] == str(path)
+
+
+def test_workflow_source_is_read_not_imported(client, auth, workflows_dir):
+    """/spec imports the module; /source must only read it."""
+    _write_workflow(workflows_dir, "boom", "\n".join([
+        "'''Explodes on import.'''",
+        "raise RuntimeError('imported')",
+        "",
+    ]))
+    got = client.get("/workflows/boom/source", headers=auth).json()
+    assert "RuntimeError" in got["source"]
+    assert got["path"] == str(workflows_dir / "boom.py")
+    # The importing route still fails, which is the contrast.
+    assert client.get("/workflows/boom/spec", headers=auth).status_code == 400
+
+
+def test_workflow_source_reads_a_shipped_example(
+    client, auth, workflows_dir, example_workflows_dir
+):
+    _write_workflow(example_workflows_dir, "shipped", "'''Shipped.'''\n")
+    got = client.get("/workflows/shipped/source?shipped=true", headers=auth).json()
+    assert got["source"] == "'''Shipped.'''\n"

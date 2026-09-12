@@ -673,3 +673,60 @@ def test_uninstall_cannot_delete_a_user_authored_script(client, auth, scripts_di
 def test_uninstall_404_when_not_installed(client, auth, scripts_dir, examples_dir):
     write_script(examples_dir, "sweep.py", '"""Shipped."""\n')
     assert client.delete("/scripts/examples/sweep", headers=auth).status_code == 404
+
+
+def test_summary_carries_the_absolute_path(client, auth, scripts_dir, examples_dir):
+    """The pane shows the path before running, so discovery must send it."""
+    write_script(scripts_dir, "mine.py", '"""Mine."""\n')
+    write_script(examples_dir, "sweep.py", '"""Shipped."""\n')
+    body = client.get("/scripts", headers=auth).json()
+    assert body["scripts"][0]["path"] == str(scripts_dir / "mine.py")
+    assert body["examples"][0]["path"] == str(examples_dir / "sweep.py")
+
+
+# ---------------------------------------------------------------------------
+# Source view: the pane shows the file before running it
+# ---------------------------------------------------------------------------
+
+
+def test_source_returns_the_file_verbatim(client, auth, scripts_dir):
+    body = '"""Doc."""\nx = 1  # trailing\n\tindented = 2\n'
+    (scripts_dir / "mine.py").write_text(body, encoding="utf-8")
+    r = client.get("/scripts/mine/source", headers=auth)
+    assert r.status_code == 200
+    got = r.json()
+    # Verbatim: the user is asked to judge this text, so no normalising.
+    assert got["source"] == body
+    assert got["path"] == str(scripts_dir / "mine.py")
+    assert got["bytes"] == len(body.encode())
+
+
+def test_source_reads_a_shipped_example_before_install(client, auth, scripts_dir, examples_dir):
+    write_script(examples_dir, "sweep.py", '"""Shipped."""\n')
+    got = client.get("/scripts/sweep/source?shipped=true", headers=auth).json()
+    assert got["source"] == '"""Shipped."""\n'
+    # Not installed, so the workspace read fails.
+    assert client.get("/scripts/sweep/source", headers=auth).status_code == 404
+
+
+def test_source_404_on_unknown_and_400_on_bad_id(client, auth, scripts_dir):
+    assert client.get("/scripts/nope/source", headers=auth).status_code == 404
+    assert client.get("/scripts/2bad/source", headers=auth).status_code == 400
+
+
+def test_source_413_when_too_large(client, auth, scripts_dir, sidecar_app, monkeypatch):
+    monkeypatch.setattr(sidecar_app, "_SCRIPT_MAX_SOURCE_BYTES", 10)
+    (scripts_dir / "big.py").write_text("x = 1\n" * 100, encoding="utf-8")
+    assert client.get("/scripts/big/source", headers=auth).status_code == 413
+
+
+def test_source_does_not_execute_the_file(client, auth, scripts_dir, tmp_path):
+    marker = tmp_path / "ran.marker"
+    write_script(scripts_dir, "sideeffect.py", f"""
+        \"\"\"Writes a marker at import time.\"\"\"
+        from pathlib import Path
+        Path({str(marker)!r}).write_text("executed")
+    """)
+    got = client.get("/scripts/sideeffect/source", headers=auth).json()
+    assert "write_text" in got["source"]
+    assert not marker.exists()
