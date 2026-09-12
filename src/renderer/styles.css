@@ -1940,10 +1940,17 @@ details.rt-collapsible > summary > .icon-btn { margin-right: 4px; }
   color: white;
 }
 
+/* Most scripts take no arguments, so the field is one line until it has
+   focus or content. Growing on focus keeps it discoverable without
+   spending a third of the pane on an empty "{}". */
 .scr-args {
   width: 100%; resize: vertical;
   font-family: var(--mono, monospace); font-size: 12px;
+  min-height: 2.1em;
+  transition: min-height 80ms ease-out;
 }
+.scr-args:focus, .scr-args:not(:placeholder-shown) { min-height: 6.5em; }
+#scr-args-error:empty { display: none; }
 .scr-log {
   max-height: 320px; overflow-y: auto;
   font-family: var(--mono, monospace);

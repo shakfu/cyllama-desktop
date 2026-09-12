@@ -4,15 +4,17 @@ All notable changes to cyllama-desktop are documented here. The format is based 
 
 ## [Unreleased]
 
+## [0.3.1]
+
 ### Changed
 
-- **Example scripts and workflows are a catalog, not a first-launch copy.** The app no longer writes to the workspace on launch. Both panes list the shipped examples below your own files, and Copy puts one into `<workspace>/scripts/` or `<workspace>/workflows/`, where it becomes an ordinary file you own. The old `.seeded` marker recorded a single bit -- that seeding had run -- so it could not distinguish an example the user deleted from one that did not exist when the install first launched. Honouring the deletion meant an install never received an example added in a later release. Copy never overwrites: a name already in the workspace is shown as "in workspace", and the endpoint returns 409 rather than replacing a file you may have edited.
+- **Shipped examples install and uninstall from the pane; nothing is seeded on first launch.** The app no longer writes to the workspace at startup. The scripts and workflows panes list one row per file -- yours and the ones the app ships, in a single list -- and Install copies a shipped file into `<workspace>/scripts/` or `<workspace>/workflows/`, where it becomes an ordinary file you own. Uninstall exists only where the build ships that name, and `DELETE /{scripts,workflows}/examples/{id}` refuses any other file, so neither the pane nor the API offers to delete something you wrote. An installed copy whose bytes no longer match the shipped file has local edits: the delete returns 409, and the pane asks before passing `force`.
 
-  Installs that already seeded keep those files and the now-inert marker; the catalog marks them as already in the workspace. Catalog rows carry the docstring only. Summarising an example must not import it, and the workflow summary works by importing and compiling the module, so `entry`, `exits`, and `inputs_required` appear only once a workflow is in the workspace.
+  The old `.seeded` marker recorded a single bit -- that seeding had run -- so it could not distinguish an example the user deleted from one that did not exist when the install first launched. Honouring the deletion meant an install never received an example added in a later release. Installs that already seeded keep those files and the now-inert marker, and their rows show as installed.
 
-- **The scripts pane is one row per script.** Name, the first line of the docstring, Install or Uninstall, Run. Shipped and user-authored scripts share one list, so a script the app ships and one you wrote differ only in which buttons the row carries. Uninstall appears only where the build ships that name, and `DELETE /scripts/examples/{id}` refuses any other file, so nothing in the UI or the API offers to delete a script you wrote. A copy whose bytes no longer match the shipped file has local edits: the delete returns 409, and the pane asks before passing `force`.
+- **One row per script and per workflow: name, description, Install or Uninstall, Run.** The description is the docstring's first paragraph, collapsed to one line -- docstrings wrap at 72 columns, so a first line often ends mid-sentence. Both panes previously repeated the name and docstring in a second section below the list; scripts also carried two Run buttons and two Cancels for the same script, a byte count, an empty Output frame, and a four-line arguments box for the `{}` most scripts pass. Run now exists once, on the row, so the arguments or initial-state field below it is unambiguously the one that run uses.
 
-  The old layout repeated each script's name and docstring in a second section, carried two Run buttons and two Cancels for the same script, and showed a byte count and an empty Output frame. Run now lives only on the row, so the arguments box below is unambiguously the one that run uses.
+  A workflow whose `inputs_required` are unfilled has an inert Run naming what is missing, rather than a second button further down the page. Workflow rows show no entry node: the catalog is summarised with `ast.parse` and never imported, and the Plan section already shows it for the selected workflow. Workflow rows have no Cancel either -- a workflow runs in the sidecar process, where a cancel could not interrupt a node mid-call.
 
 ## [0.3.0]
 

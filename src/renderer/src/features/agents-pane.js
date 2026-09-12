@@ -92,8 +92,8 @@ const state = {
   // workspace; nothing runs from the catalog itself.
   scriptExamples: [],
   workflowExamples: [],
-  copyingExampleId: null,
   busyScriptId: null,
+  busyWorkflowId: null,
   selectedScriptId: null,
   scriptArgsText: "",
   scriptArgsError: "",
@@ -569,95 +569,154 @@ function renderDetail() {
 }
 
 
-// ---------------------------------------------------------------------------
-// Shipped example workflows. A read-only catalog: the only action is
-// Copy, which puts the file in the workspace where it becomes an
-// ordinary user file. Rows carry the docstring only -- the catalog is
-// summarised without importing anything (docs/dev/scripting.md S17).
-//
-// The scripts row does not use this: it merges the catalog into its own
-// one-row-per-script list (see scriptRows).
-// ---------------------------------------------------------------------------
-
-function renderExamplesSection(kind) {
-  const examples = state.workflowExamples;
-  if (!examples.length) return null;
-  const section = el("section", { class: "mp-section" }, el("h3", {}, "Examples"));
-  const list = el("div", { class: "agt-workflow-list" });
-  for (const ex of examples) {
-    const busy = state.copyingExampleId === `${kind}:${ex.id}`;
-    const row = el("div", { class: "mp-subnav-row scr-row", title: ex.doc || "" },
-      el("span", {}, ex.id),
-      el("button", {
-        type: "button", class: "btn btn-mini",
-        id: `ex-copy-${kind}-${ex.id}`,
-        disabled: (ex.in_workspace || busy) ? true : undefined,
-        title: ex.in_workspace
-          ? "A file with this name is already in the workspace"
-          : "Copy into the workspace",
-        onclick: () => copyExample(kind, ex.id),
-      }, ex.in_workspace ? "in workspace" : (busy ? "copying..." : "Copy")),
-    );
-    list.appendChild(row);
-  }
-  section.appendChild(list);
-  return section;
-}
-
-async function copyExample(kind, id) {
-  state.copyingExampleId = `${kind}:${id}`;
-  renderMain();
-  try {
-    const r = await sidecarFetch(`/workflows/examples/${encodeURIComponent(id)}/copy`,
-      { method: "POST" });
-    if (!r.ok) {
-      const body = await r.json().catch(() => ({}));
-      console.warn("agents-pane copyExample:", r.status, body.detail || "");
-    } else {
-      state.selectedWorkflowId = id;
-    }
-  } catch (e) {
-    console.warn("agents-pane copyExample:", e);
-  } finally {
-    state.copyingExampleId = null;
-  }
-  await refreshWorkflows();
-}
-
 
 // ===========================================================================
 // agent-workflow row: discovery + spec + initial-state + Run + trace
 // ===========================================================================
 
+// One row per workflow, shipped and user-authored in a single list.
+// Same rules as scriptRows: an uninstalled workflow has no Run, and a
+// user-authored file has no Uninstall. ``entry`` is not on the row --
+// the catalog cannot report it without importing the module, and the
+// Plan section below shows it for the selected workflow anyway.
+function workflowRows() {
+  const byId = new Map();
+  for (const ex of state.workflowExamples) {
+    byId.set(ex.id, {
+      id: ex.id, doc: ex.doc, error: null,
+      installed: Boolean(ex.in_workspace), edited: Boolean(ex.workspace_differs),
+      shipped: true, inputs: [],
+    });
+  }
+  for (const w of state.workflows) {
+    const shipped = byId.get(w.id);
+    byId.set(w.id, {
+      id: w.id, doc: w.doc || "", error: w.error,
+      installed: true, edited: shipped ? shipped.edited : false,
+      shipped: Boolean(shipped), inputs: w.inputs_required || [],
+    });
+  }
+  return [...byId.values()].sort((a, b) => a.id.localeCompare(b.id));
+}
+
+function workflowRow(r) {
+  const selected = r.id === state.selectedWorkflowId;
+  const busy = state.busyWorkflowId === r.id;
+  const row = el("div", {
+    class: "scr-row" + (selected ? " active" : "") + (r.installed ? "" : " scr-shelved"),
+    "data-workflow-id": r.id,
+  });
+  row.appendChild(el("button", {
+    type: "button", class: "scr-name", id: `wf-item-${r.id}`,
+    disabled: (!r.installed || r.error) ? true : undefined,
+    onclick: () => selectWorkflow(r.id),
+  }, r.id));
+  row.appendChild(el("span", {
+    class: "scr-desc" + (r.error ? " scr-desc-error" : ""),
+    title: r.error || r.doc || "",
+  }, r.error ? r.error : summaryLine(r.doc)));
+
+  const actions = el("div", { class: "scr-actions" });
+  if (!r.shipped) actions.appendChild(el("span", {}));
+  if (r.shipped) {
+    actions.appendChild(el("button", {
+      type: "button", class: "btn btn-mini",
+      id: `wf-${r.installed ? "uninstall" : "install"}-${r.id}`,
+      disabled: busy ? true : undefined,
+      title: r.installed
+        ? (r.edited ? "Remove from the workspace -- this copy has local edits" : "Remove from the workspace")
+        : "Copy into the workspace",
+      onclick: () => (r.installed ? uninstallWorkflow(r.id, r.edited) : installWorkflow(r.id)),
+    }, r.installed ? "Uninstall" : "Install"));
+  }
+  if (!r.installed || r.error) {
+    actions.appendChild(el("span", {}));
+  } else {
+    // A workflow with required inputs can only run once they are filled,
+    // and the form that fills them belongs to the selected row. Run stays
+    // on the row so there is one Run per workflow; the title says why it
+    // is inert. No Cancel: a workflow runs in the sidecar process, where
+    // a cancel could not interrupt a node mid-call.
+    const missing = r.inputs.filter(
+      (k) => !String(state.initialState[k] == null ? "" : state.initialState[k]).trim());
+    const blocked = r.inputs.length > 0 && (!selected || missing.length > 0);
+    const running = Boolean(state.currentJob);
+    actions.appendChild(el("button", {
+      type: "button", class: "scr-run", id: `wf-run-${r.id}`,
+      disabled: (blocked || running) ? true : undefined,
+      title: running ? "A workflow is already running"
+        : blocked
+          ? (selected
+            ? `Fill the initial state below: ${missing.join(", ")}`
+            : `Select this workflow to fill ${r.inputs.length} input(s)`)
+          : "Run this workflow",
+      onclick: () => runWorkflow(r.id),
+    }, "Run"));
+  }
+  row.appendChild(actions);
+  return row;
+}
+
+async function runWorkflow(id) {
+  if (state.currentJob) return;
+  if (id !== state.selectedWorkflowId) {
+    selectWorkflow(id);
+    return;        // selection cleared the initial state; nothing to run yet
+  }
+  await runSelectedWorkflow();
+}
+
+async function installWorkflow(id) {
+  await workflowCatalog(`/workflows/examples/${encodeURIComponent(id)}/copy`, "POST", id);
+}
+
+async function uninstallWorkflow(id, edited) {
+  if (edited && !confirm(`"${id}.py" has local edits. Delete it from the workspace?`)) return;
+  const path = `/workflows/examples/${encodeURIComponent(id)}`;
+  const res = await workflowCatalog(path + (edited ? "?force=true" : ""), "DELETE", null);
+  if (res === 409 && !edited
+      && confirm(`"${id}.py" has local edits. Delete it from the workspace?`)) {
+    await workflowCatalog(path + "?force=true", "DELETE", null);
+  }
+}
+
+// Returns the HTTP status on failure so a caller can react to 409.
+async function workflowCatalog(path, method, selectAfter) {
+  state.busyWorkflowId = selectAfter;
+  try {
+    const r = await sidecarFetch(path, { method });
+    if (!r.ok) {
+      const body = await r.json().catch(() => ({}));
+      console.warn("agents-pane workflowCatalog:", r.status, body.detail || "");
+      return r.status;
+    }
+    if (selectAfter) state.selectedWorkflowId = selectAfter;
+  } catch (e) {
+    console.warn("agents-pane workflowCatalog:", e);
+    return 0;
+  } finally {
+    state.busyWorkflowId = null;
+    await refreshWorkflows();
+  }
+  return 200;
+}
+
 function renderWorkflowMain(host) {
+  const rows = workflowRows();
   const listSection = el("section", { class: "mp-section" },
-    el("h3", {}, "Workflow files"));
-  if (!state.workflows.length) {
+    el("h3", {}, "Workflows"));
+  if (!rows.length) {
     listSection.appendChild(el("div", { class: "rt-placeholder" },
-      el("p", {}, "No workflow files found."),
+      el("p", {}, "No workflows found."),
       el("p", { class: "ag-hint" },
         "Author Python files under ",
         el("code", {}, state.workflowsDir || "<workspace>/workflows/"),
-        " exporting ", el("code", {}, "flow"), " or ", el("code", {}, "make_flow()"),
-        state.workflowExamples.length ? ", or copy one of the examples below." : "."),
+        " exporting ", el("code", {}, "flow"), " or ", el("code", {}, "make_flow()"), "."),
     ));
   } else {
-    const fileList = el("div", { class: "agt-workflow-list" });
-    for (const w of state.workflows) {
-      const row = el("button", {
-        type: "button",
-        class: "mp-subnav-row" + (w.id === state.selectedWorkflowId ? " active" : ""),
-        id: `wf-item-${w.id}`,
-        "data-workflow-id": w.id,
-        disabled: w.error ? true : undefined,
-      },
-        el("span", {}, w.id),
-        el("span", { class: "mp-subnav-count" }, w.error ? "error" : (w.entry || "")),
-      );
-      if (!w.error) row.addEventListener("click", () => selectWorkflow(w.id));
-      fileList.appendChild(row);
-    }
-    listSection.appendChild(fileList);
+    const list = el("div", { class: "scr-list" });
+    for (const r of rows) list.appendChild(workflowRow(r));
+    listSection.appendChild(list);
   }
   listSection.appendChild(el("div", { style: "margin-top: 8px;" },
     el("button", { class: "btn btn-mini", id: "wf-refresh",
@@ -665,19 +724,10 @@ function renderWorkflowMain(host) {
   ));
   host.appendChild(listSection);
 
-  const wfExamples = renderExamplesSection("workflows");
-  if (wfExamples) host.appendChild(wfExamples);
-
   if (!state.selectedWorkflowId) return;
   const wf = state.workflows.find((w) => w.id === state.selectedWorkflowId);
   if (!wf) return;
 
-  if (wf.doc) {
-    host.appendChild(el("section", { class: "mp-section" },
-      el("h3", {}, wf.id),
-      el("p", { class: "mp-main-doc" }, wf.doc),
-    ));
-  }
   const specHost = el("section", { class: "mp-section", id: "wf-spec" },
     el("h3", {}, "Plan"),
     el("div", { class: "rt-placeholder" }, "loading..."),
@@ -686,7 +736,7 @@ function renderWorkflowMain(host) {
 
   const inputs = wf.inputs_required || [];
   const formHost = el("section", { class: "mp-section", id: "wf-form" },
-    el("h3", {}, "Initial state"));
+    el("h3", {}, `Initial state for ${wf.id}`));
   if (inputs.length) {
     for (const key of inputs) {
       const input = el("input", {
@@ -696,6 +746,9 @@ function renderWorkflowMain(host) {
       });
       input.addEventListener("input", () => {
         state.initialState[key] = input.value;
+        // Only the row's Run changes as these are typed. Re-rendering
+        // the form here would move focus out of the field.
+        syncWorkflowRunButton();
       });
       formHost.appendChild(el("div", { class: "ag-row" },
         el("label", { class: "ag-label" }, key), input));
@@ -703,9 +756,6 @@ function renderWorkflowMain(host) {
   } else {
     formHost.appendChild(el("p", { class: "ag-hint" }, "No inputs required."));
   }
-  formHost.appendChild(el("div", { class: "ag-row" },
-    el("button", { type: "button", class: "btn btn-primary", id: "wf-run",
-      onclick: () => runSelectedWorkflow() }, "Run")));
   host.appendChild(formHost);
 
   host.appendChild(el("section", { class: "mp-section", id: "wf-trace" },
@@ -821,10 +871,27 @@ async function refreshWorkflows() {
   }
 }
 
+// The row's Run is gated on the selected workflow's required inputs
+// being filled and on no job running. Both change without a re-render,
+// so keep the one button in sync in place.
+function syncWorkflowRunButton() {
+  const id = state.selectedWorkflowId;
+  if (!id) return;
+  const btn = document.getElementById(`wf-run-${id}`);
+  if (!btn) return;
+  const wf = state.workflows.find((w) => w.id === id);
+  const inputs = (wf && wf.inputs_required) || [];
+  const missing = inputs.filter(
+    (k) => !String(state.initialState[k] == null ? "" : state.initialState[k]).trim());
+  const running = Boolean(state.currentJob);
+  btn.disabled = running || missing.length > 0;
+  btn.title = running ? "A workflow is already running"
+    : missing.length ? `Fill the initial state below: ${missing.join(", ")}`
+      : "Run this workflow";
+}
+
 async function runSelectedWorkflow() {
   if (!state.selectedWorkflowId || state.currentJob) return;
-  const runBtn = document.getElementById("wf-run");
-  if (runBtn) runBtn.disabled = true;
   state.liveEvents = []; state.lastResult = null;
   const eventsHost = document.getElementById("wf-events");
   if (eventsHost) eventsHost.innerHTML = "";
@@ -838,10 +905,11 @@ async function runSelectedWorkflow() {
   } catch (e) {
     state.lastResult = { success: false, error: e.message || String(e) };
     renderDetail();
-    if (runBtn) runBtn.disabled = false;
+    syncWorkflowRunButton();
     return;
   }
   state.currentJob = job;
+  syncWorkflowRunButton();
   const off = job.onEvent((ev) => {
     if (ev.type === "trace") {
       const item = { event_type: ev.event_type, content: ev.content, metadata: ev.metadata || {} };
@@ -864,7 +932,7 @@ async function runSelectedWorkflow() {
   } finally {
     off();
     state.currentJob = null;
-    if (runBtn) runBtn.disabled = false;
+    syncWorkflowRunButton();
   }
 }
 
@@ -902,8 +970,11 @@ function scriptRows() {
   return [...byId.values()].sort((a, b) => a.id.localeCompare(b.id));
 }
 
-function firstLine(text) {
-  return (text || "").split("\n")[0].trim();
+// The row description is the docstring's first paragraph collapsed to
+// one line, not its first line: docstrings wrap at ~72 columns, so a
+// first line often ends mid-sentence. CSS ellipsises the overflow.
+function summaryLine(text) {
+  return (text || "").split(/\n\s*\n/)[0].replace(/\s+/g, " ").trim();
 }
 
 function scriptRow(r) {
@@ -923,7 +994,7 @@ function scriptRow(r) {
   row.appendChild(el("span", {
     class: "scr-desc" + (r.error ? " scr-desc-error" : ""),
     title: r.error || r.doc || "",
-  }, r.error ? r.error : firstLine(r.doc)));
+  }, r.error ? r.error : summaryLine(r.doc)));
 
   // Two fixed slots, so Run is in the same column whether or not the
   // row also has an Install, and an Install is never mistaken for it.
@@ -993,7 +1064,7 @@ async function scriptCatalog(path, method, selectAfter) {
 
 function renderScriptsMain(host) {
   const rows = scriptRows();
-  const listSection = el("section", { class: "mp-section" }, el("h3", {}, "Scripts"));
+  const listSection = el("section", { class: "mp-section" });
   if (!rows.length) {
     listSection.appendChild(el("div", { class: "rt-placeholder" },
       el("p", {}, "No scripts found."),
@@ -1018,9 +1089,10 @@ function renderScriptsMain(host) {
   if (!sc) return;
 
   const argsArea = el("textarea", {
-    class: "dp-input scr-args", id: "scr-args", rows: 4,
+    class: "dp-input scr-args", id: "scr-args", rows: 1,
     spellcheck: "false",
-    placeholder: "{}",
+    placeholder: "{} -- optional JSON arguments",
+    title: "A JSON object, handed to the script on stdin. Leave empty for none.",
   });
   argsArea.value = state.scriptArgsText;
   argsArea.addEventListener("input", () => {
@@ -1035,7 +1107,6 @@ function renderScriptsMain(host) {
   // about which one these arguments belong to.
   const formHost = el("section", { class: "mp-section", id: "scr-form" },
     el("h3", {}, `Arguments for ${sc.id}`),
-    el("p", { class: "ag-hint" }, "A JSON object, handed to the script on stdin. Leave empty for none."),
     argsArea,
     el("p", { class: "ag-error", id: "scr-args-error" }, state.scriptArgsError || ""),
     el("p", { class: "ag-hint", id: "scr-status" }, state.scriptStatus || ""),

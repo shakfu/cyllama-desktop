@@ -371,9 +371,11 @@ runtime.)
 ### Authoring a workflow
 
 Workflows are **Python files** in your workspace under
-`<workspace>/workflows/`. The pane lists the examples shipped with the
-app below your own files; Copy puts one in the workspace, where it is
-yours to edit. Nothing is written to the workspace until you copy it.
+`<workspace>/workflows/`. The pane lists one row per workflow: your own
+files and the examples shipped with the app, in one list. Install copies
+a shipped example into the workspace, where it is yours to edit;
+Uninstall removes it again, and asks first if you have edited it.
+Nothing is written to the workspace until you install something.
 
 Each file exports either:
 

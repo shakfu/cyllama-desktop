@@ -549,10 +549,15 @@ can delete a script the user wrote. An installed copy whose bytes differ
 from the shipped file returns 409, and the pane confirms before retrying
 with `force`.
 
-The workflow pane keeps a separate read-only Examples section
-(`renderExamplesSection`). Merging it the same way is a follow-up: its
-rows also carry `entry`, and the catalog cannot supply that without
-importing (17.7).
+The workflow pane merges the same way (`workflowRows`), with two
+differences. Its rows drop `entry`, which the catalog cannot report
+without importing and which the Plan section already shows; and its Run
+is inert until the selected workflow's `inputs_required` are filled,
+with the tooltip naming what is missing. Typing in those fields updates
+that one button (`syncWorkflowRunButton`) rather than re-rendering the
+form, which would move focus out of the field. No Cancel on a workflow
+row: it runs in-process, where cancel cannot interrupt a node mid-call
+(the reason scripts are a child process at all, Section 7).
 
 **17.6 Existing installs.** 0.3.0 seeded five files and wrote `.seeded`.
 Leave both. Those copies are user files now and may have been edited. The

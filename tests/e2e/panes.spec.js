@@ -512,6 +512,59 @@ test("Scripts row shows a user's own script with no Uninstall", async () => {
   await expect(window.locator('[data-script-id="mine"] .scr-desc')).toHaveText("My own thing.");
 });
 
+test("Workflow row installs and uninstalls a shipped workflow", async () => {
+  ctx = await launchApp();
+  const { window, userDataDir } = ctx;
+  const wc = path.join(userDataDir, "workspaces", "default", "workflows", "word_count.py");
+
+  await window.click("#navAgents");
+  await window.locator('[data-agent-type="agent-workflow"]').click();
+  await expect(window.locator("#wf-install-word_count")).toBeVisible({ timeout: 15_000 });
+  // Not installed: no Run, and no entry node on the row either.
+  await expect(window.locator("#wf-run-word_count")).toHaveCount(0);
+  expect(fs.existsSync(wc)).toBe(false);
+
+  await window.click("#wf-install-word_count");
+  await expect(window.locator("#wf-uninstall-word_count")).toBeVisible({ timeout: 15_000 });
+  expect(fs.existsSync(wc)).toBe(true);
+
+  await expect(window.locator("#wf-run-word_count")).toBeVisible();
+
+  await window.click("#wf-uninstall-word_count");
+  await expect(window.locator("#wf-install-word_count")).toBeVisible({ timeout: 15_000 });
+  expect(fs.existsSync(wc)).toBe(false);
+});
+
+test("Workflow row Run is inert until required inputs are filled", async () => {
+  ctx = await launchApp();
+  const { window, userDataDir } = ctx;
+  const dir = path.join(userDataDir, "workspaces", "default", "workflows");
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, "needs_text.py"), [
+    "\x27\x27\x27Needs a text input.\x27\x27\x27",
+    "from cyllama.agents.workflow import Workflow",
+    "",
+    "flow = Workflow()",
+    'flow.add_node("count", lambda s: {"count": len(s.get("text", "").split())})',
+    'flow.set_entry("count")',
+    'flow.set_exit("count")',
+    'flow.declare_inputs("text")',
+    "",
+  ].join("\n"));
+
+  await window.click("#navAgents");
+  await window.locator('[data-agent-type="agent-workflow"]').click();
+  await window.click("#wf-refresh");
+  await window.click("#wf-item-needs_text");
+  const run = window.locator("#wf-run-needs_text");
+  await expect(run).toBeDisabled();
+  await window.fill('#wf-form input[data-state-key="text"]', "one two three");
+  await expect(run).toBeEnabled();
+  // Blank again: the row returns to inert without a re-render.
+  await window.fill('#wf-form input[data-state-key="text"]', "   ");
+  await expect(run).toBeDisabled();
+});
+
 test("/agent-reflect slash + Reflection section render when feature is on", async () => {
   ctx = await launchApp();
   const { window } = ctx;
