@@ -16,9 +16,26 @@ All notable changes to cyllama-desktop are documented here. The format is based 
 
 - **Preferences > Sidecar lists every workspace path and the runtime behind them.** The workflows and scripts directories join models/artifacts/rag/uploads, and a Runtime block names the Python version, the interpreter running the sidecar, and its site-packages. Each path reveals in the file manager on click and has a copy button. The interpreter matters because scripts run in a child of it: an import that fails there needs to say which environment it ran in. These are diagnostics, not an API -- nothing about the bundle layout is promised.
 
-- **Workspace scripts.** A `.py` file under `<workspace>/scripts/` now runs as a job from the Agents pane: streamed stdout and stderr, a working cancel, a timeout, and any file it writes served as a job artifact. The script runs in a child process with the bundled interpreter and reaches the app back over the loopback API, so `app.chat()` uses the model the sidecar already has resident -- a 50-cell parameter sweep pays one model load instead of fifty. A child rather than in-process execution (which is how workflow files run): a segfault in cyllama's native layer would otherwise take the sidecar down with every chat and loaded model, and Python cannot interrupt a thread parked in llama.cpp, so cancel would report success while the work continued. Cancel reaches the whole process tree, so a script that spawns its own children does not leave them behind: a process group on POSIX, a kill-on-close job object on Windows. The Windows path is written but unverified -- CI runs pytest on Linux only, and the cancel test's liveness probe is POSIX-only.
+* **Workspace scripts.** `.py` files under `<workspace>/scripts/` can now run as jobs from the Agents pane, with streamed stdout/stderr, cancellation, timeouts, and generated files exposed as job artifacts.
 
-  The client library ships as `cyllama_desktop` and wraps app state only -- the resident model, the model list, RAG retrieval, progress, artifacts. A script wanting low-level control imports cyllama directly and gets the real thing.
+  `<workspace>` is `<userData>/workspaces/default/`, with `userData` from Electron's `app.getPath("userData")`. This changes per platform:
+
+  ```text
+  ┌──────────┬───────────────────────────────────────────────────────────────┐
+  │ Platform │                             Path                              │
+  ├──────────┼───────────────────────────────────────────────────────────────┤
+  │ macOS    │ ~/Library/Application Support/Cyllama                         │
+  │          │ Desktop/workspaces/default/                                   │
+  ├──────────┼───────────────────────────────────────────────────────────────┤
+  │ Linux    │ ~/.config/Cyllama Desktop/workspaces/default/                 │
+  ├──────────┼───────────────────────────────────────────────────────────────┤
+  │ Windows  │ %APPDATA%\Cyllama Desktop\workspaces\default\                 │
+  └──────────┴───────────────────────────────────────────────────────────────┘
+  ```
+
+  Scripts run in child processes using the bundled interpreter and connect back to the app over its loopback API. A script runs under the bundled interpreter, so `import cyllama` works without the user installing anything. To be precise, `cyllama` and `cyllama_desktop` are the API; the rest of `site-packages` is an implementation detail of the sidecar.
+
+  `cyllama_desktop` provides access to app-level services such as the resident model, model list, RAG retrieval, progress, and artifacts. Scripts needing lower-level control can import `cyllama` directly.
 
   ```python
   from cyllama_desktop import app
@@ -29,7 +46,13 @@ All notable changes to cyllama-desktop are documented here. The format is based 
   app.set_result({"done": True})
   ```
 
-  Scripts run with the user's full privileges. The child process buys crash containment and a real cancel, not a sandbox. Five examples seed into the workspace on first launch: `sweep.py` (sampling grid), `eval_prompts.py` (expected-substring checks), `prompt_ab.py` (two system prompts over one question set), `model_triage.py` (tokens/sec per model), and `rag_audit.py` (which questions a collection cannot answer, retrieval only, no model loaded). A workspace that already has the seed marker keeps whatever is in it; copy new examples in by hand. Design, alternatives, and risks: `docs/dev/scripting.md`.
+  Child-process isolation also prevents a `cyllama` native crash from taking down the sidecar and makes cancellation reliable even when Python is blocked inside `llama.cpp`. Cancellation terminates the full process tree using process groups on POSIX and kill-on-close job objects on Windows. The Windows path is implemented but not yet verified; CI and the cancellation liveness test are currently POSIX-only.
+
+  Scripts run with the user's full privileges: child processes provide crash isolation and reliable cancellation, **not sandboxing**.
+
+  Five examples are 'seeded' on first launch: `sweep.py` (sampling grid), `eval_prompts.py` (expected-substring checks), `prompt_ab.py` (system-prompt A/B testing), `model_triage.py` (tokens/sec by model), and `rag_audit.py` (retrieval-only coverage auditing).
+
+  See `docs/dev/scripting.md` for design details, alternatives, and risks.
 
 ### Fixed
 
