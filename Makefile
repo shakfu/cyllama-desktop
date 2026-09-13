@@ -31,8 +31,12 @@ endif
 
 PYENV_DIR := build/python-$(HOST_OS)-$(HOST_ARCH)
 PY_BIN    := $(PYENV_DIR)/bin/python3
+# Marks a finished env build. The interpreter cannot serve as the target:
+# tar restores the archive's 2024 mtimes, so it is always older than its
+# prerequisites and every ``make dev`` rebuilt the env from scratch.
+PY_STAMP  := $(PYENV_DIR)/.built
 
-.PHONY: all dev dmg python python-local npm test test-deps e2e release-notes clean reset help \
+.PHONY: all dev dmg python python-local npm test test-deps e2e release-notes clean reset reset-full remake help \
         variant variant-cpu variant-cuda variant-vulkan variant-rocm variant-sycl \
         app-cpu app-cuda app-vulkan app-rocm app-sycl
 
@@ -66,7 +70,11 @@ help:
 	@echo "  make release-notes [VERSION=x.y.z]"
 	@echo "                 Preview the release body CI builds from CHANGELOG.md"
 	@echo "  make clean     Remove dist/ and build/"
-	@echo "  make reset     clean + remove node_modules/"
+	@echo "  make reset     clean + rebuild the bundled Python env"
+	@echo "  make remake    reset + run the app in dev mode"
+	@echo "                 (e.g. CYLLAMA_VERSION=0.4.7 make remake)"
+	@echo "  make reset-full"
+	@echo "                 clean + remove node_modules/"
 
 # --- phases -----------------------------------------------------------------
 
@@ -79,21 +87,25 @@ npm: node_modules
 # Prerequisites, not just a file check: the pin and the backend variant
 # live in these two files, so editing either must rebuild. Without them
 # ``make python`` sees the interpreter already exists and does nothing,
-# leaving a bumped CYLLAMA_VERSION silently unbuilt.
+# leaving a bumped CYLLAMA_VERSION silently unbuilt. An override passed
+# in the environment is not a prerequisite; use ``make reset`` for that.
 #
 # ``CYLLAMA_SOURCE=`` clears whatever the environment exported: this is
 # the PyPI path, and for the cpu variant a source build is installed
 # under the same name, so nothing downstream could tell them apart.
 # ``python-local`` is the only target that may set it.
-$(PY_BIN): scripts/build-python-env.sh python-sidecar/pyproject.toml
+$(PY_STAMP): scripts/build-python-env.sh python-sidecar/pyproject.toml
 	CYLLAMA_SOURCE= bash scripts/build-python-env.sh
+	@touch $@
 
-python: $(PY_BIN)
+python: $(PY_STAMP)
 
 # Rebuild the bundled Python env using a local cyllama checkout. Always
 # wipes the existing env first so the rebuild actually runs (the plain
-# ``python`` target is gated on $(PY_BIN) existing). The build-python-env.sh
+# ``python`` target is gated on $(PY_STAMP)). The build-python-env.sh
 # script honors CYLLAMA_SOURCE; we just guarantee the rebuild fires.
+# Writing the stamp keeps a later ``make dev`` from replacing this build
+# with the PyPI wheel.
 python-local:
 	@if [ ! -d "$(CYLLAMA_SOURCE)" ]; then \
 	  echo "CYLLAMA_SOURCE=$(CYLLAMA_SOURCE) does not exist"; exit 1; \
@@ -101,6 +113,7 @@ python-local:
 	@echo "Rebuilding bundled Python env from $(CYLLAMA_SOURCE)"
 	rm -rf "$(PYENV_DIR)"
 	CYLLAMA_SOURCE="$(CYLLAMA_SOURCE)" bash scripts/build-python-env.sh
+	@touch "$(PY_STAMP)"
 
 # --- GPU variants -----------------------------------------------------------
 #
@@ -124,6 +137,7 @@ define switch_variant
 	@python3 $(VARIANT_SCRIPT) $(1)
 	rm -rf "$(PYENV_DIR)"
 	CYLLAMA_SOURCE= bash scripts/build-python-env.sh
+	@touch "$(PY_STAMP)"
 endef
 
 ifeq ($(HOST_OS),mac)
@@ -234,5 +248,13 @@ release-notes:
 clean:
 	rm -rf dist build
 
+# Sub-makes rather than prerequisites: under -j, prerequisites may run in
+# parallel, and ``clean`` would delete build/ while ``python`` writes to it.
 reset: clean
+	$(MAKE) python
+
+remake: reset
+	$(MAKE) dev
+
+reset-full: clean
 	rm -rf node_modules

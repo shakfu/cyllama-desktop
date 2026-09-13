@@ -9,8 +9,15 @@ from __future__ import annotations
 
 import json
 import time
+from pathlib import Path
 
 import pytest
+
+# The main process holds a JS copy of these rules; tests/e2e/provider-identity.spec.js
+# checks it against the same file.
+_IDENTITY = json.loads(
+    (Path(__file__).parent / "fixtures" / "provider_identity.json").read_text()
+)
 
 
 # --- test doubles -----------------------------------------------------------
@@ -59,6 +66,18 @@ def _sse_text(client, body, auth):
 def test_named_kinds_use_their_own_account(prov):
     for kind in ("openai", "anthropic", "openrouter"):
         assert prov.Provider(kind=kind).account == kind
+
+
+@pytest.mark.parametrize("name, suffix", _IDENTITY["account_suffix"])
+def test_account_suffix_matches_the_shared_fixture(prov, name, suffix):
+    assert prov._normalize_account_suffix(name) == suffix
+
+
+@pytest.mark.parametrize("case", _IDENTITY["endpoints"], ids=lambda c: c["url"])
+def test_endpoint_policy_matches_the_shared_fixture(prov, case):
+    assert prov.endpoint_acceptable(case["url"]) is case["acceptable"]
+    p = prov.Provider(kind="compat", name="x", base_url=case["url"])
+    assert p.needs_key is case["needs_key"]
 
 
 def test_compat_account_is_keyed_by_normalized_name(prov):

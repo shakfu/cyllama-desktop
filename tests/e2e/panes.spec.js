@@ -261,6 +261,31 @@ test("Preferences Providers tab lists the named providers", async () => {
   }
 });
 
+test("Providers tab status line survives the re-render after an action", async () => {
+  ctx = await launchApp();
+  const { window, electron } = ctx;
+  const newWindowP = electron.waitForEvent("window", { timeout: 5_000 });
+  await window.click("#navPrefs");
+  const prefs = await newWindowP;
+  await prefs.waitForLoadState("domcontentloaded");
+  await prefs.click('.prefs-nav-item[data-prefs-tab="providers"]');
+  const pane = prefs.locator('[data-prefs-pane="providers"]');
+  await expect(pane.locator(".prefs-row-provider, .prefs-empty-row").first()).toBeVisible();
+  const noStorage = await pane.locator(".prefs-empty-row", { hasText: "encrypted storage" }).count();
+  test.skip(noStorage > 0, "no encrypted storage: the tab renders no actions");
+
+  await pane.locator('input[placeholder="name"]').fill("Ollama");
+  await pane.locator('input[placeholder="https://host/v1"]').fill("http://localhost:11434/v1");
+  await pane.getByRole("button", { name: "Add endpoint" }).click();
+  // Wait for the re-render, then check its message was not discarded with it.
+  await expect(pane.getByRole("button", { name: "Delete endpoint" })).toBeVisible();
+  await expect(pane.locator(".prefs-status")).toContainText("Ollama: endpoint added");
+
+  await pane.getByRole("button", { name: "Delete endpoint" }).click();
+  await expect(pane.getByRole("button", { name: "Delete endpoint" })).toHaveCount(0);
+  await expect(pane.locator(".prefs-status")).toContainText("Ollama: endpoint removed");
+});
+
 test("Model menu always offers a route to the Providers tab", async () => {
   ctx = await launchApp();
   const { window, electron } = ctx;
@@ -275,6 +300,38 @@ test("Model menu always offers a route to the Providers tab", async () => {
   // Opening from that row lands on Providers, not on General's placeholder.
   await expect(prefs.locator(".prefs-nav-item.active")).toContainText("Providers");
   await expect(prefs.locator('[data-prefs-pane="providers"]')).toBeVisible();
+});
+
+test("A keyless loopback endpoint stays the active backend across a reload", async () => {
+  ctx = await launchApp();
+  const { window } = ctx;
+  await window.evaluate(() => window.cyllama.settings.set({
+    provider_endpoints: [{ name: "Ollama", base_url: "http://localhost:11434/v1" }],
+  }));
+  // Pick it through the menu, so the stored backend has the app's own shape.
+  await window.click("#pick");
+  await window.locator(".mp-menu .mp-item", { hasText: "Ollama" }).click();
+  await window.fill(".mp-freetext input", "llama3");
+  await window.click(".mp-freetext button");
+  await expect(window.locator("#modelName")).toHaveText("Ollama / llama3");
+  await window.reload();
+  // No key is saved for this endpoint, so a keychain-only check dropped it here.
+  await expect(window.locator("#modelName")).toHaveText("Ollama / llama3", { timeout: 15_000 });
+});
+
+test("A removed endpoint is not restored as the active backend", async () => {
+  ctx = await launchApp();
+  const { window } = ctx;
+  await window.evaluate(() => {
+    localStorage.setItem("provider.active", JSON.stringify({
+      kind: "compat", name: "Gone", base_url: "http://localhost:1234/v1",
+      account: "compat.gone", model: "m",
+    }));
+  });
+  await window.reload();
+  await expect.poll(() => window.evaluate(() => localStorage.getItem("provider.active")),
+    { timeout: 15_000 }).toBeNull();
+  await expect(window.locator("#modelName")).toHaveText("Select a model");
 });
 
 test("/agent-constrained slash command is registered (Tab autocompletes)", async () => {

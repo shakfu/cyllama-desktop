@@ -4,6 +4,9 @@ const path = require("path");
 const fs = require("fs");
 const crypto = require("crypto");
 const net = require("net");
+const {
+  endpointAcceptable, endpointNeedsKey, normalizeAccountSuffix,
+} = require("./provider-identity");
 
 // Override the menu-bar app name. In packaged builds electron-builder
 // already sets this via Info.plist (productName), but in dev mode
@@ -65,19 +68,6 @@ function workspaceDir(id = DEFAULT_WORKSPACE_ID) {
 const SETTINGS_FILE = () => path.join(userDataDir(), "settings.json");
 const DEFAULT_SETTINGS = { version: 1, models_extra: [], provider_endpoints: [] };
 
-// https anywhere, http only for loopback. Mirrors providers.endpoint_
-// acceptable in the sidecar, which is the check that actually gates a
-// request; this one keeps an unusable endpoint out of settings.json.
-function endpointAcceptable(url) {
-  let u;
-  try { u = new URL(url); } catch (_) { return false; }
-  if (u.protocol === "https:") return !!u.hostname;
-  if (u.protocol === "http:") {
-    return ["localhost", "127.0.0.1", "[::1]"].includes(u.hostname);
-  }
-  return false;
-}
-
 function cleanEndpoints(raw) {
   if (!Array.isArray(raw)) return [];
   const out = [];
@@ -86,10 +76,12 @@ function cleanEndpoints(raw) {
     if (!e || typeof e !== "object") continue;
     const name = typeof e.name === "string" ? e.name.trim() : "";
     const baseUrl = typeof e.base_url === "string" ? e.base_url.trim() : "";
+    // The sidecar gates each request on the same URL check; this one keeps an
+    // unusable endpoint out of settings.json.
     if (!name || !endpointAcceptable(baseUrl)) continue;
     // Two endpoints whose names normalize alike would share one credential
     // slot and one model cache, so the second is dropped.
-    const account = name.toLowerCase().replace(/[^a-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "");
+    const account = normalizeAccountSuffix(name);
     if (!account || seen.has(account)) continue;
     seen.add(account);
     out.push({ name, base_url: baseUrl });
@@ -798,9 +790,16 @@ ipcMain.handle("settings:set", async (_e, patch) => {
 });
 
 // Provider credentials. ``list`` reports booleans, never key bytes -- the
-// renderer has no reason to hold a key and no way to ask for one.
+// renderer has no reason to hold a key and no way to ask for one. Endpoints
+// carry their derived ``account`` and ``needs_key`` so neither window
+// re-implements the rules in provider-identity.js.
 ipcMain.handle("providers:list", async () => {
-  return { available: credentialsAvailable(), configured: credentialAccounts() };
+  const endpoints = loadSettings().provider_endpoints.map((e) => ({
+    ...e,
+    account: "compat." + normalizeAccountSuffix(e.name),
+    needs_key: endpointNeedsKey(e.base_url),
+  }));
+  return { available: credentialsAvailable(), configured: credentialAccounts(), endpoints };
 });
 
 ipcMain.handle("providers:setKey", async (_e, account, key) => {

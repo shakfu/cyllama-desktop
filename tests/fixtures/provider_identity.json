@@ -1,0 +1,24 @@
+{
+  "_comment": "Shared by tests/test_providers.py and tests/e2e/provider-identity.spec.js. The sidecar (Python) and the main process (JS) must give these answers, or a saved key is looked up under the wrong account.",
+  "account_suffix": [
+    ["Ollama", "ollama"],
+    ["My LM Studio!", "my-lm-studio"],
+    ["  --Groq--  ", "groq"],
+    ["a.b_c-d", "a.b_c-d"],
+    ["Local  /  Server", "local-server"],
+    ["!!!", ""]
+  ],
+  "endpoints": [
+    {"url": "http://localhost:11434/v1", "acceptable": true, "needs_key": false},
+    {"url": "HTTP://LOCALHOST:1234/v1", "acceptable": true, "needs_key": false},
+    {"url": "http://127.0.0.1:1234/v1", "acceptable": true, "needs_key": false},
+    {"url": "http://[::1]:8080/v1", "acceptable": true, "needs_key": false},
+    {"url": "https://localhost/v1", "acceptable": true, "needs_key": false},
+    {"url": "https://api.groq.com/openai/v1", "acceptable": true, "needs_key": true},
+    {"url": "http://127.0.0.2:1234/v1", "acceptable": false, "needs_key": true},
+    {"url": "http://localhost.example.com/v1", "acceptable": false, "needs_key": true},
+    {"url": "http://example.com/v1", "acceptable": false, "needs_key": true},
+    {"url": "ftp://localhost/", "acceptable": false, "needs_key": false},
+    {"url": "not a url", "acceptable": false, "needs_key": true}
+  ]
+}

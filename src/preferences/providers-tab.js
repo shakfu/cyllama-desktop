@@ -11,24 +11,6 @@ const NAMED = [
   { kind: "openrouter", account: "openrouter", label: "OpenRouter", hint: "openrouter.ai" },
 ];
 
-// Mirrors Provider.needs_key in the sidecar. A local server that
-// authenticates nothing needs no credential, so the row says so instead of
-// asking the user to invent one.
-function endpointNeedsKey(baseUrl) {
-  let host = "";
-  try { host = new URL(baseUrl || "").hostname.toLowerCase(); } catch { return true; }
-  return !["localhost", "127.0.0.1", "[::1]"].includes(host);
-}
-
-// Mirrors providers._normalize_account_suffix in the sidecar and
-// normalizeAccountSuffix in the renderer's lib/providers.js.
-function accountForEndpoint(name) {
-  return "compat." + String(name || "")
-    .toLowerCase()
-    .replace(/[^a-z0-9._-]+/g, "-")
-    .replace(/^-+|-+$/g, "");
-}
-
 function el(tag, attrs = {}, ...children) {
   const node = document.createElement(tag);
   for (const [k, v] of Object.entries(attrs)) {
@@ -119,17 +101,19 @@ async function renderUsage(host, status) {
     }, "Clear usage")));
 }
 
+// Created once and re-attached by each render. Actions report here and then
+// re-render, so a per-render element dropped every success message.
+const status = el("div", { class: "prefs-status" });
+
 export async function render() {
   const host = document.getElementById("prefsProviders");
   if (!host) return;
   host.replaceChildren();
 
-  let state = { available: false, configured: [] };
+  let state = { available: false, configured: [], endpoints: [] };
   try { state = await window.cyllama.providers.list(); } catch { /* no bridge */ }
-  const settings = await window.cyllama.settings.get().catch(() => ({}));
-  const endpoints = settings.provider_endpoints || [];
-
-  const status = el("div", { class: "prefs-status" });
+  // Each carries ``account`` and ``needs_key``, derived by the main process.
+  const endpoints = state.endpoints || [];
 
   host.appendChild(el("p", { class: "prefs-hint" },
     "Keys are stored with the operating system's encrypted storage and sent ",
@@ -226,8 +210,9 @@ export async function render() {
       "No endpoints yet."));
   }
   for (const e of endpoints) {
-    const row = keyRow(e.name, accountForEndpoint(e.name), e.base_url,
-                       { keyless: !endpointNeedsKey(e.base_url) });
+    // A local server that authenticates nothing needs no credential, so the
+    // row says so instead of asking the user to invent one.
+    const row = keyRow(e.name, e.account, e.base_url, { keyless: !e.needs_key });
     row.appendChild(el("button", {
       type: "button", class: "btn-mini",
       onclick: async () => {
@@ -267,11 +252,12 @@ export async function render() {
       }
       const next = [...endpoints, { name, base_url: baseUrl }];
       try {
-        const saved = await window.cyllama.settings.set({ provider_endpoints: next });
+        await window.cyllama.settings.set({ provider_endpoints: next });
         // The main process drops an endpoint whose URL is not acceptable or
-        // whose name collides, so compare rather than assume it landed.
-        const kept = (saved.provider_endpoints || []).some((x) => x.name === name);
-        if (!kept) {
+        // whose name collides, so check rather than assume it landed.
+        const listed = await window.cyllama.providers.list();
+        const added = (listed.endpoints || []).find((x) => x.name === name);
+        if (!added) {
           status.dataset.kind = "err";
           status.textContent = "rejected: URL must be https (or http on localhost), "
             + "and the name must be unique";
@@ -280,7 +266,7 @@ export async function render() {
         nameInput.value = "";
         urlInput.value = "";
         status.dataset.kind = "ok";
-        status.textContent = endpointNeedsKey(baseUrl)
+        status.textContent = added.needs_key
           ? `${name}: endpoint added. Save a key for it in the list above.`
           : `${name}: endpoint added. Local, so no key is needed -- pick it in the model menu.`;
         await render();

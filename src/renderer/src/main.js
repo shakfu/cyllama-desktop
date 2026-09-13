@@ -404,7 +404,10 @@ function setRemoteBackend(ref, model) {
   if (!ref || !model) return;
   modelPath = "";
   try { localStorage.removeItem(LAST_MODEL_KEY); } catch {}
-  setRemoteBackendState({ kind: ref.kind, name: ref.name || "", base_url: ref.base_url || "", model });
+  setRemoteBackendState({
+    kind: ref.kind, name: ref.name || "", base_url: ref.base_url || "",
+    account: providersLib.accountFor(ref), model,
+  });
   providersLib.rememberModel(ref, model);
   modelNameEl.textContent = `${providersLib.displayName(ref)} / ${model}`;
   modelNameEl.title = ref.kind === "compat" ? `${ref.base_url} / ${model}` : model;
@@ -2073,18 +2076,16 @@ async function init() {
     }
   } catch {}
 
-  // Restore an active provider the same way, but verify its key is still
-  // configured -- a key removed in Preferences between sessions must not
-  // leave a provider named in the pill that 401s on send.
+  // Restore an active provider only if the picker would still offer it, so
+  // a removed key or endpoint cannot leave a pill that fails on send. A
+  // loopback endpoint needs no key, so checking the keychain alone dropped it.
   if (!modelPath) {
     const active = providersLib.loadActive();
     if (active) {
-      let ok = false;
-      try {
-        const state = await window.cyllama.providers.list();
-        ok = (state.configured || []).includes(providersLib.accountFor(active));
-      } catch {}
-      if (ok) setRemoteBackend(active, active.model);
+      const account = providersLib.accountFor(active);
+      const ref = (await providersLib.listAvailable())
+        .find((r) => providersLib.accountFor(r) === account);
+      if (ref) setRemoteBackend(ref, active.model);
       else providersLib.saveActive(null);
     }
   }

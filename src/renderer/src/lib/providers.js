@@ -14,30 +14,11 @@ export const NAMED_KINDS = [
   { kind: "openrouter", label: "OpenRouter", account: "openrouter" },
 ];
 
-// Mirrors providers._normalize_account_suffix in the sidecar. A compat
-// endpoint's credential slot and model cache are keyed by its name, so the
-// two sides must agree on the normalization.
-export function normalizeAccountSuffix(name) {
-  return String(name || "")
-    .toLowerCase()
-    .replace(/[^a-z0-9._-]+/g, "-")
-    .replace(/^-+|-+$/g, "");
-}
-
-// Mirrors Provider.needs_key in the sidecar. A local server that
-// authenticates nothing (Ollama, LM Studio) is reachable without a
-// credential, so it belongs in the picker before one is saved.
-export function needsKey(ref) {
-  if (!ref || ref.kind !== "compat") return true;
-  let host = "";
-  try { host = new URL(ref.base_url || "").hostname.toLowerCase(); } catch { return true; }
-  return !["localhost", "127.0.0.1", "[::1]"].includes(host);
-}
-
+// A compat ref's ``account`` comes from the main process (providers:list),
+// which owns the normalization rule.
 export function accountFor(ref) {
   if (!ref) return "";
-  if (ref.kind === "compat") return "compat." + normalizeAccountSuffix(ref.name);
-  return ref.kind;
+  return ref.kind === "compat" ? ref.account || "" : ref.kind;
 }
 
 export function displayName(ref) {
@@ -48,15 +29,16 @@ export function displayName(ref) {
 
 /** Provider refs the user can actually reach: a key is configured for them.
  *
- * ``configured`` comes from the main process (which accounts hold a key);
- * ``endpoints`` from settings.json; ``/info.remote.sdks`` says which client
+ * ``configured`` and ``endpoints`` come from the main process (which accounts
+ * hold a key, and each endpoint's account and ``needs_key``);
+ * ``/info.remote.sdks`` says which client
  * library this build can import. A provider missing any of the three is
  * omitted rather than shown disabled -- a dead row only invites a click
  * that 401s or 501s. The picker carries a permanent row into Preferences
  * instead, so the feature stays discoverable without per-provider clutter.
  *
  * A loopback compat endpoint needs no key and appears as soon as it is
- * added (see :func:`needsKey`).
+ * added.
  */
 export async function listAvailable() {
   const out = [];
@@ -69,11 +51,8 @@ export async function listAvailable() {
   try {
     const state = await window.cyllama?.providers?.list();
     configured = (state && state.configured) || [];
+    endpoints = (state && state.endpoints) || [];
   } catch { /* no bridge -> no providers */ }
-  try {
-    const settings = await window.cyllama?.settings?.get();
-    endpoints = (settings && settings.provider_endpoints) || [];
-  } catch { /* settings unreadable -> named kinds only */ }
   try {
     const info = await getInfo();
     if (info && info.remote && info.remote.sdks) sdks = info.remote.sdks;
@@ -84,13 +63,14 @@ export async function listAvailable() {
 
   for (const k of NAMED_KINDS) {
     if (configured.includes(k.account) && usable(k.kind)) {
-      out.push({ kind: k.kind, name: "", base_url: "" });
+      out.push({ kind: k.kind, name: "", base_url: "", account: k.account });
     }
   }
   if (usable("compat")) {
     for (const e of endpoints) {
-      const ref = { kind: "compat", name: e.name, base_url: e.base_url };
-      if (configured.includes(accountFor(ref)) || !needsKey(ref)) out.push(ref);
+      if (configured.includes(e.account) || !e.needs_key) {
+        out.push({ kind: "compat", name: e.name, base_url: e.base_url, account: e.account });
+      }
     }
   }
   return out;

@@ -22,11 +22,17 @@ All notable changes to cyllama-desktop are documented here. The format is based 
 
   Retries are one constant (`MAX_RETRIES = 2`) applied at client construction: both SDKs already retry 429 and 5xx with backoff and honour `Retry-After`, so the shared policy this was meant to be is a policy knob, not an implementation. Timeouts stay at the SDK defaults, since a long generation is not a stalled one.
 
-- **A local OpenAI-compatible endpoint needs no key, and the model menu says providers exist.** Ollama and LM Studio authenticate nothing, but every compat endpoint was gated on a saved credential, so a server already running on your machine stayed unreachable until you invented a key and pasted it -- with Preferences telling you to. An endpoint on `localhost` is now usable as soon as you add it; a token is still used if you save one, so a `llama.cpp` server started with `--api-key` works. The exemption is the same boundary that already decides where a key may travel in plaintext.
+- **A local OpenAI-compatible endpoint needs no key, and the model menu says providers exist.** Ollama and LM Studio authenticate nothing, but every compat endpoint was gated on a saved credential, so a server already running on your machine stayed unreachable until you invented a key and pasted it -- with Preferences telling you to. An endpoint on `localhost` is now usable as soon as you add it; a token is still used if you save one, so a `llama.cpp` server started with `--api-key` works. Like a keyed provider, it stays the active backend across restarts. The exemption is the same boundary that already decides where a key may travel in plaintext.
 
   The model menu also carries one permanent row beside `Browse...` that opens Preferences on the Providers tab. Provider rows appear only once a key is configured, which meant that with local models on disk nothing in the app mentioned providers at all -- the previous hint lived in the picker's empty state, which only shows when there are no local models. Preferences can be opened on a named tab now, so that row lands where it means to.
 
+### Changed
+
+- **`make reset` now rebuilds the bundled Python env; the old behaviour is `make reset-full`.** `reset` runs `clean` then `python`, and the new `make remake` follows it with `make dev`, so `CYLLAMA_VERSION=0.4.7 make remake` applies a version override. An override in the environment is not a make prerequisite, so without a clean build it would be ignored.
+
 ### Fixed
+
+- **`make dev` no longer rebuilds the Python env on every run.** The env rule targeted `bin/python3`, but `tar` restores the python-build-standalone archive's 2024 mtimes, so the interpreter was always older than `build-python-env.sh` and `pyproject.toml`. A `.built` stamp written after a successful build is the target now. `python-local` and the `variant-*` targets write it too, so a later `make dev` keeps their build instead of replacing it with the PyPI wheel.
 
 - **Provider keys are refused rather than stored under a publicly known key.** `safeStorage.isEncryptionAvailable()` reports true on a Linux desktop with no keyring, because Chromium's `basic_text` fallback does have a key -- one compiled into Chromium. The Providers tab accepted a key there, stored it that way, and said nothing. It now also checks `getSelectedStorageBackend()` and explains why it cannot save. macOS and Windows were never affected. Untestable from CI: it needs a Linux host with the keyring stopped, or `--password-store=basic`.
 

@@ -109,7 +109,11 @@ make release-notes
                Write release-notes.md from the CHANGELOG section
 make help      List every target
 make clean     Remove dist/ and build/
-make reset     Also remove node_modules/
+make reset     clean + rebuild the bundled Python env
+make remake    reset + run the app in dev mode
+               (e.g. CYLLAMA_VERSION=0.4.7 make remake)
+make reset-full
+               clean + remove node_modules/
 ```
 
 ### GPU variants
