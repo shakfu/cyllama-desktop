@@ -6,6 +6,8 @@ All notable changes to cyllama-desktop are documented here. The format is based 
 
 ### Added
 
+- **App icon: a shaded Moebius strip.** Packaged builds and dev runs showed Electron's default icon, because the repo had none. `scripts/make-icon.py` regenerates `resources/icon.png`, `icon.icns` and `icon.ico`, which electron-builder picks up from `buildResources`.
+
 - **Chat against OpenAI, Anthropic, OpenRouter, or any OpenAI-compatible endpoint.** The model pill lists configured providers beside the local GGUFs; picking one switches the chat backend. Keys are entered in the new Preferences -> Providers tab, stored with Electron `safeStorage`, and pushed to the sidecar over loopback, which makes every outbound call. The renderer never holds a key, and the sidecar never reads one from its environment -- `_script_env` copies `os.environ` into every script child, so an environment variable would hand keys to user scripts.
 
   Only Anthropic differs on the wire; OpenAI, OpenRouter and a user-supplied endpoint share one client and differ by base URL. An endpoint must be `https`, or `http` on loopback so Ollama and LM Studio work without certificates. Per-kind parameter mapping is data rather than branching: `top_k` reaches Anthropic and not OpenAI, `max_completion_tokens` goes to OpenAI while OpenRouter and compat servers get `max_tokens`, and the Parameters pane hides each row the active backend has no equivalent for. Everything local-only says why instead of failing: the advanced sampling section and multi-GPU split disappear, and estimating layers, the agent loop and image attachment name the active provider in the refusal.
@@ -31,6 +33,8 @@ All notable changes to cyllama-desktop are documented here. The format is based 
 - **`make reset` now rebuilds the bundled Python env; the old behaviour is `make reset-full`.** `reset` runs `clean` then `python`, and the new `make remake` follows it with `make dev`, so `CYLLAMA_VERSION=0.4.7 make remake` applies a version override. An override in the environment is not a make prerequisite, so without a clean build it would be ignored.
 
 ### Fixed
+
+- **A dev run on macOS says "Cyllama Desktop" in the menu bar, Dock and About panel, not "Electron".** macOS takes the app menu title from the bundle's `Info.plist`, so the explicit menu label never applied. `postinstall` now renames the npm `Electron.app` bundle, and the About panel reads its version from `package.json`. Packaged builds were not affected.
 
 - **`make dev` no longer rebuilds the Python env on every run.** The env rule targeted `bin/python3`, but `tar` restores the python-build-standalone archive's 2024 mtimes, so the interpreter was always older than `build-python-env.sh` and `pyproject.toml`. A `.built` stamp written after a successful build is the target now. `python-local` and the `variant-*` targets write it too, so a later `make dev` keeps their build instead of replacing it with the PyPI wheel.
 

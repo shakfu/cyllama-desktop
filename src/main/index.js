@@ -13,6 +13,15 @@ const {
 // Electron derives the name from the executable, which is "Electron".
 // setName() must run before app.whenReady() to take effect on macOS.
 app.setName("Cyllama Desktop");
+// The About panel otherwise reads name and version from the bundle, which in
+// dev is Electron.app. package.json rather than app.getVersion(), which falls
+// back to Electron's version when launched as ``electron src/main/index.js``.
+const { version: APP_VERSION } = require("../../package.json");
+app.setAboutPanelOptions({
+  applicationName: app.name,
+  applicationVersion: APP_VERSION,
+  version: APP_VERSION,
+});
 
 // E2E hook: redirect userData so the Playwright harness gets an
 // isolated workspace per test rather than blowing away the user's
@@ -525,10 +534,9 @@ ipcMain.handle("prefs:open", (_e, tab) => openPreferences(
 ));
 
 function buildApplicationMenu() {
-  // Defining the menu explicitly (using ``app.name`` for the leading
-  // submenu label) forces macOS to display "Cyllama Desktop" instead
-  // of the Electron binary's bundle name in dev. The submenu roles
-  // give us the standard Cmd-Q / Cmd-H / Cmd-W bindings for free.
+  // macOS ignores the first submenu's label and shows the bundle name, which
+  // scripts/rename-dev-electron.sh sets in dev. The submenu roles give us the
+  // standard Cmd-Q / Cmd-H / Cmd-W bindings for free.
   const isMac = process.platform === "darwin";
   const template = [
     ...(isMac ? [{
@@ -859,6 +867,10 @@ ipcMain.handle("dialog:pickFolder", async () => {
 
 app.whenReady().then(async () => {
   buildApplicationMenu();
+  // A packaged build takes its icon from the bundle; dev runs as Electron.app.
+  if (!app.isPackaged && process.platform === "darwin") {
+    app.dock.setIcon(path.join(__dirname, "..", "..", "resources", "icon.png"));
+  }
   try {
     migrateLayoutIfNeeded();
     await startSidecar();

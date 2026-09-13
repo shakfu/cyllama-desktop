@@ -16,7 +16,7 @@
     "build:mac-x64": "npm run build:renderer && electron-builder --mac --x64",
     "build:win": "npm run build:renderer && electron-builder --win --x64",
     "build:linux": "npm run build:renderer && electron-builder --linux --x64",
-    "postinstall": "npm run vendor"
+    "postinstall": "npm run vendor && bash scripts/rename-dev-electron.sh"
   },
   "author": "Shakeeb Alireza",
   "license": "MIT",
