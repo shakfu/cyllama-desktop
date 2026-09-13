@@ -5,11 +5,7 @@
 // and this tab renders a boolean; the value goes straight from the input to
 // safeStorage and from there to the sidecar over loopback.
 
-const NAMED = [
-  { kind: "openai", account: "openai", label: "OpenAI", hint: "api.openai.com" },
-  { kind: "anthropic", account: "anthropic", label: "Anthropic", hint: "api.anthropic.com" },
-  { kind: "openrouter", account: "openrouter", label: "OpenRouter", hint: "openrouter.ai" },
-];
+import { NAMED_PROVIDERS } from "../shared/provider-identity.js";
 
 function el(tag, attrs = {}, ...children) {
   const node = document.createElement(tag);
@@ -193,7 +189,7 @@ export async function render() {
   }
 
   const named = el("div", { class: "prefs-rows" });
-  for (const p of NAMED) named.appendChild(keyRow(p.label, p.account, p.hint));
+  for (const p of NAMED_PROVIDERS) named.appendChild(keyRow(p.label, p.account, p.hint));
   host.appendChild(named);
 
   host.appendChild(el("h3", { class: "prefs-section" }, "OpenAI-compatible endpoints"));

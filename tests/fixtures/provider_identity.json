@@ -1,5 +1,10 @@
 {
-  "_comment": "Shared by tests/test_providers.py and tests/e2e/provider-identity.spec.js. The sidecar (Python) and the main process (JS) must give these answers, or a saved key is looked up under the wrong account.",
+  "_comment": "Shared by tests/test_providers.py and tests/e2e/provider-identity.spec.js. providers.py and src/shared/provider-identity.js must give these answers, or a saved key is looked up under the wrong account.",
+  "named": [
+    {"kind": "openai", "account": "openai", "label": "OpenAI"},
+    {"kind": "anthropic", "account": "anthropic", "label": "Anthropic"},
+    {"kind": "openrouter", "account": "openrouter", "label": "OpenRouter"}
+  ],
   "account_suffix": [
     ["Ollama", "ollama"],
     ["My LM Studio!", "my-lm-studio"],

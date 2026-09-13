@@ -1,6 +1,14 @@
-// Compat-endpoint identity and URL policy for the JS side. The sidecar's
-// providers.py holds the Python copy; tests/fixtures/provider_identity.json
-// pins both to the same answers. No Electron imports, so node can load it.
+// Provider identity and endpoint URL policy for every JS context: the main
+// process requires it, and both window bundles import it through esbuild.
+// The sidecar's providers.py holds the Python copy;
+// tests/fixtures/provider_identity.json pins both to the same answers.
+
+// The built-in providers. ``account`` is each one's credential slot.
+const NAMED_PROVIDERS = [
+  { kind: "openai", account: "openai", label: "OpenAI", hint: "api.openai.com" },
+  { kind: "anthropic", account: "anthropic", label: "Anthropic", hint: "api.anthropic.com" },
+  { kind: "openrouter", account: "openrouter", label: "OpenRouter", hint: "openrouter.ai" },
+];
 
 // URL.hostname keeps IPv6 brackets; Python's urlparse strips them.
 const LOOPBACK_HOSTS = ["localhost", "127.0.0.1", "[::1]"];
@@ -32,4 +40,6 @@ function normalizeAccountSuffix(name) {
     .replace(/^-+|-+$/g, "");
 }
 
-module.exports = { endpointAcceptable, endpointNeedsKey, normalizeAccountSuffix };
+module.exports = {
+  NAMED_PROVIDERS, endpointAcceptable, endpointNeedsKey, normalizeAccountSuffix,
+};

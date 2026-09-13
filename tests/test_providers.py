@@ -13,8 +13,8 @@ from pathlib import Path
 
 import pytest
 
-# The main process holds a JS copy of these rules; tests/e2e/provider-identity.spec.js
-# checks it against the same file.
+# src/shared/provider-identity.js holds the JS copy of these rules;
+# tests/e2e/provider-identity.spec.js checks it against the same file.
 _IDENTITY = json.loads(
     (Path(__file__).parent / "fixtures" / "provider_identity.json").read_text()
 )
@@ -66,6 +66,13 @@ def _sse_text(client, body, auth):
 def test_named_kinds_use_their_own_account(prov):
     for kind in ("openai", "anthropic", "openrouter"):
         assert prov.Provider(kind=kind).account == kind
+
+
+def test_named_providers_match_the_shared_fixture(prov):
+    assert set(prov.KINDS) - {"compat"} == {n["kind"] for n in _IDENTITY["named"]}
+    for n in _IDENTITY["named"]:
+        p = prov.Provider(kind=n["kind"])
+        assert (p.account, p.display_name) == (n["account"], n["label"])
 
 
 @pytest.mark.parametrize("name, suffix", _IDENTITY["account_suffix"])

@@ -2,8 +2,13 @@
 // checks the sidecar with. Plain node: no Electron launch.
 
 const { test, expect } = require("@playwright/test");
-const identity = require("../../src/main/provider-identity.js");
+const identity = require("../../src/shared/provider-identity.js");
 const fixture = require("../fixtures/provider_identity.json");
+
+test("named providers", () => {
+  const table = identity.NAMED_PROVIDERS.map(({ kind, account, label }) => ({ kind, account, label }));
+  expect(table).toEqual(fixture.named);
+});
 
 for (const [name, suffix] of fixture.account_suffix) {
   test(`account suffix for ${JSON.stringify(name)}`, () => {

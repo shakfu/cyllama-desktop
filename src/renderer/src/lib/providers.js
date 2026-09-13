@@ -5,14 +5,7 @@
 // touches a credential.
 
 import { sidecarFetch, getInfo } from "./sidecar.js";
-
-// The three named kinds. A ``compat`` endpoint is user-defined and comes
-// from settings.json instead.
-export const NAMED_KINDS = [
-  { kind: "openai", label: "OpenAI", account: "openai" },
-  { kind: "anthropic", label: "Anthropic", account: "anthropic" },
-  { kind: "openrouter", label: "OpenRouter", account: "openrouter" },
-];
+import { NAMED_PROVIDERS } from "../../../shared/provider-identity.js";
 
 // A compat ref's ``account`` comes from the main process (providers:list),
 // which owns the normalization rule.
@@ -23,7 +16,7 @@ export function accountFor(ref) {
 
 export function displayName(ref) {
   if (!ref) return "";
-  const named = NAMED_KINDS.find((k) => k.kind === ref.kind);
+  const named = NAMED_PROVIDERS.find((k) => k.kind === ref.kind);
   return named ? named.label : ref.name || ref.kind;
 }
 
@@ -61,7 +54,7 @@ export async function listAvailable() {
   // Only Anthropic needs its own client; the other three share the OpenAI one.
   const usable = (kind) => (kind === "anthropic" ? sdks.anthropic : sdks.openai);
 
-  for (const k of NAMED_KINDS) {
+  for (const k of NAMED_PROVIDERS) {
     if (configured.includes(k.account) && usable(k.kind)) {
       out.push({ kind: k.kind, name: "", base_url: "", account: k.account });
     }

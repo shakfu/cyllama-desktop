@@ -5,8 +5,8 @@ const fs = require("fs");
 const crypto = require("crypto");
 const net = require("net");
 const {
-  endpointAcceptable, endpointNeedsKey, normalizeAccountSuffix,
-} = require("./provider-identity");
+  NAMED_PROVIDERS, endpointAcceptable, endpointNeedsKey, normalizeAccountSuffix,
+} = require("../shared/provider-identity");
 
 // Override the menu-bar app name. In packaged builds electron-builder
 // already sets this via Info.plist (productName), but in dev mode
@@ -138,7 +138,9 @@ const CREDENTIALS_FILE = () => path.join(userDataDir(), "credentials.json");
 // Mirrors providers.Provider.account: the three named kinds, or a compat
 // endpoint keyed by its normalized name. Validated here so a renderer bug
 // cannot write an arbitrary key into the file.
-const ACCOUNT_RE = /^(openai|anthropic|openrouter|compat\.[a-z0-9._-]+)$/;
+const ACCOUNT_RE = new RegExp(
+  `^(${NAMED_PROVIDERS.map((p) => p.account).join("|")}|compat\\.[a-z0-9._-]+)$`,
+);
 
 function credentialsAvailable() {
   try {

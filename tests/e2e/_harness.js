@@ -47,8 +47,15 @@ async function launchApp() {
   // sandbox needs. Without --no-sandbox the renderer process fails to
   // launch and the status pill never reaches "ready". Local dev on
   // macOS doesn't need it but the flag is harmless there.
+  // CI names a Linux keyring backend explicitly: Chromium picks one from the
+  // desktop environment, and under xvfb there is none, so it would fall back
+  // to basic_text, which the app refuses for provider keys.
+  const passwordStore = process.env.CYLLAMA_E2E_PASSWORD_STORE;
   const electron = await _electron.launch({
-    args: [path.join(ROOT, "src", "main", "index.js"), "--no-sandbox"],
+    args: [
+      path.join(ROOT, "src", "main", "index.js"), "--no-sandbox",
+      ...(passwordStore ? [`--password-store=${passwordStore}`] : []),
+    ],
     env: {
       ...process.env,
       ELECTRON_USER_DATA_DIR: userDataDir,

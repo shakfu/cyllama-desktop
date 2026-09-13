@@ -76,8 +76,10 @@ jobs:
         # CI we want both the playwright + electron bins.
         run: npm ci
 
-      - name: Install xvfb (Electron needs a display)
-        run: sudo apt-get update && sudo apt-get install -y xvfb
+      - name: Install xvfb and gnome-keyring
+        # Electron needs a display. safeStorage needs a Secret Service, or the
+        # Providers tab refuses to store keys and its action tests cannot run.
+        run: sudo apt-get update && sudo apt-get install -y xvfb gnome-keyring dbus
 
       - name: Build renderer bundle
         run: npm run build:renderer
@@ -86,10 +88,20 @@ jobs:
         # ``xvfb-run -a`` picks an unused display number automatically;
         # ``--server-args`` bumps the screen size so layout tests don't
         # collapse onto a tiny virtual display.
-        run: xvfb-run -a --server-args="-screen 0 1280x900x24" npx playwright test
+        # ``dbus-run-session`` gives gnome-keyring a session bus, and
+        # ``--unlock`` creates and unlocks the login keyring libsecret uses.
+        run: |
+          dbus-run-session -- bash -c '
+            echo -n ci | gnome-keyring-daemon --unlock
+            xvfb-run -a --server-args="-screen 0 1280x900x24" npx playwright test
+          '
         env:
           # Forces deterministic Chromium decisions (cf. Playwright docs).
           CI: "1"
+          # No desktop environment under xvfb, so name the backend.
+          CYLLAMA_E2E_PASSWORD_STORE: gnome-libsecret
+          # Fail, not skip, the Providers tab tests if the keyring is not usable.
+          CYLLAMA_E2E_REQUIRE_KEYRING: "1"
 
       - name: Upload Playwright report on failure
         if: failure()

@@ -10,6 +10,16 @@ const path = require("path");
 const { test, expect } = require("@playwright/test");
 const { launchApp, openSidebarView, openRightTab } = require("./_harness.js");
 
+// Whether the Providers tab can store keys. CI provisions a keyring and sets
+// CYLLAMA_E2E_REQUIRE_KEYRING, so a broken setup fails instead of skipping.
+async function providersTabHasStorage(pane) {
+  await expect(pane.locator(".prefs-row-provider, .prefs-empty-row").first()).toBeVisible();
+  const missing = await pane.locator(".prefs-empty-row", { hasText: "encrypted storage" }).count() > 0;
+  expect(missing && !!process.env.CYLLAMA_E2E_REQUIRE_KEYRING,
+    "CYLLAMA_E2E_REQUIRE_KEYRING is set, but the Providers tab reports no encrypted storage").toBe(false);
+  return !missing;
+}
+
 let ctx;
 test.afterEach(async () => {
   if (ctx) {
@@ -249,15 +259,12 @@ test("Preferences Providers tab lists the named providers", async () => {
   await prefs.click('.prefs-nav-item[data-prefs-tab="providers"]');
   const pane = prefs.locator('[data-prefs-pane="providers"]');
   await expect(pane).toBeVisible();
-  // The tab has rendered once the intro copy is on screen.
-  await expect(pane.locator(".prefs-hint").first()).toBeVisible();
   // One key row per named provider. A host with no encrypted storage (a
   // Linux box with no keyring) shows the notice instead and no rows.
-  const notice = pane.locator(".prefs-empty-row", { hasText: "encrypted storage" });
-  if (await notice.count() > 0) {
-    await expect(notice).toBeVisible();
-  } else {
+  if (await providersTabHasStorage(pane)) {
     await expect(pane.locator(".prefs-row-provider")).toHaveCount(3);
+  } else {
+    await expect(pane.locator(".prefs-row-provider")).toHaveCount(0);
   }
 });
 
@@ -270,9 +277,7 @@ test("Providers tab status line survives the re-render after an action", async (
   await prefs.waitForLoadState("domcontentloaded");
   await prefs.click('.prefs-nav-item[data-prefs-tab="providers"]');
   const pane = prefs.locator('[data-prefs-pane="providers"]');
-  await expect(pane.locator(".prefs-row-provider, .prefs-empty-row").first()).toBeVisible();
-  const noStorage = await pane.locator(".prefs-empty-row", { hasText: "encrypted storage" }).count();
-  test.skip(noStorage > 0, "no encrypted storage: the tab renders no actions");
+  test.skip(!(await providersTabHasStorage(pane)), "no encrypted storage: the tab renders no actions");
 
   await pane.locator('input[placeholder="name"]').fill("Ollama");
   await pane.locator('input[placeholder="https://host/v1"]').fill("http://localhost:11434/v1");
@@ -300,6 +305,28 @@ test("Model menu always offers a route to the Providers tab", async () => {
   // Opening from that row lands on Providers, not on General's placeholder.
   await expect(prefs.locator(".prefs-nav-item.active")).toContainText("Providers");
   await expect(prefs.locator('[data-prefs-pane="providers"]')).toBeVisible();
+});
+
+test("Saving and removing a provider key round-trips through safeStorage", async () => {
+  ctx = await launchApp();
+  const { window, electron } = ctx;
+  const newWindowP = electron.waitForEvent("window", { timeout: 5_000 });
+  await window.click("#navPrefs");
+  const prefs = await newWindowP;
+  await prefs.waitForLoadState("domcontentloaded");
+  await prefs.click('.prefs-nav-item[data-prefs-tab="providers"]');
+  const pane = prefs.locator('[data-prefs-pane="providers"]');
+  test.skip(!(await providersTabHasStorage(pane)), "no encrypted storage: keys cannot be saved");
+
+  const row = pane.locator(".prefs-row-provider", { hasText: "OpenAI" });
+  await row.locator('input[type="password"]').fill("sk-test");
+  await row.getByRole("button", { name: "Save" }).click();
+  await expect(row).toContainText("key set");
+  await expect(pane.locator(".prefs-status")).toContainText("OpenAI: key saved");
+
+  await row.getByRole("button", { name: "Remove" }).click();
+  await expect(row).not.toContainText("key set");
+  await expect(pane.locator(".prefs-status")).toContainText("OpenAI: key removed");
 });
 
 test("A keyless loopback endpoint stays the active backend across a reload", async () => {
