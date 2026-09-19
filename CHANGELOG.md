@@ -4,6 +4,8 @@ All notable changes to cyllama-desktop are documented here. The format is based 
 
 ## [Unreleased]
 
+## [0.4.0]
+
 ### Added
 
 - **App icon: a shaded Moebius strip.** Packaged builds and dev runs showed Electron's default icon, because the repo had none. `scripts/make-icon.py` regenerates `resources/icon.png`, `icon.icns` and `icon.ico`, which electron-builder picks up from `buildResources`.
@@ -30,9 +32,13 @@ All notable changes to cyllama-desktop are documented here. The format is based 
 
 ### Changed
 
+- **Bundled cyllama bumped from 0.4.6 to 0.4.9.** The 0.4.7-0.4.9 notes list no signature change on the api the sidecar calls, and their other fixes (`EmbeddedServer`, the MCP client, `quarto_render`) are on api it never touches, so `sidecar.py` is unchanged. One behaviour change reaches RAG: `TextSplitter` returned chunks of `chunk_size + chunk_overlap` after the first and now returns `chunk_size`. An existing collection keeps working; re-ingesting its sources no longer reproduces the chunk boundaries it was built with.
+
 - **`make reset` now rebuilds the bundled Python env; the old behaviour is `make reset-full`.** `reset` runs `clean` then `python`, and the new `make remake` follows it with `make dev`, so `CYLLAMA_VERSION=0.4.7 make remake` applies a version override. An override in the environment is not a make prerequisite, so without a clean build it would be ignored.
 
 ### Fixed
+
+- **No Keychain prompt when no provider key has been saved.** Launching pushed credentials to the sidecar, and that path asked `safeStorage.isEncryptionAvailable()` before reading `credentials.json`. On macOS the question itself reaches the Keychain, which raises a password dialog whenever the item's ACL does not list the running binary -- a dev run and a signed build are different programs, so the first packaged launch after a dev session prompted. The store is read first now, and nothing is asked when it is empty. `providers:list` probes encrypted storage only when Preferences asks for it: the model picker calls the same channel on every open and would otherwise prompt a user who has configured no provider.
 
 - **A dev run on macOS says "Cyllama Desktop" in the menu bar, Dock and About panel, not "Electron".** macOS takes the app menu title from the bundle's `Info.plist`, so the explicit menu label never applied. `postinstall` now renames the npm `Electron.app` bundle, and the About panel reads its version from `package.json`. Packaged builds were not affected.
 

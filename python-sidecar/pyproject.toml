@@ -6,7 +6,7 @@ requires-python = ">=3.12"
 dependencies = [
   # Floor: the oldest cyllama the sidecar is verified against.
   # scripts/build-python-env.sh pins the exact version it bundles.
-  "cyllama>=0.4.4",
+  "cyllama>=0.4.9",
   "fastapi>=0.115",
   "uvicorn[standard]>=0.32",
   # Required for FastAPI multipart parsing (POST /chat/upload).

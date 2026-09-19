@@ -107,7 +107,7 @@ export async function render() {
   host.replaceChildren();
 
   let state = { available: false, configured: [], endpoints: [] };
-  try { state = await window.cyllama.providers.list(); } catch { /* no bridge */ }
+  try { state = await window.cyllama.providers.list({ probe: true }); } catch { /* no bridge */ }
   // Each carries ``account`` and ``needs_key``, derived by the main process.
   const endpoints = state.endpoints || [];
 

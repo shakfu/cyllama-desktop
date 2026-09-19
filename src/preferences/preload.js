@@ -33,7 +33,7 @@ contextBridge.exposeInMainWorld("cyllama", {
     set: (patch) => ipcRenderer.invoke("settings:set", patch),
   },
   providers: {
-    list:      () => ipcRenderer.invoke("providers:list"),
+    list:      (opts) => ipcRenderer.invoke("providers:list", opts),
     setKey:    (account, key) => ipcRenderer.invoke("providers:setKey", account, key),
     deleteKey: (account) => ipcRenderer.invoke("providers:deleteKey", account),
   },

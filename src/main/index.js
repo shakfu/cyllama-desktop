@@ -201,8 +201,13 @@ function credentialAccounts() {
 // launch.
 function decryptedCredentials() {
   const out = {};
+  const store = loadCredentialStore();
+  // Read the file before asking whether encryption is available: on macOS
+  // that question reaches the Keychain, which prompts when the item's ACL
+  // does not list this build. With no keys stored there is nothing to ask.
+  if (!Object.keys(store).length) return out;
   if (!credentialsAvailable()) return out;
-  for (const [account, blob] of Object.entries(loadCredentialStore())) {
+  for (const [account, blob] of Object.entries(store)) {
     try {
       const key = safeStorage.decryptString(Buffer.from(blob, "base64"));
       if (key) out[account] = key;
@@ -803,13 +808,19 @@ ipcMain.handle("settings:set", async (_e, patch) => {
 // renderer has no reason to hold a key and no way to ask for one. Endpoints
 // carry their derived ``account`` and ``needs_key`` so neither window
 // re-implements the rules in provider-identity.js.
-ipcMain.handle("providers:list", async () => {
+ipcMain.handle("providers:list", async (_e, opts) => {
   const endpoints = loadSettings().provider_endpoints.map((e) => ({
     ...e,
     account: "compat." + normalizeAccountSuffix(e.name),
     needs_key: endpointNeedsKey(e.base_url),
   }));
-  return { available: credentialsAvailable(), configured: credentialAccounts(), endpoints };
+  const out = { configured: credentialAccounts(), endpoints };
+  // ``available`` costs an OS keystore probe -- a Keychain prompt on macOS --
+  // so only the Preferences tab, which reports it, asks for it. The model
+  // picker calls this on every open and would otherwise prompt a user who
+  // has configured no provider at all.
+  if (opts && opts.probe) out.available = credentialsAvailable();
+  return out;
 });
 
 ipcMain.handle("providers:setKey", async (_e, account, key) => {
