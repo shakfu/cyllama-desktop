@@ -1,12 +1,12 @@
 {
   "name": "cyllama-desktop",
   "productName": "Cyllama Desktop",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "Desktop app for cyllama (Electron + bundled Python sidecar)",
   "main": "src/main/index.js",
   "scripts": {
-    "start": "npm run build:renderer && electron .",
-    "dev": "npm run build:renderer && electron . --enable-logging",
+    "start": "npm run build:renderer && electron . --no-sandbox",
+    "dev": "npm run build:renderer && electron . --no-sandbox --enable-logging",
     "vendor": "bash scripts/copy-vendor.sh",
     "build:renderer": "esbuild src/renderer/src/main.js --bundle --outfile=src/renderer/dist/renderer.js --format=iife --target=chrome120 --minify --sourcemap=linked && esbuild src/preferences/main.js --bundle --outfile=src/preferences/dist/preferences.js --format=iife --target=chrome120 --minify --sourcemap=linked",
     "watch:renderer": "esbuild src/renderer/src/main.js --bundle --outfile=src/renderer/dist/renderer.js --format=iife --target=chrome120 --sourcemap=linked --watch",

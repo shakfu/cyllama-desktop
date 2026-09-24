@@ -4,9 +4,13 @@ All notable changes to cyllama-desktop are documented here. The format is based 
 
 ## [Unreleased]
 
+## [0.4.1]
+
 ### Changed
 
 - **Bundled cyllama bumped from 0.4.9 to 0.5.0.** The breaking changes in 0.5.0 are all in stable-diffusion: `stream_layers` removed, `max_vram="0"` semantics, `LogLevel` renumbered. The sidecar uses none of them, so `sidecar.py` is unchanged. Image generation passes no memory params, so it now runs under upstream's `auto_fit=True` default, which places modules by free GPU and RAM memory.
+
+- **`npm start` and `npm run dev` pass `--no-sandbox`.** Ubuntu 24.04's `apparmor_restrict_unprivileged_userns` blocks Chromium's namespace sandbox, and the setuid fallback aborts unless `chrome-sandbox` is root-owned, so `make dev` failed on launch. The e2e harness already passed the flag. Packaged builds are unaffected.
 
 ## [0.4.0]
 
