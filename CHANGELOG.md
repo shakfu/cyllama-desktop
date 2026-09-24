@@ -4,6 +4,10 @@ All notable changes to cyllama-desktop are documented here. The format is based 
 
 ## [Unreleased]
 
+### Changed
+
+- **Bundled cyllama bumped from 0.4.9 to 0.5.0.** The breaking changes in 0.5.0 are all in stable-diffusion: `stream_layers` removed, `max_vram="0"` semantics, `LogLevel` renumbered. The sidecar uses none of them, so `sidecar.py` is unchanged. Image generation passes no memory params, so it now runs under upstream's `auto_fit=True` default, which places modules by free GPU and RAM memory.
+
 ## [0.4.0]
 
 ### Added
