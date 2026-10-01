@@ -6,6 +6,20 @@ Roughly ordered by user impact and effort. When an item ships, write it up in `C
 
 ## High
 
+### Rendering
+
+- [ ] **Script and workflow names render blank on Linux.** In Electron 33.4.11 on Ubuntu 24.04, text set in a generic family (`monospace`, `sans-serif`, `serif`) lays out at 0x0. Chromium reports no platform font used, not even a fallback. Named fonts and `system-ui` render. A bare Electron window reproduces it; Playwright's Chromium 149 on the same host does not. fontconfig resolves `monospace` to DejaVu Sans Mono, and there is no user config. The root cause inside Chromium 130 is not found.
+
+  It reaches the app through a typo: 7 rules in `styles.css` use `var(--mono, monospace)`, but the variable is `--font-mono` (line 40), so they get bare `monospace`. `.scr-name` is one of them, so its buttons have zero height and 5 e2e tests fail on Linux (`panes.spec.js:564`, `:662`, `:692`, `:777`, `:794`).
+
+  Fix: replace `var(--mono, monospace)` with `var(--font-mono)`; add `"DejaVu Sans Mono", "Liberation Mono"` to `--font-mono` before `monospace`, since `var(--font-mono)` also measures 0x0 here; route the other bare-`monospace` stacks (`styles.css:473`, `:544`) through the variable.
+
+  macOS check, before and after the fix:
+
+  - `make e2e`: do the 5 tests pass on `main` unfixed? If so, the defect is Linux-only.
+  - In `make dev`, the Agents -> scripts list: names are visible, and after the fix render in SF Mono, not Courier.
+  - In the DevTools console: `[...document.querySelectorAll('.scr-name')].map(e => e.offsetHeight)` has no zeros.
+
 ### Distribution
 
 - [ ] **Ship a `deb` alongside the AppImage.** Ubuntu 24.04 sets `kernel.apparmor_restrict_unprivileged_userns=1`, which denies Electron the namespace sandbox; it falls back to the SUID helper, and `chrome-sandbox` inside a user-owned FUSE mount can never be root-owned `4755`, so the AppImage aborts with `FATAL:setuid_sandbox_host.cc(163)` before the window opens. The only workaround is `--no-sandbox`, which disables renderer isolation. dpkg installs to `/opt` with `chrome-sandbox` root-owned `4755`, so the sandbox works with no flag and no sysctl change. One entry in `electron-builder.yml`'s `linux.target` plus a repack (no Python env rebuild). Verified as a real wall on 24.04, not a theoretical one; it affects every Electron AppImage, so the AppImage should become the portable fallback rather than the primary Linux artifact.
@@ -62,13 +76,15 @@ Roughly ordered by user impact and effort. When an item ships, write it up in `C
 
 ### Tech debt
 
+- [ ] **Upgrade Electron from 33 to a supported major** (latest is 44.5.1). Chromium 149 renders generic font families on the Linux host where Electron 33 does not (see Rendering above), so the upgrade may fix the root cause. Untested on Electron 44. Eleven majors of breaking changes need review, including the sandbox and `safeStorage` paths.
+
 - [ ] CSP currently includes `'unsafe-eval'` for KaTeX. Investigate `katex.min.js` builds without `Function()` use to drop it.
 
 ## Low
 
 ### Sampling and model parameters
 
-- [ ] **Forward-looking sampler fields** still waiting on cyllama for `grammar`, `speculative`, `ngram` (as `GenerationConfig` kwargs). Still rejected as unexpected keyword arguments on the bundled 0.4.6 (re-probed 2026-09-12). UI + sidecar whitelist are already in place; rows surface automatically once `/info.supported_params` and `/info.features` advertise them. (Penalty + mirostat fields landed in 0.2.17 and are live.) Verification on bump: `build/python-mac-arm64/bin/python3 -c "from cyllama import GenerationConfig; GenerationConfig(grammar='', speculative=1, ngram=1)"` should not raise. Grammar already has a separate path (`/grammar/from-schema` + GBNF builder); the missing piece is per-chat enforcement on `GenerationConfig`.
+- [ ] **Forward-looking sampler fields** still waiting on cyllama for `grammar`, `speculative`, `ngram` (as `GenerationConfig` kwargs). Still rejected as unexpected keyword arguments on the bundled 0.6.0 (re-probed 2026-10-01). UI + sidecar whitelist are already in place; rows surface automatically once `/info.supported_params` and `/info.features` advertise them. (Penalty + mirostat fields landed in 0.2.17 and are live.) Verification on bump: `build/python-mac-arm64/bin/python3 -c "from cyllama import GenerationConfig; GenerationConfig(grammar='', speculative=1, ngram=1)"` should not raise. Grammar already has a separate path (`/grammar/from-schema` + GBNF builder); the missing piece is per-chat enforcement on `GenerationConfig`.
 
 ### Markdown / rendering
 

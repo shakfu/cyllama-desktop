@@ -4,6 +4,14 @@ All notable changes to cyllama-desktop are documented here. The format is based 
 
 ## [Unreleased]
 
+### Changed
+
+- **Bundled cyllama bumped from 0.5.0 to 0.6.0.** Local chat and RAG embedding now run on physical cores; every high-level LLM context previously ran on llama.cpp's default of 4 threads. The other 0.5.1-0.6.0 changes are in `EmbeddedServer`'s HTTP layer and in api the sidecar never calls. Verified against a real install: chat streaming, `/tokenize`, `/models/inspect`, `/hardware/estimate-layers` and `EmbeddedServer` start/stop.
+
+### Removed
+
+- **The speculative "Split prob" control (`p_split`).** cyllama 0.5.1 removed `SpeculativeParams.p_split`, which had no effect upstream. `_coerce_speculative` caught the resulting `TypeError` and returned `None`, so speculative decoding would have been silently dropped once cyllama enables it. It is not enabled yet: `GenerationConfig` still rejects `speculative`.
+
 ## [0.4.1]
 
 ### Changed

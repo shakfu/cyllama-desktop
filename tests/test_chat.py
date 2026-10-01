@@ -127,7 +127,7 @@ def test_chat_accepts_speculative_param_without_500(client, auth, fake_model):
         "messages": [{"role": "user", "content": "hi"}],
         "params": {"speculative": {
             "draft_model_path": "/tmp/draft.gguf",
-            "n_max": 16, "n_min": 0, "p_split": 0.1, "p_min": 0.75,
+            "n_max": 16, "n_min": 0, "p_min": 0.75,
         }},
     }
     with client.stream("POST", "/chat", json=body, headers=auth) as r:

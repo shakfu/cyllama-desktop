@@ -1166,7 +1166,6 @@ const PARAM_DEFAULTS = {
   spec_draft_model:  "",
   spec_n_max:        16,
   spec_n_min:        0,
-  spec_p_split:      0.1,
   spec_p_min:        0.75,
   ngram_enabled:     false,
 };
@@ -1235,7 +1234,7 @@ function saveParams() {
 function getCurrentParams() {
   const out = {};
   // Speculative is collected separately into a nested object since the
-  // sidecar accepts ``params.speculative = {n_max, n_min, p_split, p_min,
+  // sidecar accepts ``params.speculative = {n_max, n_min, p_min,
   // draft_model_path}`` rather than flat keys.
   const spec = {};
   for (const key of PARAM_KEYS) {
@@ -1546,7 +1545,7 @@ function applyMultiGpuVisibility(info) {
 }
 
 // Sub-rows that only matter when a draft model is selected (n_max,
-// n_min, p_split, p_min) collapse otherwise. The toggle uses the same
+// n_min, p_min) collapse otherwise. The toggle uses the same
 // ``hidden`` mechanism as Mirostat tau/eta.
 function applySpeculativeVisibility() {
   const sel = paramEl("spec_draft_model");

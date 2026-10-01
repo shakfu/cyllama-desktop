@@ -618,7 +618,7 @@ def _coerce_speculative(v):
     """Convert a renderer ``speculative`` dict into a ``SpeculativeParams``.
 
     Body shape (renderer): ``{draft_model_path?, n_max?, n_min?,
-    p_split?, p_min?}``. Returns the constructed params object, or a
+    p_min?}``. Returns the constructed params object, or a
     dict (passed through unchanged) if the helper class isn't present in
     this cyllama. Returns ``None`` if the input is empty / unusable.
     """
@@ -627,14 +627,13 @@ def _coerce_speculative(v):
     # Drop the draft-model field before constructing -- it isn't part of
     # the params class. The chat path would consume it separately when
     # cyllama wires speculative through ``LLM.chat()``.
-    fields = {k: v[k] for k in ("n_max", "n_min", "p_split", "p_min") if k in v}
+    fields = {k: v[k] for k in ("n_max", "n_min", "p_min") if k in v}
     if _SPECULATIVE_PARAMS_CLS is None:
         return fields or None
     try:
         kwargs = {}
         if "n_max" in fields: kwargs["n_max"] = int(fields["n_max"])
         if "n_min" in fields: kwargs["n_min"] = int(fields["n_min"])
-        if "p_split" in fields: kwargs["p_split"] = float(fields["p_split"])
         if "p_min" in fields: kwargs["p_min"] = float(fields["p_min"])
         return _SPECULATIVE_PARAMS_CLS(**kwargs) if kwargs else _SPECULATIVE_PARAMS_CLS()
     except (TypeError, ValueError):
