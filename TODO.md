@@ -84,7 +84,9 @@ Roughly ordered by user impact and effort. When an item ships, write it up in `C
 
 ### Sampling and model parameters
 
-- [ ] **Forward-looking sampler fields** still waiting on cyllama for `grammar`, `speculative`, `ngram` (as `GenerationConfig` kwargs). Still rejected as unexpected keyword arguments on the bundled 0.6.0 (re-probed 2026-10-01). UI + sidecar whitelist are already in place; rows surface automatically once `/info.supported_params` and `/info.features` advertise them. (Penalty + mirostat fields landed in 0.2.17 and are live.) Verification on bump: `build/python-mac-arm64/bin/python3 -c "from cyllama import GenerationConfig; GenerationConfig(grammar='', speculative=1, ngram=1)"` should not raise. Grammar already has a separate path (`/grammar/from-schema` + GBNF builder); the missing piece is per-chat enforcement on `GenerationConfig`.
+- [ ] **Forward-looking sampler fields** still waiting on cyllama for `grammar` and `ngram` (as `GenerationConfig` kwargs). Still rejected as unexpected keyword arguments on the bundled 0.6.1 (re-probed 2026-10-10). UI + sidecar whitelist are already in place; rows surface automatically once `/info.supported_params` and `/info.features` advertise them. (Penalty + mirostat fields landed in 0.2.17 and are live.) Verification on bump: `build/python-mac-arm64/bin/python3 -c "from cyllama import GenerationConfig; GenerationConfig(grammar='', ngram=1)"` should not raise. Grammar already has a separate path (`/grammar/from-schema` + GBNF builder); the missing piece is per-chat enforcement on `GenerationConfig`.
+
+- [ ] **Speculative decoding** waits on llama.cpp moving libcommon's speculative implementation into the stable api (`llama.h`); cyllama will bind that. cyllama 0.6.1 deprecated its own port (`Speculative`, `SpeculativeParams`), and the desktop's UI and sidecar code for it are removed. Expect a different shape from the old `n_max`/`n_min`/`p_min`: libcommon also configures the draft model's context and GPU layers, and the drafting type. Verification on bump: grep `llama.h` in the bundled cyllama's llama.cpp version for speculative symbols.
 
 ### Markdown / rendering
 

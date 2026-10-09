@@ -46,7 +46,7 @@ def test_info_exposes_features(client, auth):
     # GenerationConfig accepting matching kwargs (it doesn't in the stub).
     assert feats.get("json_schema_to_grammar") is True
     assert feats.get("grammar") is False
-    assert feats.get("speculative") is False
+    assert "speculative" not in feats
     assert feats.get("ngram") is False
 
 

@@ -133,3 +133,40 @@ def test_501_when_feature_unavailable(client, auth, fake_model, sidecar_app, mon
 def test_status_requires_auth(client):
     r = client.get("/server/status")
     assert r.status_code == 401
+
+
+def test_start_restores_signal_handlers(sidecar_app, auth, fake_model, monkeypatch):
+    """EmbeddedServer.start() replaces SIGINT/SIGTERM handlers and never
+    restores them; left in place, the sidecar ignores SIGTERM."""
+    import asyncio
+    import signal
+
+    import httpx
+
+    def start(self):
+        for s in (signal.SIGINT, signal.SIGTERM):
+            signal.signal(s, lambda *_: None)
+        self.started = True
+        return True
+
+    server_cls = sidecar_app.cyllama.llama.server.embedded.EmbeddedServer
+    monkeypatch.setattr(server_cls, "start", start)
+    before = {s: signal.getsignal(s) for s in (signal.SIGINT, signal.SIGTERM)}
+
+    # TestClient runs the app off the main thread, where signal.signal
+    # raises; ASGITransport keeps it on the main thread, as uvicorn does.
+    async def post():
+        transport = httpx.ASGITransport(app=sidecar_app.app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://t") as c:
+            return await c.post("/server/start", headers=auth, json={
+                "kind": "embedded", "model_path": fake_model,
+            })
+
+    try:
+        r = asyncio.run(post())
+        assert r.status_code == 200
+        assert server_cls.instances[-1].started is True
+        assert {s: signal.getsignal(s) for s in before} == before
+    finally:
+        for s, h in before.items():
+            signal.signal(s, h)

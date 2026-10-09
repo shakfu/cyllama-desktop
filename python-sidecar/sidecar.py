@@ -127,7 +127,7 @@ _SUPPORTED_PARAMS: list[str] = sorted(set(_ALLOWED_PARAMS) & _GC_ACCEPTED) + ["s
 def _resolve_attr(paths: tuple[tuple[str, str], ...]):
     """Walk ``(module, attr)`` pairs, return the first attribute that imports.
 
-    Used for the Phase 2 capability probes -- ``Speculative``, ``NgramCache``,
+    Used for the Phase 2 capability probes -- ``NgramCache``,
     ``json_schema_to_grammar`` live at different paths across cyllama
     versions, and the renderer needs to know which are present so it can
     hide rows whose backing API isn't available.
@@ -147,14 +147,6 @@ _JSON_SCHEMA_TO_GRAMMAR = _resolve_attr((
     ("cyllama.utils.json_schema_to_grammar", "json_schema_to_grammar"),
     ("cyllama.utils", "json_schema_to_grammar"),
     ("cyllama", "json_schema_to_grammar"),
-))
-_SPECULATIVE_CLS = _resolve_attr((
-    ("cyllama.llama.llama_cpp", "Speculative"),
-    ("cyllama", "Speculative"),
-))
-_SPECULATIVE_PARAMS_CLS = _resolve_attr((
-    ("cyllama.llama.llama_cpp", "SpeculativeParams"),
-    ("cyllama", "SpeculativeParams"),
 ))
 _NGRAM_CACHE_CLS = _resolve_attr((
     ("cyllama.llama.llama_cpp", "NgramCache"),
@@ -357,11 +349,11 @@ _MTMD_IMAGE_ANALYZER = _resolve_attr((
 # GenerationConfig actually accepts a ``grammar`` field AND whether the
 # json-schema helper is present -- the UI uses the former to decide
 # whether grammar-constrained chat is functional, and the latter to
-# enable "From JSON Schema" generation. ``speculative`` / ``ngram``
-# are end-to-end: both the helper class and the GC field have to exist
-# for the chat path to actually use them. Until cyllama threads these
-# through ``LLM.chat()``, the flags are False even when the classes
-# exist, which is correct -- the UI hides rows that wouldn't take effect.
+# enable "From JSON Schema" generation. ``ngram`` is end-to-end: both
+# the helper class and the GC field have to exist for the chat path to
+# actually use it. Until cyllama threads it through ``LLM.chat()``, the
+# flag is False even when the class exists, which is correct -- the UI
+# hides rows that wouldn't take effect.
 def _probe_pdf_backends() -> list[dict]:
     """Walk cyllama's PDF backend registry and return JSON-friendly info.
 
@@ -442,11 +434,6 @@ _DEVICES: list[dict] = _probe_devices()
 _FEATURE_FLAGS: dict[str, bool] = {
     "grammar": ("grammar" in _GC_ACCEPTED),
     "json_schema_to_grammar": _JSON_SCHEMA_TO_GRAMMAR is not None,
-    "speculative": (
-        _SPECULATIVE_CLS is not None
-        and _SPECULATIVE_PARAMS_CLS is not None
-        and "speculative" in _GC_ACCEPTED
-    ),
     "ngram": (
         _NGRAM_CACHE_CLS is not None
         and "ngram" in _GC_ACCEPTED
@@ -599,10 +586,6 @@ def _build_config(params: dict | None) -> GenerationConfig | None:
     # when the installed cyllama actually accepts the matching kwarg --
     # otherwise the wire field is silently dropped, which keeps the UI
     # forward-compatible without crashing on older builds.
-    spec = _coerce_speculative(params.get("speculative"))
-    if spec is not None and "speculative" in _GC_ACCEPTED:
-        kwargs["speculative"] = spec
-
     ngram = params.get("ngram")
     if ngram is not None and "ngram" in _GC_ACCEPTED:
         # Accept either a bool toggle or a dict of helper kwargs. The
@@ -612,32 +595,6 @@ def _build_config(params: dict | None) -> GenerationConfig | None:
         kwargs["ngram"] = bool(ngram) if isinstance(ngram, bool) else ngram
 
     return GenerationConfig(**kwargs) if kwargs else None
-
-
-def _coerce_speculative(v):
-    """Convert a renderer ``speculative`` dict into a ``SpeculativeParams``.
-
-    Body shape (renderer): ``{draft_model_path?, n_max?, n_min?,
-    p_min?}``. Returns the constructed params object, or a
-    dict (passed through unchanged) if the helper class isn't present in
-    this cyllama. Returns ``None`` if the input is empty / unusable.
-    """
-    if not v or not isinstance(v, dict):
-        return None
-    # Drop the draft-model field before constructing -- it isn't part of
-    # the params class. The chat path would consume it separately when
-    # cyllama wires speculative through ``LLM.chat()``.
-    fields = {k: v[k] for k in ("n_max", "n_min", "p_min") if k in v}
-    if _SPECULATIVE_PARAMS_CLS is None:
-        return fields or None
-    try:
-        kwargs = {}
-        if "n_max" in fields: kwargs["n_max"] = int(fields["n_max"])
-        if "n_min" in fields: kwargs["n_min"] = int(fields["n_min"])
-        if "p_min" in fields: kwargs["p_min"] = float(fields["p_min"])
-        return _SPECULATIVE_PARAMS_CLS(**kwargs) if kwargs else _SPECULATIVE_PARAMS_CLS()
-    except (TypeError, ValueError):
-        return None
 
 
 def _hw_signature(params: dict | None) -> tuple:
@@ -1093,8 +1050,8 @@ _INFO_CACHE: dict = {
     # key is not in this list. Probed once at module load.
     "supported_params": _SUPPORTED_PARAMS,
     # Phase 2 capability flags. Renderer hides UI rows whose backing
-    # cyllama API isn't present in this build. ``grammar`` /
-    # ``speculative`` / ``ngram`` reflect end-to-end usability; the
+    # cyllama API isn't present in this build. ``grammar`` / ``ngram``
+    # reflect end-to-end usability; the
     # ``json_schema_to_grammar`` flag is independent (the helper can
     # produce GBNF text even if chat can't apply it yet).
     "features": dict(_FEATURE_FLAGS),
@@ -5695,10 +5652,18 @@ async def server_start(req: Request):
         if cls is None:
             raise HTTPException(501, f"server kind not available: {kind}")
 
+        # EmbeddedServer.start() replaces the SIGINT/SIGTERM handlers and
+        # stop() never restores them, so uvicorn would ignore SIGTERM.
+        saved_handlers = {s: signal.getsignal(s) for s in (signal.SIGINT, signal.SIGTERM)}
         try:
             cfg = _SERVER_CONFIG_CLS(model_path=model_path, host=host, port=port, **extra)
             inst = cls(cfg)
-            ok = inst.start()
+            try:
+                ok = inst.start()
+            finally:
+                for s, h in saved_handlers.items():
+                    if signal.getsignal(s) is not h:
+                        signal.signal(s, h)
             # ``start()`` returns bool on EmbeddedServer; PythonServer
             # variants either return None or True. Treat any non-False
             # return as "started" but raise if it explicitly returned

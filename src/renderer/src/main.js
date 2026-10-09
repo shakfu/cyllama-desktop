@@ -1157,29 +1157,23 @@ const PARAM_DEFAULTS = {
   main_gpu:          0,
   split_mode:        1,
   tensor_split:      "",   // CSV; parsed to list[float] server-side
-  // Phase 2 advanced. Grammar is raw GBNF text; speculative + ngram
-  // are sent through ``params.speculative`` / ``params.ngram`` in
-  // ``getCurrentParams`` rather than as flat keys, but the source-of-
-  // truth values are kept here so the same persist / reset path covers
-  // them. Speculative is "off" until a draft model is picked.
+  // Phase 2 advanced. Grammar is raw GBNF text; ngram is sent as
+  // ``params.ngram`` in ``getCurrentParams`` rather than as a flat key,
+  // but its source-of-truth value is kept here so the same persist /
+  // reset path covers it.
   grammar:           "",
-  spec_draft_model:  "",
-  spec_n_max:        16,
-  spec_n_min:        0,
-  spec_p_min:        0.75,
   ngram_enabled:     false,
 };
 const PARAM_KEYS = Object.keys(PARAM_DEFAULTS);
 const PARAM_INT_KEYS = new Set([
   "top_k", "max_tokens", "seed", "mirostat",
   "n_gpu_layers", "n_ctx", "n_batch", "main_gpu", "split_mode",
-  "spec_n_max", "spec_n_min",
 ]);
 const PARAM_CSV_KEYS = new Set(["stop_sequences", "tensor_split"]);
 // Free-form text fields that bypass numeric coercion entirely (grammar
-// is multi-line GBNF; spec_draft_model is a path). Listed here so
-// ``getCurrentParams`` doesn't drop them via ``Number(raw)`` checks.
-const PARAM_TEXT_KEYS = new Set(["grammar", "spec_draft_model"]);
+// is multi-line GBNF). Listed here so ``getCurrentParams`` doesn't drop
+// them via ``Number(raw)`` checks.
+const PARAM_TEXT_KEYS = new Set(["grammar"]);
 // Boolean checkbox-backed fields. Persisted as "0"/"1" strings via
 // localStorage and round-tripped to bool at send time.
 const PARAM_BOOL_KEYS = new Set(["ngram_enabled"]);
@@ -1233,10 +1227,6 @@ function saveParams() {
 
 function getCurrentParams() {
   const out = {};
-  // Speculative is collected separately into a nested object since the
-  // sidecar accepts ``params.speculative = {n_max, n_min, p_min,
-  // draft_model_path}`` rather than flat keys.
-  const spec = {};
   for (const key of PARAM_KEYS) {
     const el = paramEl(key);
     if (!el) continue;
@@ -1257,24 +1247,13 @@ function getCurrentParams() {
     }
     if (PARAM_TEXT_KEYS.has(key)) {
       const trimmed = raw.trim();
-      if (!trimmed) continue;
-      if (key === "spec_draft_model") spec.draft_model_path = trimmed;
-      else out[key] = trimmed;
-      continue;
-    }
-    if (key.startsWith("spec_") && key !== "spec_draft_model") {
-      const n = Number(raw);
-      if (!Number.isFinite(n)) continue;
-      spec[key.slice(5)] = PARAM_INT_KEYS.has(key) ? Math.round(n) : n;
+      if (trimmed) out[key] = trimmed;
       continue;
     }
     const n = Number(raw);
     if (!Number.isFinite(n)) continue;
     out[key] = PARAM_INT_KEYS.has(key) ? Math.round(n) : n;
   }
-  // Only attach speculative if the user actually picked a draft model;
-  // sliders alone are inert without one.
-  if (spec.draft_model_path) out.speculative = spec;
   return out;
 }
 
@@ -1411,7 +1390,7 @@ async function applySupportedParams() {
     ? new Set(remoteParams)
     : (info && Array.isArray(info.supported_params) ? new Set(info.supported_params) : null);
   const features = (info && info.features) || {};
-  // Grammar, speculative decoding, n-gram cache and the multi-GPU split are
+  // Grammar, n-gram cache and the multi-GPU split are
   // all properties of a local llama.cpp context, so the advanced section
   // goes away with a provider active rather than offering controls that
   // would be dropped in transit. Scoped to those rows on purpose: the
@@ -1423,7 +1402,7 @@ async function applySupportedParams() {
       // Advanced-section keys are gated by ``data-feature`` instead of
       // the supported_params list -- their wire shape is nested or
       // boolean and doesn't appear in supported_params.
-      if (key.startsWith("spec_") || key === "ngram_enabled" || key === "grammar") continue;
+      if (key === "ngram_enabled" || key === "grammar") continue;
       const el = paramEl(key);
       if (!el) continue;
       const row = el.closest(".param");
@@ -1438,7 +1417,6 @@ async function applySupportedParams() {
   // still generate GBNF for copy/paste use.
   const featRowHidden = {
     grammar: localOnly || !(features.grammar || features.json_schema_to_grammar),
-    speculative: localOnly || !features.speculative,
     ngram: localOnly || !features.ngram,
   };
   for (const row of document.querySelectorAll("[data-feature]")) {
@@ -1461,7 +1439,6 @@ async function applySupportedParams() {
   }
 
   applyMirostatVisibility();
-  applySpeculativeVisibility();
   applyMultiGpuVisibility(info);
   transcribePane.applyVisibility(features);
   imagePane.applyVisibility(features);
@@ -1541,20 +1518,6 @@ function applyMultiGpuVisibility(info) {
     } else {
       delete row.dataset.multiGpuShown;
     }
-  }
-}
-
-// Sub-rows that only matter when a draft model is selected (n_max,
-// n_min, p_min) collapse otherwise. The toggle uses the same
-// ``hidden`` mechanism as Mirostat tau/eta.
-function applySpeculativeVisibility() {
-  const sel = paramEl("spec_draft_model");
-  const off = !sel || !sel.value;
-  for (const e of document.querySelectorAll("[data-spec-only]")) {
-    // Keep hidden if the speculative feature row itself is hidden --
-    // the parent's data-feature row is the source of truth.
-    const featHidden = e.hidden && !e.dataset.specOnly;
-    e.hidden = off || featHidden;
   }
 }
 
@@ -1694,7 +1657,6 @@ function bindParams() {
       if (out) out.textContent = formatParamValue(key, v);
       saveParams();
       if (key === "mirostat") applyMirostatVisibility();
-      if (key === "spec_draft_model") applySpeculativeVisibility();
       // Doc chips' context-fit warning depends on the active n_ctx
       // override; re-render so the chip styling tracks the input.
       if (key === "n_ctx") renderPendingAttachments();
@@ -1706,7 +1668,6 @@ function bindParams() {
   if (resetBtn) resetBtn.addEventListener("click", () => {
     resetParams();
     applyMirostatVisibility();
-    applySpeculativeVisibility();
   });
   applyMirostatVisibility();
   const estBtn = document.getElementById("estimateLayersBtn");
@@ -1714,37 +1675,6 @@ function bindParams() {
 
   const fromSchemaBtn = document.getElementById("grammarFromSchemaBtn");
   if (fromSchemaBtn) fromSchemaBtn.addEventListener("click", grammarFromSchema);
-
-  // Populate the draft-model select once at mount, and again whenever
-  // the Models tab signals a change (drag-drop import, HF download).
-  refreshDraftModels();
-  window.addEventListener("models:cache-changed", refreshDraftModels);
-}
-
-async function refreshDraftModels() {
-  const sel = paramEl("spec_draft_model");
-  if (!sel) return;
-  const saved = sel.value;
-  let models = [];
-  try {
-    // Speculative draft model: must be a chat model. Whisper / SD /
-    // mmproj projectors won't satisfy the speculative-decoding contract.
-    const r = await cyllamaModels.listModels({ kinds: ["chat"] });
-    models = (r && r.models) || [];
-  } catch { /* leave the select with just "off" */ }
-  // Preserve the "off" option, replace the rest.
-  while (sel.options.length > 1) sel.remove(1);
-  for (const m of models) {
-    const o = document.createElement("option");
-    o.value = m.path;
-    o.textContent = m.name;
-    sel.appendChild(o);
-  }
-  // Restore prior selection if still valid.
-  if (saved && Array.from(sel.options).some((o) => o.value === saved)) {
-    sel.value = saved;
-  }
-  applySpeculativeVisibility();
 }
 
 // Generate a GBNF grammar from a JSON schema the user pastes in. Drops

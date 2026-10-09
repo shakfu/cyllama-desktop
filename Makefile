@@ -212,21 +212,30 @@ TEST_BASE_PY := $(shell test -x "$(PY_BIN)" && echo "$(PY_BIN)" || command -v py
 # the base env's pip is on the path instead, and running it under the venv
 # interpreter installs into the venv. Packages the base already has (fastapi,
 # uvicorn) resolve as satisfied and are not copied.
+# A host python3 may have no pip (Debian/Ubuntu without python3-pip);
+# uv installs into the venv instead.
 TESTENV_DIR := build/testenv
 TEST_PY     := $(TESTENV_DIR)/bin/python3
+TEST_REQS   := pytest "fastapi>=0.115" "uvicorn[standard]>=0.32" "httpx>=0.27" "python-multipart>=0.0.9" \
+               "openai>=1.50" "anthropic>=0.40"
 
 test-deps:
 	@if [ -z "$(TEST_BASE_PY)" ]; then \
 	  echo "no python3 found"; exit 1; \
 	fi
-	@if ! $(TEST_PY) -m pip --version >/dev/null 2>&1; then \
+	@if [ ! -x "$(TEST_PY)" ]; then \
 	  echo "Creating test venv at $(TESTENV_DIR) from $(TEST_BASE_PY)"; \
-	  rm -rf "$(TESTENV_DIR)"; \
 	  "$(TEST_BASE_PY)" -m venv --without-pip --system-site-packages "$(TESTENV_DIR)"; \
 	fi
-	@$(TEST_PY) -c "import pytest, fastapi, httpx, multipart" 2>/dev/null || \
-	  $(TEST_PY) -m pip install --quiet pytest "fastapi>=0.115" "httpx>=0.27" \
-	    "python-multipart>=0.0.9"
+	@$(TEST_PY) -c "import pytest, fastapi, uvicorn, httpx, multipart, openai, anthropic" 2>/dev/null || { \
+	  if $(TEST_PY) -m pip --version >/dev/null 2>&1; then \
+	    $(TEST_PY) -m pip install --quiet $(TEST_REQS); \
+	  elif command -v uv >/dev/null 2>&1; then \
+	    uv pip install --quiet --python "$(TEST_PY)" $(TEST_REQS); \
+	  else \
+	    echo "$(TEST_BASE_PY) has no pip and uv is not installed; install either"; exit 1; \
+	  fi; \
+	}
 
 test: test-deps
 	$(TEST_PY) -m pytest tests/ --ignore=tests/e2e -v

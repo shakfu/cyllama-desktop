@@ -299,30 +299,6 @@
               </div>
             </details>
 
-            <details class="rt-section rt-collapsible" data-feature="speculative">
-              <summary class="rt-section-head"><h3>Speculative Decoding</h3></summary>
-              <div class="param">
-                <label for="p-spec_draft_model"><span>Draft model</span></label>
-                <select id="p-spec_draft_model" class="dp-select">
-                  <option value="">— off —</option>
-                </select>
-                <div class="param-hint">A small fast model proposes tokens; the main model verifies.</div>
-              </div>
-              <div class="param" data-spec-only>
-                <label for="p-spec_n_max"><span>Draft n_max</span><output id="p-spec_n_max-out">16</output></label>
-                <input id="p-spec_n_max" type="range" min="1" max="64" step="1" value="16" />
-                <div class="param-hint">Max tokens drafted per step.</div>
-              </div>
-              <div class="param" data-spec-only>
-                <label for="p-spec_n_min"><span>Draft n_min</span><output id="p-spec_n_min-out">0</output></label>
-                <input id="p-spec_n_min" type="range" min="0" max="32" step="1" value="0" />
-              </div>
-              <div class="param" data-spec-only>
-                <label for="p-spec_p_min"><span>Min accept prob</span><output id="p-spec_p_min-out">0.75</output></label>
-                <input id="p-spec_p_min" type="range" min="0" max="1" step="0.01" value="0.75" />
-              </div>
-            </details>
-
             <details class="rt-section rt-collapsible" data-feature="ngram">
               <summary class="rt-section-head"><h3>N-gram Cache</h3></summary>
               <div class="param">

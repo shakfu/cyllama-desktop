@@ -160,7 +160,7 @@ test("Parameters right-tab renders LMStudio-style sections", async () => {
   // the user expands.
   await expect(window.locator("#p-system_prompt")).toBeHidden();
   await expect(window.locator("#p-temperature")).toBeHidden();
-  await expect(window.locator("#p-spec_draft_model")).toBeHidden();
+  await expect(window.locator("#p-grammar")).toBeHidden();
   // The heads themselves are the structural content, and expanding
   // one reveals its fields.
   const sampling = window.locator(".rt-section-head", { hasText: "Sampling" });

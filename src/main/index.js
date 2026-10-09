@@ -446,9 +446,12 @@ async function startSidecar() {
     process.stderr.write(`[sidecar:err] ${b}`);
     pushLog("err", b);
   });
-  sidecarProc.on("exit", (code, sig) => {
+  // A restarted sidecar's predecessor exits after the replacement is
+  // assigned; only clear the slot if it still holds this process.
+  const proc = sidecarProc;
+  proc.on("exit", (code, sig) => {
     console.log(`[sidecar] exited code=${code} sig=${sig}`);
-    sidecarProc = null;
+    if (sidecarProc === proc) sidecarProc = null;
   });
 
   // Wait for the sidecar to become reachable.
@@ -475,14 +478,16 @@ async function waitForSidecar(port, token, timeoutMs) {
 }
 
 function stopSidecar() {
-  if (!sidecarProc) return;
+  const proc = sidecarProc;
+  if (!proc) return;
+  sidecarProc = null;
   try {
-    sidecarProc.kill("SIGTERM");
+    proc.kill("SIGTERM");
   } catch (_) {}
   // Hard-kill fallback after 3s
   setTimeout(() => {
-    if (sidecarProc) {
-      try { sidecarProc.kill("SIGKILL"); } catch (_) {}
+    if (proc.exitCode === null && proc.signalCode === null) {
+      try { proc.kill("SIGKILL"); } catch (_) {}
     }
   }, 3000);
 }
@@ -858,10 +863,7 @@ ipcMain.handle("sidecar:restart", async () => {
   // The renderer calls this after editing settings that change
   // sidecar boot env (only ``models_extra`` today). We tear down the
   // current sidecar and bring up a fresh one against the new env.
-  if (sidecarProc) {
-    try { sidecarProc.kill("SIGTERM"); } catch (_) {}
-    sidecarProc = null;
-  }
+  stopSidecar();
   sidecarInfo = null;
   await startSidecar();
   return sidecarInfo;

@@ -7,8 +7,8 @@
 #
 # Both jobs run on ubuntu-latest because Electron under xvfb is the
 # cheapest path to a headless e2e run; the bundled python-build-
-# standalone env isn't needed (the test sidecar launcher only needs
-# fastapi + uvicorn + httpx, installed via pip).
+# standalone env isn't needed (the test sidecar launcher needs the
+# sidecar's own deps, installed via pip).
 
 name: ci
 
@@ -37,7 +37,7 @@ jobs:
           cache: pip
 
       - name: Install Python test deps
-        run: pip install --quiet pytest "fastapi>=0.115" "uvicorn[standard]>=0.32" "httpx>=0.27" "python-multipart>=0.0.9"
+        run: pip install --quiet pytest "fastapi>=0.115" "uvicorn[standard]>=0.32" "httpx>=0.27" "python-multipart>=0.0.9" "openai>=1.50" "anthropic>=0.40"
 
       - name: Run pytest
         run: pytest tests/ --ignore=tests/e2e -v
@@ -66,7 +66,7 @@ jobs:
         # e2e env too. uvicorn[standard] pulls in the things asyncio
         # servers expect; httpx is used by the sidecar's HF download
         # tool import path.
-        run: pip install --quiet pytest "fastapi>=0.115" "uvicorn[standard]>=0.32" "httpx>=0.27" "python-multipart>=0.0.9"
+        run: pip install --quiet pytest "fastapi>=0.115" "uvicorn[standard]>=0.32" "httpx>=0.27" "python-multipart>=0.0.9" "openai>=1.50" "anthropic>=0.40"
 
       - name: Install Node deps
         # ``--ignore-scripts`` skips the postinstall vendor copy for the

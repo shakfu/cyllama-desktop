@@ -8,9 +8,19 @@ All notable changes to cyllama-desktop are documented here. The format is based 
 
 - **Bundled cyllama bumped from 0.5.0 to 0.6.0.** Local chat and RAG embedding now run on physical cores; every high-level LLM context previously ran on llama.cpp's default of 4 threads. The other 0.5.1-0.6.0 changes are in `EmbeddedServer`'s HTTP layer and in api the sidecar never calls. Verified against a real install: chat streaming, `/tokenize`, `/models/inspect`, `/hardware/estimate-layers` and `EmbeddedServer` start/stop.
 
+- **Bundled cyllama bumped from 0.6.0 to 0.6.1.** Image chat on non-causal vision models (gemma3, most gemma4) now decodes each image in one batch; 0.6.0 split it into 32-token pieces that could not attend to each other. An `n_batch` smaller than the image's token count now fails the request with `ValueError` instead of degrading the answer. Both are from the release notes; neither is tested here. The new session and state file format does not affect the sidecar, which uses neither. Verified on Linux x86_64 against the same endpoints as the 0.6.0 bump.
+
 ### Removed
 
-- **The speculative "Split prob" control (`p_split`).** cyllama 0.5.1 removed `SpeculativeParams.p_split`, which had no effect upstream. `_coerce_speculative` caught the resulting `TypeError` and returned `None`, so speculative decoding would have been silently dropped once cyllama enables it. It is not enabled yet: `GenerationConfig` still rejects `speculative`.
+- **The Speculative Decoding section and the sidecar's `speculative` param.** cyllama 0.6.1 deprecated `Speculative` and `SpeculativeParams`; the next release removes them. Speculative support returns once llama.cpp moves libcommon's implementation into its stable api, which will likely take different settings. The section was never shown, because no bundled `GenerationConfig` accepted `speculative`. `/info.features` no longer has a `speculative` key.
+
+### Fixed
+
+- **The sidecar ignored SIGTERM once the embedded server had been started.** `EmbeddedServer.start()` installs its own SIGINT/SIGTERM handlers through `signal.signal`, and `stop()` never restores them. Quitting then waited 3 s for the SIGKILL fallback. The sidecar now restores the previous handlers after `start()`. The bug is in cyllama (0.6.0 and 0.6.1).
+
+- **Restarting the sidecar left the old process running.** Restart sent SIGTERM with no SIGKILL fallback. When the old process exited, its exit handler also cleared the slot that already held the new sidecar, so quitting the app no longer stopped the new one. Restart now uses the same stop path as quit, and each exit handler clears only its own process.
+
+- **`make test` and `make e2e` failed on a host with no bundled env.** The test venv then falls back to the system `python3`, which on Debian/Ubuntu may have no `pip`. `test-deps` now installs with `uv` when `pip` is missing. It also installs `uvicorn`, which the sidecar imports, and the `openai` and `anthropic` SDKs. Without the SDKs, `/info.remote.sdks` reports them missing and the model picker hides compat endpoints. The CI jobs install the same SDKs.
 
 ## [0.4.1]
 
